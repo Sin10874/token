@@ -1,0 +1,255 @@
+import { useEffect, useState } from 'react'
+import { useParams, Link, useNavigate } from 'react-router-dom'
+import {
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
+} from 'recharts'
+import { api, ChannelRow, ChannelDetail } from '../lib/api'
+import { fmtTokens, fmtCost, fmtRelative, modelColor, shortId } from '../lib/format'
+
+const TOOLTIP_STYLE = {
+  background: 'var(--bg-elevated)',
+  border: '1px solid var(--border-default)',
+  borderRadius: '2px',
+  fontSize: '11px',
+  color: 'var(--text-primary)',
+}
+
+export function ChannelsList() {
+  const [channels, setChannels] = useState<ChannelRow[]>([])
+  const [loading, setLoading] = useState(true)
+  const navigate = useNavigate()
+
+  useEffect(() => {
+    api.channels().then(setChannels).finally(() => setLoading(false))
+  }, [])
+
+  if (loading) return <PageShell title="CHANNELS"><Spinner /></PageShell>
+
+  const maxTokens = Math.max(...channels.map((c) => c.totalTokens), 1)
+
+  return (
+    <PageShell title="CHANNELS" sub={`${channels.length} channels`}>
+      <div className="space-y-2">
+        {channels.map((ch) => (
+          <div
+            key={ch.channel}
+            className="card p-4 cursor-pointer transition-colors hover:border-amber-dim"
+            onClick={() => navigate(`/channels/${encodeURIComponent(ch.channel)}`)}
+            style={{ borderColor: 'var(--border-default)' }}
+          >
+            <div className="flex items-center gap-4">
+              {/* Channel name + bar */}
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full" style={{ background: modelColor(ch.channel) }} />
+                    <span className="font-medium text-sm" style={{ color: 'var(--text-primary)' }}>
+                      {ch.channel}
+                    </span>
+                  </div>
+                  <span className="num text-xs" style={{ color: 'var(--amber)' }}>
+                    {fmtTokens(ch.totalTokens)}
+                  </span>
+                </div>
+                <div className="h-1.5 rounded-full" style={{ background: 'var(--border-default)' }}>
+                  <div
+                    className="h-1.5 rounded-full"
+                    style={{
+                      width: `${(ch.totalTokens / maxTokens) * 100}%`,
+                      background: modelColor(ch.channel),
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* Stats */}
+              <div className="flex items-center gap-6 shrink-0">
+                <Stat label="Sessions" value={String(ch.sessionCount)} />
+                <Stat label="Calls" value={ch.callCount.toLocaleString()} />
+                <Stat label="Models" value={String(ch.modelCount)} />
+                <Stat label="Est. Cost" value={fmtCost(ch.totalCost)} approx />
+                <Stat label="Last" value={fmtRelative(ch.lastSeen)} />
+              </div>
+            </div>
+          </div>
+        ))}
+        {channels.length === 0 && (
+          <div className="card p-8 text-center" style={{ color: 'var(--text-muted)', fontSize: '12px' }}>
+            No channel data. Run Sync from the sidebar.
+          </div>
+        )}
+      </div>
+    </PageShell>
+  )
+}
+
+export function ChannelDetailPage() {
+  const { channel } = useParams<{ channel: string }>()
+  const [detail, setDetail] = useState<ChannelDetail | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    if (!channel) return
+    api.channelDetail(decodeURIComponent(channel)).then(setDetail).finally(() => setLoading(false))
+  }, [channel])
+
+  if (loading) return <PageShell title="CHANNEL" back="/channels"><Spinner /></PageShell>
+  if (!detail || !detail.summary) return <PageShell title="CHANNEL" back="/channels"><div style={{ color: 'var(--text-muted)' }}>Not found</div></PageShell>
+
+  const { summary, dailyTrend, modelMix, topSessions } = detail
+  const decodedChannel = decodeURIComponent(channel || '')
+
+  return (
+    <PageShell title={decodedChannel} sub="channel detail" back="/channels">
+      {/* Summary */}
+      <div className="grid grid-cols-4 gap-3 mb-4">
+        {[
+          { label: 'Total Tokens', value: fmtTokens(summary.totalTokens), color: 'var(--amber)' },
+          { label: 'Est. Cost', value: fmtCost(summary.totalCost), color: 'var(--teal)', approx: true },
+          { label: 'Sessions', value: String(summary.sessionCount), color: 'var(--amber)' },
+          { label: 'Calls', value: summary.callCount.toLocaleString(), color: 'var(--teal)' },
+        ].map((c) => (
+          <div key={c.label} className="card p-4">
+            <div style={{ color: 'var(--text-muted)', fontSize: '10px', letterSpacing: '0.08em', textTransform: 'uppercase' }}>{c.label}</div>
+            <div className="metric-num text-2xl mt-1" style={{ color: c.color }}>
+              {c.value}
+              {c.approx && <span style={{ color: 'var(--text-muted)', fontSize: '9px', marginLeft: 4 }}>~</span>}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-3 gap-3">
+        {/* Daily trend */}
+        <div className="card p-4 col-span-2">
+          <div style={{ color: 'var(--text-secondary)', fontSize: '11px', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 8 }}>
+            Daily Activity
+          </div>
+          {dailyTrend.length > 0 ? (
+            <ResponsiveContainer width="100%" height={140}>
+              <BarChart data={dailyTrend} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
+                <XAxis dataKey="day" tick={{ fill: 'var(--text-muted)', fontSize: 9 }} axisLine={false} tickLine={false} tickFormatter={(v: string) => v.slice(5)} />
+                <YAxis tick={{ fill: 'var(--text-muted)', fontSize: 9 }} axisLine={false} tickLine={false} tickFormatter={(v: number) => fmtTokens(v)} />
+                <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v: number) => [fmtTokens(v), 'Tokens']} />
+                <Bar dataKey="tokens" fill={modelColor(decodedChannel)} opacity={0.8} radius={[1, 1, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <div style={{ height: 140, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>No trend data</span>
+            </div>
+          )}
+        </div>
+
+        {/* Model mix */}
+        <div className="card p-4">
+          <div style={{ color: 'var(--text-secondary)', fontSize: '11px', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 8 }}>
+            Model Mix
+          </div>
+          <div className="space-y-2 mt-2">
+            {modelMix.map((m) => {
+              const maxCalls = Math.max(...modelMix.map((x) => x.calls), 1)
+              return (
+                <div key={m.model}>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-2xs truncate" style={{ color: 'var(--text-secondary)', maxWidth: 120 }}>{m.model}</span>
+                    <span className="num text-2xs" style={{ color: 'var(--text-muted)' }}>{m.calls}</span>
+                  </div>
+                  <div className="h-1 rounded-full" style={{ background: 'var(--border-default)' }}>
+                    <div
+                      className="h-1 rounded-full"
+                      style={{ width: `${(m.calls / maxCalls) * 100}%`, background: modelColor(m.model) }}
+                    />
+                  </div>
+                </div>
+              )
+            })}
+            {modelMix.length === 0 && <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>No data</span>}
+          </div>
+        </div>
+      </div>
+
+      {/* Top sessions */}
+      <div className="card mt-3">
+        <div className="px-4 pt-4 pb-2" style={{ color: 'var(--text-secondary)', fontSize: '11px', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+          Top Sessions
+        </div>
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Session ID</th>
+              <th>Model</th>
+              <th style={{ textAlign: 'right' }}>Calls</th>
+              <th style={{ textAlign: 'right' }}>Tokens</th>
+              <th style={{ textAlign: 'right' }}>Est. Cost</th>
+            </tr>
+          </thead>
+          <tbody>
+            {topSessions.map((s) => (
+              <tr key={s.session_id}>
+                <td>
+                  <Link
+                    to={`/sessions/${s.session_id}`}
+                    className="num hover:underline"
+                    style={{ color: 'var(--teal)', fontSize: '11px' }}
+                  >
+                    {shortId(s.session_id)}
+                  </Link>
+                </td>
+                <td>
+                  <span className="text-2xs" style={{ color: 'var(--text-secondary)' }}>
+                    {s.model || '—'}
+                  </span>
+                </td>
+                <td style={{ textAlign: 'right' }}>
+                  <span className="num text-xs" style={{ color: 'var(--text-secondary)' }}>{s.calls}</span>
+                </td>
+                <td style={{ textAlign: 'right' }}>
+                  <span className="num text-xs" style={{ color: 'var(--amber)' }}>{fmtTokens(s.tokens)}</span>
+                </td>
+                <td style={{ textAlign: 'right' }}>
+                  <span className="num text-xs" style={{ color: 'var(--text-secondary)' }}>
+                    {fmtCost(s.cost)} <span style={{ color: 'var(--text-muted)', fontSize: '9px' }}>~</span>
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {topSessions.length === 0 && <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)', fontSize: '12px' }}>No sessions</div>}
+      </div>
+    </PageShell>
+  )
+}
+
+function Stat({ label, value, approx }: { label: string; value: string; approx?: boolean }) {
+  return (
+    <div className="text-center">
+      <div style={{ color: 'var(--text-muted)', fontSize: '9px', letterSpacing: '0.06em', textTransform: 'uppercase' }}>{label}</div>
+      <div className="num text-xs mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+        {value}{approx && <span style={{ color: 'var(--text-muted)', fontSize: '9px' }}> ~</span>}
+      </div>
+    </div>
+  )
+}
+
+function PageShell({ title, sub, back, children }: { title: string; sub?: string; back?: string; children: React.ReactNode }) {
+  return (
+    <div className="p-6 space-y-4 fade-in">
+      <div className="flex items-baseline gap-3">
+        {back && <Link to={back} style={{ color: 'var(--text-muted)', fontSize: '11px' }}>← back</Link>}
+        <div>
+          <h1 className="text-lg font-semibold" style={{ fontFamily: 'Barlow Condensed', color: 'var(--text-primary)', letterSpacing: '0.04em' }}>
+            {title.toUpperCase()}
+          </h1>
+          {sub && <p style={{ color: 'var(--text-muted)', fontSize: '11px' }}>{sub}</p>}
+        </div>
+      </div>
+      {children}
+    </div>
+  )
+}
+
+function Spinner() {
+  return <div style={{ color: 'var(--text-muted)', fontSize: '12px' }}>Loading…</div>
+}

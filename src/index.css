@@ -1,0 +1,193 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg-base: #060709;
+  --bg-surface: #0d1018;
+  --bg-elevated: #141720;
+  --bg-hover: #191d2a;
+
+  --border-subtle: #181c27;
+  --border-default: #1f2435;
+  --border-bright: #2a3048;
+
+  --text-primary: #e8ebf0;
+  --text-secondary: #7a8399;
+  --text-muted: #3d4459;
+
+  --amber: #f5a623;
+  --amber-bright: #ffc042;
+  --amber-dim: #8a5c12;
+  --amber-bg: #0f0a03;
+
+  --teal: #38bdf8;
+  --teal-bright: #7dd3fc;
+  --teal-dim: #164e63;
+  --teal-bg: #030d14;
+
+  --green: #4ade80;
+  --green-dim: #14532d;
+
+  --rose: #f87171;
+  --rose-dim: #7f1d1d;
+
+  --violet: #a78bfa;
+  --violet-dim: #4c1d95;
+
+  --orange: #fb923c;
+  --orange-dim: #7c2d12;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--bg-base);
+  color: var(--text-primary);
+  font-family: 'Barlow', 'DM Sans', system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Monospace numbers */
+.num {
+  font-family: 'DM Mono', 'Cascadia Code', monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+/* Display metric numbers */
+.metric-num {
+  font-family: 'Barlow Condensed', 'Barlow', sans-serif;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+/* Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-base);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-bright);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* Card */
+.card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 3px;
+}
+
+.card-elevated {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-bright);
+  border-radius: 3px;
+}
+
+/* Dot grid background */
+.dot-grid {
+  background-image: radial-gradient(circle, var(--border-subtle) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+/* Glow effects */
+.glow-amber {
+  box-shadow: 0 0 12px rgba(245, 166, 35, 0.12);
+}
+.glow-teal {
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.12);
+}
+
+/* Status pulse */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.pulse {
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+/* Table styles */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.data-table th {
+  text-align: left;
+  padding: 6px 12px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-default);
+}
+.data-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  vertical-align: middle;
+}
+.data-table tbody tr:hover td {
+  background: var(--bg-elevated);
+}
+.data-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* Chart tooltip */
+.recharts-tooltip-wrapper {
+  outline: none !important;
+}
+
+/* Scanline overlay (subtle) */
+.scanlines::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 3px,
+    rgba(0, 0, 0, 0.04) 3px,
+    rgba(0, 0, 0, 0.04) 4px
+  );
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Animations */
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.fade-in {
+  animation: fade-in 0.2s ease-out forwards;
+}
+
+@keyframes count-up {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+.count-up {
+  animation: count-up 0.3s ease-out forwards;
+}

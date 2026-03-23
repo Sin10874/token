@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   XAxis, YAxis, Tooltip, ResponsiveContainer,
-  PieChart, Pie, Cell, AreaChart, Area, Line, ComposedChart
+  PieChart, Pie, Cell, AreaChart, Area, Line, ComposedChart,
+  BarChart, Bar
 } from 'recharts'
 import { api, SummaryData, DailyRow } from '../lib/api'
 import MetricCard from '../components/MetricCard'
@@ -198,58 +199,89 @@ export default function Dashboard() {
             </div>
           </div>
           {daily.length > 0 ? (
-            <ResponsiveContainer width="100%" height={140}>
-              <ComposedChart data={daily} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="tokenGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="var(--amber)" stopOpacity={0.25} />
-                    <stop offset="100%" stopColor="var(--amber)" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <XAxis
-                  dataKey="day"
-                  tick={{ fill: 'var(--text-muted)', fontSize: 9 }}
-                  axisLine={false}
-                  tickLine={false}
-                  tickFormatter={(v: string) => period === '1d' ? v : v.slice(5)}
-                />
-                <YAxis
-                  yAxisId="tokens"
-                  tick={{ fill: 'var(--text-muted)', fontSize: 9 }}
-                  axisLine={false}
-                  tickLine={false}
-                  tickFormatter={(v: number) => fmtTokens(v)}
-                />
-                <YAxis
-                  yAxisId="cost"
-                  orientation="right"
-                  tick={{ fill: 'var(--text-muted)', fontSize: 9 }}
-                  axisLine={false}
-                  tickLine={false}
-                  tickFormatter={(v: number) => `$${v.toFixed(1)}`}
-                />
-                <Tooltip content={<DualTooltip />} />
-                <Area
-                  yAxisId="tokens"
-                  type="monotone"
-                  dataKey="tokens"
-                  name="Token"
-                  stroke="var(--amber)"
-                  strokeWidth={1.5}
-                  fill="url(#tokenGrad)"
-                  dot={false}
-                />
-                <Line
-                  yAxisId="cost"
-                  type="monotone"
-                  dataKey="cost"
-                  name="成本"
-                  stroke="var(--teal)"
-                  strokeWidth={1.5}
-                  dot={false}
-                />
-              </ComposedChart>
-            </ResponsiveContainer>
+            period === '1d' ? (
+              <ResponsiveContainer width="100%" height={140}>
+                <BarChart data={daily} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
+                  <XAxis
+                    dataKey="day"
+                    tick={{ fill: 'var(--text-muted)', fontSize: 9 }}
+                    axisLine={false}
+                    tickLine={false}
+                  />
+                  <YAxis
+                    tick={{ fill: 'var(--text-muted)', fontSize: 9 }}
+                    axisLine={false}
+                    tickLine={false}
+                    tickFormatter={(v: number) => fmtTokens(v)}
+                  />
+                  <Tooltip
+                    content={({ active, payload, label }) => {
+                      if (!active || !payload?.length) return null
+                      return (
+                        <div style={CUSTOM_TOOLTIP_STYLE}>
+                          <div style={{ color: 'var(--text-muted)', fontSize: 10 }}>{label}</div>
+                          <div className="num" style={{ color: 'var(--amber)' }}>{fmtTokens(payload[0].value as number)}</div>
+                        </div>
+                      )
+                    }}
+                  />
+                  <Bar dataKey="tokens" fill="var(--amber)" radius={[2, 2, 0, 0]} maxBarSize={24} />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <ResponsiveContainer width="100%" height={140}>
+                <ComposedChart data={daily} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="tokenGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="var(--amber)" stopOpacity={0.25} />
+                      <stop offset="100%" stopColor="var(--amber)" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <XAxis
+                    dataKey="day"
+                    tick={{ fill: 'var(--text-muted)', fontSize: 9 }}
+                    axisLine={false}
+                    tickLine={false}
+                    tickFormatter={(v: string) => v.slice(5)}
+                  />
+                  <YAxis
+                    yAxisId="tokens"
+                    tick={{ fill: 'var(--text-muted)', fontSize: 9 }}
+                    axisLine={false}
+                    tickLine={false}
+                    tickFormatter={(v: number) => fmtTokens(v)}
+                  />
+                  <YAxis
+                    yAxisId="cost"
+                    orientation="right"
+                    tick={{ fill: 'var(--text-muted)', fontSize: 9 }}
+                    axisLine={false}
+                    tickLine={false}
+                    tickFormatter={(v: number) => `$${v.toFixed(1)}`}
+                  />
+                  <Tooltip content={<DualTooltip />} />
+                  <Area
+                    yAxisId="tokens"
+                    type="monotone"
+                    dataKey="tokens"
+                    name="Token"
+                    stroke="var(--amber)"
+                    strokeWidth={1.5}
+                    fill="url(#tokenGrad)"
+                    dot={false}
+                  />
+                  <Line
+                    yAxisId="cost"
+                    type="monotone"
+                    dataKey="cost"
+                    name="成本"
+                    stroke="var(--teal)"
+                    strokeWidth={1.5}
+                    dot={false}
+                  />
+                </ComposedChart>
+              </ResponsiveContainer>
+            )
           ) : (
             <EmptyChart />
           )}

@@ -8,9 +8,11 @@ import { runIngestion } from './ingestion/index.js'
 
 const app = express()
 const PORT = parseInt(process.env.PORT || '3001', 10)
+const FRONTEND_PORT = parseInt(process.env.FRONTEND_PORT || '4173', 10)
+const FRONTEND_DEV_URL = `http://127.0.0.1:${FRONTEND_PORT}`
 const IS_PROD = process.env.NODE_ENV === 'production'
 
-app.use(cors({ origin: ['http://localhost:5173', 'http://127.0.0.1:5173'] }))
+app.use(cors({ origin: [FRONTEND_DEV_URL, `http://localhost:${FRONTEND_PORT}`] }))
 app.use(express.json())
 
 // API routes
@@ -29,8 +31,10 @@ if (IS_PROD) {
 
 app.listen(PORT, '127.0.0.1', async () => {
   console.log(`\n  ClawMeter API  →  http://127.0.0.1:${PORT}`)
-  if (!IS_PROD) {
-    console.log(`  Frontend dev   →  http://localhost:5173`)
+  if (IS_PROD) {
+    console.log(`  Frontend       →  http://127.0.0.1:${PORT}`)
+  } else {
+    console.log(`  Frontend dev   →  ${FRONTEND_DEV_URL}`)
   }
   console.log(`  Running initial ingestion...`)
   try {

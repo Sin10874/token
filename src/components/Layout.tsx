@@ -1,14 +1,41 @@
-import { NavLink, useNavigate } from 'react-router-dom'
-import { LayoutDashboard, Cpu, Radio, MessageSquare, Settings, RefreshCw, Activity } from 'lucide-react'
+import { NavLink, useLocation, useNavigate } from 'react-router-dom'
+import { LayoutDashboard, Cpu, Radio, MessageSquare, Settings, RefreshCw, Activity, Terminal, ChevronDown, ChevronRight, type LucideIcon } from 'lucide-react'
 import { useState } from 'react'
 import { api } from '../lib/api'
 
-const NAV = [
-  { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
-  { to: '/models', icon: Cpu, label: 'Models' },
-  { to: '/channels', icon: Radio, label: 'Channels' },
-  { to: '/sessions', icon: MessageSquare, label: 'Sessions' },
-  { to: '/settings', icon: Settings, label: 'Settings' },
+interface NavItem {
+  to: string
+  icon: LucideIcon
+  label: string
+}
+
+interface NavGroup {
+  label: string
+  icon: LucideIcon
+  children: NavItem[]
+  matchPrefixes: string[]
+}
+
+type NavEntry = NavItem | NavGroup
+
+function isGroup(entry: NavEntry): entry is NavGroup {
+  return 'children' in entry
+}
+
+const NAV: NavEntry[] = [
+  { to: '/', icon: LayoutDashboard, label: '仪表盘' },
+  { to: '/claude-code', icon: Terminal, label: 'Claude Code' },
+  {
+    label: 'OpenClaw',
+    icon: Activity,
+    matchPrefixes: ['/channels', '/sessions'],
+    children: [
+      { to: '/channels', icon: Radio, label: '渠道' },
+      { to: '/sessions', icon: MessageSquare, label: '会话' },
+    ],
+  },
+  { to: '/models', icon: Cpu, label: '模型' },
+  { to: '/settings', icon: Settings, label: '设置' },
 ]
 
 interface LayoutProps {
@@ -19,13 +46,18 @@ export default function Layout({ children }: LayoutProps) {
   const [syncing, setSyncing] = useState(false)
   const [lastSync, setLastSync] = useState<string | null>(null)
   const navigate = useNavigate()
+  const location = useLocation()
+
+  // Auto-expand OpenClaw group if current path matches
+  const openClawGroup = NAV.find((e) => isGroup(e) && e.label === 'OpenClaw') as NavGroup | undefined
+  const isOpenClawActive = openClawGroup?.matchPrefixes.some((p) => location.pathname.startsWith(p)) ?? false
+  const [openClawOpen, setOpenClawOpen] = useState(isOpenClawActive)
 
   const handleIngest = async () => {
     setSyncing(true)
     try {
       const result = await api.ingest()
       setLastSync(`+${result.stats.eventsInserted} events`)
-      // Navigate to current page to refresh data
       navigate(0)
     } catch (e) {
       setLastSync('error')
@@ -33,6 +65,15 @@ export default function Layout({ children }: LayoutProps) {
       setSyncing(false)
     }
   }
+
+  const linkClasses = (isActive: boolean) =>
+    `flex items-center gap-2.5 px-3 py-2 rounded-sm text-xs font-medium transition-colors ${isActive ? 'text-white' : 'hover:text-white'}`
+
+  const linkStyle = (isActive: boolean) => ({
+    color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
+    background: isActive ? 'var(--bg-elevated)' : 'transparent',
+    borderLeft: isActive ? '2px solid var(--amber)' : '2px solid transparent',
+  })
 
   return (
     <div className="flex h-full overflow-hidden" style={{ background: 'var(--bg-base)' }}>
@@ -65,28 +106,68 @@ export default function Layout({ children }: LayoutProps) {
 
         {/* Nav */}
         <nav className="flex-1 py-3 px-2 space-y-0.5">
-          {NAV.map(({ to, icon: Icon, label }) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={to === '/'}
-              className={({ isActive }) =>
-                `flex items-center gap-2.5 px-3 py-2 rounded-sm text-xs font-medium transition-colors ${
-                  isActive
-                    ? 'text-white'
-                    : 'hover:text-white'
-                }`
-              }
-              style={({ isActive }) => ({
-                color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
-                background: isActive ? 'var(--bg-elevated)' : 'transparent',
-                borderLeft: isActive ? `2px solid var(--amber)` : '2px solid transparent',
-              })}
-            >
-              <Icon size={14} strokeWidth={1.8} />
-              <span style={{ fontFamily: 'Barlow', letterSpacing: '0.02em' }}>{label}</span>
-            </NavLink>
-          ))}
+          {NAV.map((entry) => {
+            if (isGroup(entry)) {
+              const groupActive = entry.matchPrefixes.some((p) => location.pathname.startsWith(p))
+              return (
+                <div key={entry.label}>
+                  {/* Group header */}
+                  <button
+                    onClick={() => setOpenClawOpen(!openClawOpen)}
+                    className="flex items-center gap-2.5 px-3 py-2 rounded-sm text-xs font-medium transition-colors w-full hover:text-white"
+                    style={{
+                      color: groupActive ? 'var(--text-primary)' : 'var(--text-secondary)',
+                      background: groupActive && !openClawOpen ? 'var(--bg-elevated)' : 'transparent',
+                      borderLeft: groupActive ? '2px solid var(--amber)' : '2px solid transparent',
+                    }}
+                  >
+                    <entry.icon size={14} strokeWidth={1.8} />
+                    <span className="flex-1 text-left" style={{ fontFamily: 'Barlow', letterSpacing: '0.02em' }}>
+                      {entry.label}
+                    </span>
+                    {openClawOpen ? (
+                      <ChevronDown size={12} strokeWidth={1.8} style={{ color: 'var(--text-muted)' }} />
+                    ) : (
+                      <ChevronRight size={12} strokeWidth={1.8} style={{ color: 'var(--text-muted)' }} />
+                    )}
+                  </button>
+                  {/* Children */}
+                  {openClawOpen && (
+                    <div className="ml-3 space-y-0.5 mt-0.5">
+                      {entry.children.map(({ to, icon: Icon, label }) => (
+                        <NavLink
+                          key={to}
+                          to={to}
+                          className={({ isActive }) => linkClasses(isActive)}
+                          style={({ isActive }) => ({
+                            ...linkStyle(isActive),
+                            paddingLeft: '20px',
+                          })}
+                        >
+                          <Icon size={13} strokeWidth={1.8} />
+                          <span style={{ fontFamily: 'Barlow', letterSpacing: '0.02em' }}>{label}</span>
+                        </NavLink>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )
+            }
+
+            const { to, icon: Icon, label } = entry
+            return (
+              <NavLink
+                key={to}
+                to={to}
+                end={to === '/'}
+                className={({ isActive }) => linkClasses(isActive)}
+                style={({ isActive }) => linkStyle(isActive)}
+              >
+                <Icon size={14} strokeWidth={1.8} />
+                <span style={{ fontFamily: 'Barlow', letterSpacing: '0.02em' }}>{label}</span>
+              </NavLink>
+            )
+          })}
         </nav>
 
         {/* Footer */}
@@ -110,7 +191,7 @@ export default function Layout({ children }: LayoutProps) {
               className={syncing ? 'animate-spin' : ''}
               style={{ color: 'var(--amber)' }}
             />
-            <span>{syncing ? 'Syncing…' : 'Sync data'}</span>
+            <span>{syncing ? '同步中…' : '同步数据'}</span>
           </button>
           {lastSync && (
             <div style={{ color: 'var(--text-muted)', fontSize: '10px' }} className="px-1 text-center">
@@ -122,7 +203,7 @@ export default function Layout({ children }: LayoutProps) {
             style={{ color: 'var(--text-muted)', fontSize: '10px' }}
           >
             <Activity size={9} />
-            <span>v1 · local-only</span>
+            <span>v1 · 仅本地</span>
           </div>
         </div>
       </aside>

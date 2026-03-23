@@ -1,6 +1,8 @@
 import db from '../db/index.js'
 import { discoverSessionFiles } from './scanner.js'
 import { parseSessionFile } from './parser.js'
+import { discoverClaudeCodeFiles } from './claude-code-scanner.js'
+import { parseClaudeCodeFile } from './claude-code-parser.js'
 
 interface IngestionStats {
   filesProcessed: number
@@ -124,6 +126,89 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
     }
 
     // Update ingestion state
+    upsertState.run({
+      sourcePath: filePath,
+      lines: result.linesRead,
+      scanAt: Date.now(),
+      eventCount: result.events.length,
+    })
+  }
+
+  // ─── Claude Code ingestion ───────────────────────────────────────────────
+  const ccFiles = await discoverClaudeCodeFiles()
+
+  // Preload model prices for cost calculation
+  const priceRows = db.prepare('SELECT * FROM model_prices').all() as Array<{
+    model_id: string; input_price: number; output_price: number;
+    cache_read_price: number; cache_write_price: number; per_tokens: number
+  }>
+  const priceMap = new Map(priceRows.map(p => [p.model_id, p]))
+
+  for (const fileInfo of ccFiles) {
+    const { sessionId, project, filePath } = fileInfo
+    const state = getState.get(filePath) as { last_processed_lines: number } | undefined
+    const startLine = forceReindex ? 0 : state?.last_processed_lines || 0
+
+    const result = parseClaudeCodeFile(filePath, sessionId, project, startLine)
+
+    if (result.events.length === 0 && result.warnings.length === 0 && !forceReindex && startLine > 0) {
+      continue
+    }
+
+    // Calculate costs from model_prices
+    for (const event of result.events) {
+      const price = priceMap.get(event.model)
+      if (price) {
+        const perTokens = price.per_tokens || 1000000
+        event.inputCost = (event.inputTokens * price.input_price) / perTokens
+        event.outputCost = (event.outputTokens * price.output_price) / perTokens
+        event.cacheReadCost = (event.cacheReadTokens * price.cache_read_price) / perTokens
+        event.cacheWriteCost = (event.cacheWriteTokens * price.cache_write_price) / perTokens
+        event.totalCost = event.inputCost + event.outputCost + event.cacheReadCost + event.cacheWriteCost
+      }
+    }
+
+    let inserted = 0
+    db.exec('BEGIN')
+    try {
+      for (const event of result.events) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const info = insertEvent.run(event as any) as { changes: number }
+        inserted += info.changes
+      }
+      db.exec('COMMIT')
+    } catch (e) {
+      db.exec('ROLLBACK')
+      throw e
+    }
+    stats.eventsInserted += inserted
+    stats.filesProcessed++
+
+    if (result.events.length > 0) {
+      const totalTokens = result.events.reduce((s, e) => s + e.totalTokens, 0)
+      const totalCost = result.events.reduce((s, e) => s + e.totalCost, 0)
+      upsertSession.run({
+        sessionId,
+        sessionKey: null,
+        agent: project,
+        channel: 'claude-code',
+        firstSeenAt: result.firstSeenAt || Date.now(),
+        lastSeenAt: result.lastSeenAt || Date.now(),
+        currentModel: result.currentModel || null,
+        callCount: result.events.length,
+        totalTokens,
+        totalCost,
+        sourcePath: filePath,
+      })
+      stats.sessionsUpdated++
+    }
+
+    clearWarnings.run(filePath)
+    for (const w of result.warnings) {
+      insertWarning.run(filePath, w, Date.now())
+      stats.warnings.push(`${filePath}: ${w}`)
+    }
+
     upsertState.run({
       sourcePath: filePath,
       lines: result.linesRead,

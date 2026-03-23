@@ -25,7 +25,15 @@ function parseSessionsIndex(filePath: string): Map<string, { channel: string; se
       const channel =
         (v.lastChannel as string) ||
         deliveryCtx?.channel ||
-        'unknown'
+        // Fallback: parse from session key (e.g. "agent:main:openclaw-weixin:..." → "weixin")
+        (() => {
+          const parts = key.split(':')
+          if (parts.length >= 3 && parts[2] !== 'main') {
+            const raw = parts[2]
+            return raw.replace(/^openclaw-/, '').replace(/^agent:/, '')
+          }
+          return key === 'agent:main:main' ? 'webchat' : 'unknown'
+        })()
       map.set(sessionId, { channel, sessionKey: key })
     }
   } catch (_e) {

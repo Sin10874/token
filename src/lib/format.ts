@@ -27,13 +27,13 @@ export function fmtDateShort(ms: number): string {
 export function fmtRelative(ms: number): string {
   const diff = Date.now() - ms
   const secs = Math.floor(diff / 1000)
-  if (secs < 60) return `${secs}s ago`
+  if (secs < 60) return `${secs}秒前`
   const mins = Math.floor(secs / 60)
-  if (mins < 60) return `${mins}m ago`
+  if (mins < 60) return `${mins}分钟前`
   const hrs = Math.floor(mins / 60)
-  if (hrs < 24) return `${hrs}h ago`
+  if (hrs < 24) return `${hrs}小时前`
   const days = Math.floor(hrs / 24)
-  return `${days}d ago`
+  return `${days}天前`
 }
 
 export function fmtDuration(ms: number): string {

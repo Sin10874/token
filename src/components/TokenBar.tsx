@@ -11,10 +11,10 @@ export default function TokenBar({ input, output, cacheRead, cacheWrite, classNa
   if (total === 0) return null
 
   const segments = [
-    { value: input, color: 'var(--amber)', label: 'Input' },
-    { value: output, color: 'var(--teal)', label: 'Output' },
-    { value: cacheRead, color: 'var(--violet)', label: 'Cache Read' },
-    { value: cacheWrite, color: 'var(--orange)', label: 'Cache Write' },
+    { value: input, color: 'var(--amber)', label: '输入' },
+    { value: output, color: 'var(--teal)', label: '输出' },
+    { value: cacheRead, color: 'var(--violet)', label: '缓存读取' },
+    { value: cacheWrite, color: 'var(--orange)', label: '缓存写入' },
   ].filter((s) => s.value > 0)
 
   return (
@@ -36,10 +36,10 @@ export default function TokenBar({ input, output, cacheRead, cacheWrite, classNa
 
 export function TokenBarLegend() {
   const items = [
-    { color: 'var(--amber)', label: 'Input' },
-    { color: 'var(--teal)', label: 'Output' },
-    { color: 'var(--violet)', label: 'Cache Read' },
-    { color: 'var(--orange)', label: 'Cache Write' },
+    { color: 'var(--amber)', label: '输入' },
+    { color: 'var(--teal)', label: '输出' },
+    { color: 'var(--violet)', label: '缓存读取' },
+    { color: 'var(--orange)', label: '缓存写入' },
   ]
   return (
     <div className="flex items-center gap-3 flex-wrap">

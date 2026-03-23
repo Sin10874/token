@@ -82,6 +82,11 @@ db.exec(`
     warning TEXT,
     created_at INTEGER
   );
+
+  CREATE TABLE IF NOT EXISTS claude_code_config (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  );
 `)
 
 // Seed default model prices if empty
@@ -93,12 +98,18 @@ if (priceCountRow.c === 0) {
   `)
   const now = Date.now()
   const defaultPrices = [
-    ['claude-opus-4-6', 'anthropic', 15, 75, 1.5, 18.75],
+    ['claude-opus-4-6', 'anthropic', 5, 25, 0.5, 6.25],
+    ['claude-opus-4-5', 'anthropic', 5, 25, 0.5, 6.25],
+    ['claude-opus-4-1', 'anthropic', 15, 75, 1.5, 18.75],
+    ['claude-opus-4', 'anthropic', 15, 75, 1.5, 18.75],
     ['claude-sonnet-4-6', 'anthropic', 3, 15, 0.3, 3.75],
     ['claude-sonnet-4-5', 'anthropic', 3, 15, 0.3, 3.75],
-    ['claude-haiku-4-5-20251001', 'anthropic', 0.25, 1.25, 0.03, 0.3],
-    ['claude-haiku-4-5', 'anthropic', 0.25, 1.25, 0.03, 0.3],
-    ['claude-opus-4-5', 'anthropic', 15, 75, 1.5, 18.75],
+    ['claude-sonnet-4', 'anthropic', 3, 15, 0.3, 3.75],
+    ['claude-sonnet-3-7', 'anthropic', 3, 15, 0.3, 3.75],
+    ['claude-haiku-4-5', 'anthropic', 1, 5, 0.1, 1.25],
+    ['claude-haiku-4-5-20251001', 'anthropic', 1, 5, 0.1, 1.25],
+    ['claude-haiku-3-5', 'anthropic', 0.8, 4, 0.08, 1],
+    ['claude-haiku-3', 'anthropic', 0.25, 1.25, 0.03, 0.3],
     ['gpt-5.4', 'openai', 0, 0, 0, 0],
     ['gpt-4o', 'openai', 2.5, 10, 0, 0],
     ['kimi-k2.5', 'moonshot', 0, 0, 0, 0],
@@ -106,6 +117,18 @@ if (priceCountRow.c === 0) {
   for (const [modelId, provider, inp, out, cr, cw] of defaultPrices) {
     insert.run(modelId, provider, inp, out, cr, cw, now)
   }
+}
+
+// Seed default Claude Code config if empty
+const ccConfigCount = (db.prepare('SELECT COUNT(*) as c FROM claude_code_config').get() as { c: number }).c
+if (ccConfigCount === 0) {
+  const insertConfig = db.prepare('INSERT OR IGNORE INTO claude_code_config (key, value) VALUES (?, ?)')
+  // Default monthly quota: $100 for Max plan (Pro is ~$20, Max5x is ~$100, Max20x is ~$200)
+  insertConfig.run('monthly_quota_usd', '100')
+  // Billing cycle day (1-28), day of month when quota resets
+  insertConfig.run('billing_cycle_day', '1')
+  // Plan name
+  insertConfig.run('plan_name', 'Max 5x')
 }
 
 // Try to load model prices from openclaw.json

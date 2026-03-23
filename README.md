@@ -1,88 +1,145 @@
 # ClawMeter
 
-Local cost monitoring cockpit for OpenClaw. Parses your session JSONL files, stores usage in SQLite, and provides a dark-themed dashboard with model/channel/session breakdowns and estimated costs.
+ClawMeter is a local single-user cost monitoring cockpit for OpenClaw.
 
-## Stack
+It reads historical usage primarily from local OpenClaw session files, stores normalized events in SQLite, and shows breakdowns by:
 
-| Layer | Tech |
-|---|---|
-| Frontend | React 18 + TypeScript + Vite + Tailwind CSS + Recharts |
-| Backend | Node.js + Express |
-| Database | SQLite via `node:sqlite` (built-in, no compilation needed) |
-| Runtime | Node.js ≥ 22.5 (24.x recommended) |
+- day
+- model
+- channel
+- session
 
-## Quick Start
+It also supports estimated cost tracking via an editable model price table.
 
-**Prerequisites:** Node.js ≥ 22.5
+## What works now
+
+- Dashboard with today totals, model mix, channel mix, top sessions, and trends
+- Models / Channels / Sessions / Session detail pages
+- SQLite-backed ingestion from local OpenClaw session files
+- Manual re-sync and full re-index
+- Source health view
+- Editable model price table
+
+## Current limitations
+
+- Cost is only as good as the configured or inferred price table
+- Some models may show `$0.00` until you add prices manually
+- Realtime activity is limited; ClawMeter is strongest on historical accounting
+- No file watcher / auto-refresh loop yet
+- Single-user local app only
+
+## Requirements
+
+- Node.js 24+
+- npm
+
+## Install
 
 ```bash
-cd ClawMeter
+cd /Users/xinzechao/.openclaw/workspace/ClawMeter
 npm install
+```
+
+## Development
+
+This starts:
+- API server on `127.0.0.1:3001`
+- frontend dev server on `127.0.0.1:4173`
+
+```bash
+cd /Users/xinzechao/.openclaw/workspace/ClawMeter
 npm run dev
 ```
 
-This runs two processes in parallel:
-- **Server** on `http://127.0.0.1:3001` (auto-ingests on startup)
-- **Frontend** on `http://localhost:5173` (proxies `/api` to server)
+Open:
 
-Open **http://localhost:5173** in your browser.
+```text
+http://127.0.0.1:4173
+```
 
-## Scripts
+### Important
 
-| Command | Purpose |
-|---|---|
-| `npm run dev` | Start both server + Vite in dev mode |
-| `npm run start` | Server only (serves built frontend) |
-| `npm run build` | Build frontend to `dist/client/` |
-| `npm run ingest` | Manual full re-index of session files |
+ClawMeter now uses **frontend port 4173** by default instead of 5173, to avoid common Vite port collisions.
 
-## Data Sources
+If 4173 is already occupied, Vite is configured with `strictPort: true`, so startup should fail loudly instead of silently hopping to another port.
 
-Reads from:
-- `~/.openclaw/agents/*/sessions/*.jsonl` — session JSONL files (primary)
-- `~/.openclaw/agents/*/sessions/sessions.json` — session index (for channel info)
-- `~/.openclaw/openclaw.json` — model price seeds (non-destructive)
+## Production-ish local run
 
-Database stored at: `./data/clawmeter.db`
+Build frontend and serve it from the backend on port 3001:
 
-## Pages
+```bash
+cd /Users/xinzechao/.openclaw/workspace/ClawMeter
+npm run build
+npm run prod
+```
 
-| Route | Description |
-|---|---|
-| `/` | Dashboard — today's totals, model/channel distribution, top sessions |
-| `/models` | All models table with token breakdown |
-| `/models/:id` | Model detail — daily trend, channel mix |
-| `/channels` | All channels with usage bars |
-| `/channels/:ch` | Channel detail — daily trend, model mix, top sessions |
-| `/sessions` | Session list with filters (channel, model) and pagination |
-| `/sessions/:id` | Session detail — per-call event log, model history, timeline |
-| `/settings` | Editable price table, ingestion health, source file list |
+Open:
 
-## Cost Estimates
+```text
+http://127.0.0.1:3001
+```
 
-Costs marked with `~` are **estimates** computed from the price table. If OpenClaw records actual cost in the session file, that value is used directly. Edit prices via the Settings page; manual edits override the auto-seeded values.
+## Useful commands
+
+### Incremental ingestion
+
+```bash
+npm run ingest
+```
+
+### Rebuild frontend
+
+```bash
+npm run build
+```
+
+## Data sources
+
+Primary historical sources:
+
+- `~/.openclaw/agents/*/sessions/*.jsonl`
+- session metadata from nearby `sessions.json` indexes
+
+## Troubleshooting
+
+### Frontend won't open
+
+1. Make sure `npm run dev` is still running
+2. Open `http://127.0.0.1:4173`
+3. If startup fails, another process is likely already using 4173
+4. Either stop that process or run with a different port:
+
+```bash
+FRONTEND_PORT=4273 npm run dev
+```
+
+Then open:
+
+```text
+http://127.0.0.1:4273
+```
+
+### Backend API fails
+
+Default backend port is:
+
+```text
+127.0.0.1:3001
+```
+
+To change it:
+
+```bash
+PORT=3011 npm run dev
+```
+
+### Costs look wrong
+
+Go to **Settings** and update the model price table.
+
+Some providers/models do not currently have trustworthy built-in pricing, so ClawMeter may need manual price inputs.
 
 ## Notes
 
-- Single-user, local-only — no auth, no networking beyond localhost
-- Incremental ingestion on server start (new lines only); use "Full re-index" in Settings to reprocess everything
-- Missing/zero prices result in `$0.00` cost — add prices in Settings to fix
-
-## Architecture
-
-```
-server/
-  db/index.ts          SQLite setup + price seed
-  ingestion/
-    scanner.ts         Discover .jsonl files
-    parser.ts          Parse JSONL → UsageEvent
-    index.ts           Orchestrate + write to DB
-  api/routes.ts        Express route handlers
-  index.ts             Server entry
-
-src/
-  pages/               Dashboard, Models, Channels, Sessions, Settings
-  components/          Layout, MetricCard, TokenBar
-  lib/api.ts           Typed fetch wrappers
-  lib/format.ts        Number/date formatters
-```
+- ClawMeter does **not** modify core OpenClaw config
+- It is intended as a local observability tool, not a billing source of truth

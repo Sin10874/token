@@ -4,7 +4,7 @@ export interface RawUsageEvent {
   id: string
   timestampMs: number
   sessionId: string
-  sessionKey?: string
+  sessionKey?: string | null
   agent: string
   provider: string
   model: string
@@ -125,7 +125,7 @@ export function parseSessionFile(
       id: `${sessionId}::${msgId}`,
       timestampMs: msgTimestamp,
       sessionId,
-      sessionKey,
+      sessionKey: sessionKey ?? null,
       agent,
       provider,
       model,

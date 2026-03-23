@@ -5,9 +5,9 @@ import { fmtTokens, fmtCost, fmtRelative, fmtDuration, shortId } from '../lib/fo
 import { Filter, X } from 'lucide-react'
 
 const SORT_OPTIONS = [
-  { value: 'tokens', label: 'Tokens' },
-  { value: 'cost', label: 'Cost' },
-  { value: 'calls', label: 'Calls' },
+  { value: 'tokens', label: 'Token' },
+  { value: 'cost', label: '成本' },
+  { value: 'calls', label: '调用' },
 ]
 
 const PAGE_SIZE = 50
@@ -54,10 +54,10 @@ export default function Sessions() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-lg font-semibold" style={{ fontFamily: 'Barlow Condensed', color: 'var(--text-primary)', letterSpacing: '0.04em' }}>
-            SESSIONS
+            会话
           </h1>
           <p style={{ color: 'var(--text-muted)', fontSize: '11px' }}>
-            {total.toLocaleString()} sessions total
+            共 {total.toLocaleString()} 个会话
           </p>
         </div>
 
@@ -77,7 +77,7 @@ export default function Sessions() {
               cursor: 'pointer',
             }}
           >
-            <option value="">All channels</option>
+            <option value="">全部渠道</option>
             {channels.map((c) => <option key={c} value={c}>{c}</option>)}
           </select>
 
@@ -93,7 +93,7 @@ export default function Sessions() {
               cursor: 'pointer',
             }}
           >
-            <option value="">All models</option>
+            <option value="">全部模型</option>
             {models.map((m) => <option key={m} value={m}>{m}</option>)}
           </select>
 
@@ -109,7 +109,7 @@ export default function Sessions() {
               cursor: 'pointer',
             }}
           >
-            {SORT_OPTIONS.map((o) => <option key={o.value} value={o.value}>Sort: {o.label}</option>)}
+            {SORT_OPTIONS.map((o) => <option key={o.value} value={o.value}>排序: {o.label}</option>)}
           </select>
 
           {(filterChannel || filterModel) && (
@@ -118,7 +118,7 @@ export default function Sessions() {
               className="flex items-center gap-1 px-2 py-1.5 rounded-sm text-xs"
               style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-default)', color: 'var(--text-muted)', cursor: 'pointer' }}
             >
-              <X size={10} /> Clear
+              <X size={10} /> 清除
             </button>
           )}
         </div>
@@ -129,15 +129,15 @@ export default function Sessions() {
         <table className="data-table">
           <thead>
             <tr>
-              <th>Session ID</th>
-              <th>Channel</th>
+              <th>会话 ID</th>
+              <th>渠道</th>
               <th>Agent</th>
-              <th>Models</th>
-              <th style={{ textAlign: 'right' }}>Calls</th>
-              <th style={{ textAlign: 'right' }}>Tokens</th>
-              <th style={{ textAlign: 'right' }}>Est. Cost</th>
-              <th style={{ textAlign: 'right' }}>Duration</th>
-              <th style={{ textAlign: 'right' }}>Last Active</th>
+              <th>模型</th>
+              <th style={{ textAlign: 'right' }}>调用</th>
+              <th style={{ textAlign: 'right' }}>Token</th>
+              <th style={{ textAlign: 'right' }}>预估成本</th>
+              <th style={{ textAlign: 'right' }}>时长</th>
+              <th style={{ textAlign: 'right' }}>最近活跃</th>
             </tr>
           </thead>
           <tbody>
@@ -204,13 +204,13 @@ export default function Sessions() {
 
         {!loading && sessions.length === 0 && (
           <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)', fontSize: '12px' }}>
-            No sessions match your filters.
+            没有匹配的会话。
           </div>
         )}
 
         {loading && (
           <div style={{ padding: 16, textAlign: 'center', color: 'var(--text-muted)', fontSize: '11px' }}>
-            Loading…
+            加载中…
           </div>
         )}
       </div>
@@ -219,11 +219,11 @@ export default function Sessions() {
       {totalPages > 1 && (
         <div className="flex items-center justify-between">
           <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>
-            Page {page + 1} of {totalPages} · {total.toLocaleString()} sessions
+            第 {page + 1} 页，共 {totalPages} 页 · {total.toLocaleString()} 个会话
           </span>
           <div className="flex gap-2">
-            <PaginBtn label="← prev" disabled={page === 0} onClick={() => setPage(p => Math.max(0, p - 1))} />
-            <PaginBtn label="next →" disabled={page >= totalPages - 1} onClick={() => setPage(p => p + 1)} />
+            <PaginBtn label="← 上一页" disabled={page === 0} onClick={() => setPage(p => Math.max(0, p - 1))} />
+            <PaginBtn label="下一页 →" disabled={page >= totalPages - 1} onClick={() => setPage(p => p + 1)} />
           </div>
         </div>
       )}

@@ -16,22 +16,22 @@ export function ModelsList() {
     api.models().then(setModels).finally(() => setLoading(false))
   }, [])
 
-  if (loading) return <PageShell title="MODELS"><Spinner /></PageShell>
+  if (loading) return <PageShell title="模型"><Spinner /></PageShell>
 
   return (
-    <PageShell title="MODELS" sub={`${models.length} models seen`}>
+    <PageShell title="模型" sub={`共 ${models.length} 个模型`}>
       <div className="card">
         <table className="data-table">
           <thead>
             <tr>
-              <th>Model</th>
-              <th>Provider</th>
-              <th style={{ textAlign: 'right' }}>Calls</th>
-              <th style={{ textAlign: 'right' }}>Sessions</th>
-              <th style={{ textAlign: 'right' }}>Total Tokens</th>
-              <th style={{ textAlign: 'right' }}>Est. Cost</th>
-              <th style={{ textAlign: 'right' }}>Last Used</th>
-              <th style={{ width: 120 }}>Token Mix</th>
+              <th>模型</th>
+              <th>提供商</th>
+              <th style={{ textAlign: 'right' }}>调用次数</th>
+              <th style={{ textAlign: 'right' }}>会话数</th>
+              <th style={{ textAlign: 'right' }}>总Token</th>
+              <th style={{ textAlign: 'right' }}>预估成本</th>
+              <th style={{ textAlign: 'right' }}>最近使用</th>
+              <th style={{ width: 120 }}>Token构成</th>
             </tr>
           </thead>
           <tbody>
@@ -102,8 +102,8 @@ export function ModelDetailPage() {
     api.modelDetail(decodeURIComponent(modelId)).then(setDetail).finally(() => setLoading(false))
   }, [modelId])
 
-  if (loading) return <PageShell title="MODEL"><Spinner /></PageShell>
-  if (!detail || !detail.summary) return <PageShell title="MODEL"><EmptyState /></PageShell>
+  if (loading) return <PageShell title="模型"><Spinner /></PageShell>
+  if (!detail || !detail.summary) return <PageShell title="模型"><EmptyState /></PageShell>
 
   const { summary, dailyTrend, channelMix } = detail
   const s = summary
@@ -117,10 +117,10 @@ export function ModelDetailPage() {
       {/* Summary cards */}
       <div className="grid grid-cols-4 gap-3 mb-4">
         {[
-          { label: 'Total Tokens', value: fmtTokens(s.totalTokens), accent: 'var(--amber)' },
-          { label: 'Est. Cost', value: fmtCost(s.totalCost), accent: 'var(--teal)' },
-          { label: 'Calls', value: s.callCount.toLocaleString(), accent: 'var(--amber)' },
-          { label: 'Avg / Call', value: fmtTokens(Math.round(s.avgTokensPerCall || 0)), accent: 'var(--teal)' },
+          { label: '总Token', value: fmtTokens(s.totalTokens), accent: 'var(--amber)' },
+          { label: '预估成本', value: fmtCost(s.totalCost), accent: 'var(--teal)' },
+          { label: '调用次数', value: s.callCount.toLocaleString(), accent: 'var(--amber)' },
+          { label: '平均/次', value: fmtTokens(Math.round(s.avgTokensPerCall || 0)), accent: 'var(--teal)' },
         ].map((c) => (
           <div key={c.label} className="card p-4">
             <div style={{ color: 'var(--text-muted)', fontSize: '10px', letterSpacing: '0.08em', textTransform: 'uppercase' }}>{c.label}</div>
@@ -132,14 +132,14 @@ export function ModelDetailPage() {
       {/* Token breakdown */}
       <div className="card p-4 mb-3">
         <div style={{ color: 'var(--text-secondary)', fontSize: '11px', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 12 }}>
-          Token Breakdown
+          Token明细
         </div>
         <div className="grid grid-cols-4 gap-4">
           {[
-            { label: 'Input', value: s.inputTokens, color: 'var(--amber)' },
-            { label: 'Output', value: s.outputTokens, color: 'var(--teal)' },
-            { label: 'Cache Read', value: s.cacheReadTokens, color: 'var(--violet)' },
-            { label: 'Cache Write', value: s.cacheWriteTokens, color: 'var(--orange)' },
+            { label: '输入', value: s.inputTokens, color: 'var(--amber)' },
+            { label: '输出', value: s.outputTokens, color: 'var(--teal)' },
+            { label: '缓存读取', value: s.cacheReadTokens, color: 'var(--violet)' },
+            { label: '缓存写入', value: s.cacheWriteTokens, color: 'var(--orange)' },
           ].map((t) => (
             <div key={t.label}>
               <div style={{ color: 'var(--text-muted)', fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
@@ -163,7 +163,7 @@ export function ModelDetailPage() {
       <div className="grid grid-cols-3 gap-3">
         <div className="card p-4 col-span-2">
           <div style={{ color: 'var(--text-secondary)', fontSize: '11px', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 8 }}>
-            Daily Trend
+            每日趋势
           </div>
           {dailyTrend.length > 0 ? (
             <ResponsiveContainer width="100%" height={140}>
@@ -172,21 +172,21 @@ export function ModelDetailPage() {
                 <YAxis tick={{ fill: 'var(--text-muted)', fontSize: 9 }} axisLine={false} tickLine={false} tickFormatter={(v: number) => fmtTokens(v)} />
                 <Tooltip
                   contentStyle={TOOLTIP_STYLE}
-                  formatter={(v: number) => [fmtTokens(v), 'Tokens']}
+                  formatter={(v: number) => [fmtTokens(v), 'Token']}
                 />
                 <Bar dataKey="tokens" fill={modelColor(s.model)} opacity={0.8} radius={[1, 1, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           ) : (
             <div style={{ height: 140, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>No trend data</span>
+              <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>暂无趋势数据</span>
             </div>
           )}
         </div>
 
         <div className="card p-4">
           <div style={{ color: 'var(--text-secondary)', fontSize: '11px', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 8 }}>
-            Channel Mix
+            渠道分布
           </div>
           {channelMix.length > 0 ? (
             <div className="space-y-2 mt-2">
@@ -209,7 +209,7 @@ export function ModelDetailPage() {
               })}
             </div>
           ) : (
-            <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>No data</span>
+            <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>暂无数据</span>
           )}
         </div>
       </div>
@@ -242,7 +242,7 @@ function PageShell({
       <div className="flex items-baseline gap-3">
         {back && (
           <Link to={back} style={{ color: 'var(--text-muted)', fontSize: '11px' }}>
-            ← back
+            ← 返回
           </Link>
         )}
         <div>
@@ -261,13 +261,13 @@ function PageShell({
 }
 
 function Spinner() {
-  return <div style={{ color: 'var(--text-muted)', fontSize: '12px' }}>Loading…</div>
+  return <div style={{ color: 'var(--text-muted)', fontSize: '12px' }}>加载中…</div>
 }
 
 function EmptyState() {
   return (
     <div style={{ padding: '32px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '12px' }}>
-      No data yet. Run <strong style={{ color: 'var(--amber)' }}>Sync</strong> from the sidebar.
+      暂无数据。请点击侧边栏 <strong style={{ color: 'var(--amber)' }}>同步数据</strong> 按钮。
     </div>
   )
 }

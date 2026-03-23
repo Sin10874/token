@@ -7,7 +7,8 @@
     "server:dev": "tsx watch server/index.ts",
     "client:dev": "vite",
     "build": "vite build",
-    "start": "tsx server/index.ts",
+    "start": "NODE_ENV=production tsx server/index.ts",
+    "prod": "npm run build && NODE_ENV=production tsx server/index.ts",
     "ingest": "tsx server/ingestion/index.ts"
   },
   "dependencies": {

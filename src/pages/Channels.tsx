@@ -23,12 +23,12 @@ export function ChannelsList() {
     api.channels().then(setChannels).finally(() => setLoading(false))
   }, [])
 
-  if (loading) return <PageShell title="CHANNELS"><Spinner /></PageShell>
+  if (loading) return <PageShell title="渠道"><Spinner /></PageShell>
 
   const maxTokens = Math.max(...channels.map((c) => c.totalTokens), 1)
 
   return (
-    <PageShell title="CHANNELS" sub={`${channels.length} channels`}>
+    <PageShell title="渠道" sub={`共 ${channels.length} 个渠道`}>
       <div className="space-y-2">
         {channels.map((ch) => (
           <div
@@ -64,18 +64,18 @@ export function ChannelsList() {
 
               {/* Stats */}
               <div className="flex items-center gap-6 shrink-0">
-                <Stat label="Sessions" value={String(ch.sessionCount)} />
-                <Stat label="Calls" value={ch.callCount.toLocaleString()} />
-                <Stat label="Models" value={String(ch.modelCount)} />
-                <Stat label="Est. Cost" value={fmtCost(ch.totalCost)} approx />
-                <Stat label="Last" value={fmtRelative(ch.lastSeen)} />
+                <Stat label="会话" value={String(ch.sessionCount)} />
+                <Stat label="调用" value={ch.callCount.toLocaleString()} />
+                <Stat label="模型" value={String(ch.modelCount)} />
+                <Stat label="预估成本" value={fmtCost(ch.totalCost)} approx />
+                <Stat label="最近" value={fmtRelative(ch.lastSeen)} />
               </div>
             </div>
           </div>
         ))}
         {channels.length === 0 && (
           <div className="card p-8 text-center" style={{ color: 'var(--text-muted)', fontSize: '12px' }}>
-            No channel data. Run Sync from the sidebar.
+            暂无渠道数据。请点击侧边栏同步按钮。
           </div>
         )}
       </div>
@@ -93,21 +93,21 @@ export function ChannelDetailPage() {
     api.channelDetail(decodeURIComponent(channel)).then(setDetail).finally(() => setLoading(false))
   }, [channel])
 
-  if (loading) return <PageShell title="CHANNEL" back="/channels"><Spinner /></PageShell>
-  if (!detail || !detail.summary) return <PageShell title="CHANNEL" back="/channels"><div style={{ color: 'var(--text-muted)' }}>Not found</div></PageShell>
+  if (loading) return <PageShell title="渠道" back="/channels"><Spinner /></PageShell>
+  if (!detail || !detail.summary) return <PageShell title="渠道" back="/channels"><div style={{ color: 'var(--text-muted)' }}>未找到</div></PageShell>
 
   const { summary, dailyTrend, modelMix, topSessions } = detail
   const decodedChannel = decodeURIComponent(channel || '')
 
   return (
-    <PageShell title={decodedChannel} sub="channel detail" back="/channels">
+    <PageShell title={decodedChannel} sub="渠道详情" back="/channels">
       {/* Summary */}
       <div className="grid grid-cols-4 gap-3 mb-4">
         {[
-          { label: 'Total Tokens', value: fmtTokens(summary.totalTokens), color: 'var(--amber)' },
-          { label: 'Est. Cost', value: fmtCost(summary.totalCost), color: 'var(--teal)', approx: true },
-          { label: 'Sessions', value: String(summary.sessionCount), color: 'var(--amber)' },
-          { label: 'Calls', value: summary.callCount.toLocaleString(), color: 'var(--teal)' },
+          { label: '总Token', value: fmtTokens(summary.totalTokens), color: 'var(--amber)' },
+          { label: '预估成本', value: fmtCost(summary.totalCost), color: 'var(--teal)', approx: true },
+          { label: '会话数', value: String(summary.sessionCount), color: 'var(--amber)' },
+          { label: '调用次数', value: summary.callCount.toLocaleString(), color: 'var(--teal)' },
         ].map((c) => (
           <div key={c.label} className="card p-4">
             <div style={{ color: 'var(--text-muted)', fontSize: '10px', letterSpacing: '0.08em', textTransform: 'uppercase' }}>{c.label}</div>
@@ -123,20 +123,20 @@ export function ChannelDetailPage() {
         {/* Daily trend */}
         <div className="card p-4 col-span-2">
           <div style={{ color: 'var(--text-secondary)', fontSize: '11px', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 8 }}>
-            Daily Activity
+            每日活动
           </div>
           {dailyTrend.length > 0 ? (
             <ResponsiveContainer width="100%" height={140}>
               <BarChart data={dailyTrend} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
                 <XAxis dataKey="day" tick={{ fill: 'var(--text-muted)', fontSize: 9 }} axisLine={false} tickLine={false} tickFormatter={(v: string) => v.slice(5)} />
                 <YAxis tick={{ fill: 'var(--text-muted)', fontSize: 9 }} axisLine={false} tickLine={false} tickFormatter={(v: number) => fmtTokens(v)} />
-                <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v: number) => [fmtTokens(v), 'Tokens']} />
+                <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v: number) => [fmtTokens(v), 'Token']} />
                 <Bar dataKey="tokens" fill={modelColor(decodedChannel)} opacity={0.8} radius={[1, 1, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           ) : (
             <div style={{ height: 140, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>No trend data</span>
+              <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>暂无趋势数据</span>
             </div>
           )}
         </div>
@@ -144,7 +144,7 @@ export function ChannelDetailPage() {
         {/* Model mix */}
         <div className="card p-4">
           <div style={{ color: 'var(--text-secondary)', fontSize: '11px', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 8 }}>
-            Model Mix
+            模型分布
           </div>
           <div className="space-y-2 mt-2">
             {modelMix.map((m) => {
@@ -164,7 +164,7 @@ export function ChannelDetailPage() {
                 </div>
               )
             })}
-            {modelMix.length === 0 && <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>No data</span>}
+            {modelMix.length === 0 && <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>暂无数据</span>}
           </div>
         </div>
       </div>
@@ -172,16 +172,16 @@ export function ChannelDetailPage() {
       {/* Top sessions */}
       <div className="card mt-3">
         <div className="px-4 pt-4 pb-2" style={{ color: 'var(--text-secondary)', fontSize: '11px', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-          Top Sessions
+          热门会话
         </div>
         <table className="data-table">
           <thead>
             <tr>
-              <th>Session ID</th>
-              <th>Model</th>
-              <th style={{ textAlign: 'right' }}>Calls</th>
-              <th style={{ textAlign: 'right' }}>Tokens</th>
-              <th style={{ textAlign: 'right' }}>Est. Cost</th>
+              <th>会话 ID</th>
+              <th>模型</th>
+              <th style={{ textAlign: 'right' }}>调用次数</th>
+              <th style={{ textAlign: 'right' }}>Token</th>
+              <th style={{ textAlign: 'right' }}>预估成本</th>
             </tr>
           </thead>
           <tbody>
@@ -216,7 +216,7 @@ export function ChannelDetailPage() {
             ))}
           </tbody>
         </table>
-        {topSessions.length === 0 && <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)', fontSize: '12px' }}>No sessions</div>}
+        {topSessions.length === 0 && <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)', fontSize: '12px' }}>暂无会话</div>}
       </div>
     </PageShell>
   )
@@ -237,7 +237,7 @@ function PageShell({ title, sub, back, children }: { title: string; sub?: string
   return (
     <div className="p-6 space-y-4 fade-in">
       <div className="flex items-baseline gap-3">
-        {back && <Link to={back} style={{ color: 'var(--text-muted)', fontSize: '11px' }}>← back</Link>}
+        {back && <Link to={back} style={{ color: 'var(--text-muted)', fontSize: '11px' }}>← 返回</Link>}
         <div>
           <h1 className="text-lg font-semibold" style={{ fontFamily: 'Barlow Condensed', color: 'var(--text-primary)', letterSpacing: '0.04em' }}>
             {title.toUpperCase()}
@@ -251,5 +251,5 @@ function PageShell({ title, sub, back, children }: { title: string; sub?: string
 }
 
 function Spinner() {
-  return <div style={{ color: 'var(--text-muted)', fontSize: '12px' }}>Loading…</div>
+  return <div style={{ color: 'var(--text-muted)', fontSize: '12px' }}>加载中…</div>
 }

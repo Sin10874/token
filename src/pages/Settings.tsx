@@ -38,11 +38,11 @@ export default function Settings() {
     setSaving(true)
     try {
       await api.updatePrice(editRow, editValues)
-      setSaveMsg('Saved')
+      setSaveMsg('已保存')
       setEditRow(null)
       load()
     } catch (e) {
-      setSaveMsg('Error saving')
+      setSaveMsg('保存失败')
     } finally {
       setSaving(false)
     }
@@ -61,7 +61,7 @@ export default function Settings() {
   }
 
   if (loading) return (
-    <div className="p-6" style={{ color: 'var(--text-muted)', fontSize: '12px' }}>Loading…</div>
+    <div className="p-6" style={{ color: 'var(--text-muted)', fontSize: '12px' }}>加载中…</div>
   )
 
   const warningCount = health?.warnings?.length || 0
@@ -69,19 +69,19 @@ export default function Settings() {
   return (
     <div className="p-6 space-y-6 fade-in">
       <h1 className="text-lg font-semibold" style={{ fontFamily: 'Barlow Condensed', color: 'var(--text-primary)', letterSpacing: '0.04em' }}>
-        SETTINGS
+        设置
       </h1>
 
       {/* Data Health */}
       <section>
-        <SectionHeader label="Data Health" />
+        <SectionHeader label="数据健康" />
         <div className="grid grid-cols-3 gap-3 mb-3">
           {[
-            { label: 'Total Events', value: (health?.totalEvents || 0).toLocaleString(), icon: Database },
-            { label: 'Sessions Indexed', value: (health?.totalSessions || 0).toLocaleString(), icon: Database },
+            { label: '总事件数', value: (health?.totalEvents || 0).toLocaleString(), icon: Database },
+            { label: '已索引会话', value: (health?.totalSessions || 0).toLocaleString(), icon: Database },
             {
-              label: 'Last Ingestion',
-              value: health?.lastScanAt ? fmtRelative(health.lastScanAt) : 'Never',
+              label: '最近导入',
+              value: health?.lastScanAt ? fmtRelative(health.lastScanAt) : '从未',
               icon: RefreshCw,
             },
           ].map((s) => (
@@ -98,16 +98,16 @@ export default function Settings() {
         {/* Source files */}
         <div className="card mb-3">
           <div className="px-4 pt-3 pb-2" style={{ color: 'var(--text-secondary)', fontSize: '11px', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-            Indexed Sources
+            已索引数据源
           </div>
           {health?.states && health.states.length > 0 ? (
             <table className="data-table">
               <thead>
                 <tr>
-                  <th>Source Path</th>
-                  <th style={{ textAlign: 'right' }}>Lines Read</th>
-                  <th style={{ textAlign: 'right' }}>Events</th>
-                  <th style={{ textAlign: 'right' }}>Last Scanned</th>
+                  <th>源路径</th>
+                  <th style={{ textAlign: 'right' }}>已读行数</th>
+                  <th style={{ textAlign: 'right' }}>事件数</th>
+                  <th style={{ textAlign: 'right' }}>最近扫描</th>
                 </tr>
               </thead>
               <tbody>
@@ -135,7 +135,7 @@ export default function Settings() {
             </table>
           ) : (
             <div style={{ padding: '16px 24px', color: 'var(--text-muted)', fontSize: '11px' }}>
-              No sources indexed yet. Run ingestion below.
+              尚未索引任何数据源。请在下方运行导入。
             </div>
           )}
         </div>
@@ -144,7 +144,7 @@ export default function Settings() {
         {warningCount > 0 && (
           <div className="card mb-3" style={{ borderColor: 'var(--rose-dim)' }}>
             <div className="px-4 pt-3 pb-2 flex items-center gap-2" style={{ color: 'var(--rose)', fontSize: '11px' }}>
-              <AlertCircle size={12} /> {warningCount} parse warnings
+              <AlertCircle size={12} /> {warningCount} 个解析警告
             </div>
             <div className="px-4 pb-3 space-y-1">
               {health?.warnings?.slice(0, 10).map((w) => (
@@ -170,7 +170,7 @@ export default function Settings() {
             }}
           >
             <RefreshCw size={11} className={syncing ? 'animate-spin' : ''} />
-            {syncing ? 'Syncing…' : 'Sync (incremental)'}
+            {syncing ? '同步中…' : '增量同步'}
           </button>
           <button
             onClick={() => handleSync(true)}
@@ -183,11 +183,11 @@ export default function Settings() {
               cursor: syncing ? 'not-allowed' : 'pointer',
             }}
           >
-            Full re-index
+            全量重建索引
           </button>
           {syncResult && (
             <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>
-              +{syncResult.eventsInserted} events · {syncResult.filesProcessed} files · {syncResult.duration}ms
+              +{syncResult.eventsInserted} 事件 · {syncResult.filesProcessed} 文件 · {syncResult.duration}ms
             </span>
           )}
         </div>
@@ -195,15 +195,15 @@ export default function Settings() {
 
       {/* Price Table */}
       <section>
-        <SectionHeader label="Model Price Table" note="All prices in USD per 1M tokens. ~ = estimated." />
+        <SectionHeader label="模型价格表" note="所有价格单位为 USD / 百万 Token。~ = 预估值。" />
 
         {saveMsg && (
           <div
             className="flex items-center gap-2 mb-3 px-3 py-2 rounded-sm text-xs"
             style={{
-              background: saveMsg === 'Saved' ? 'var(--green-dim)' : 'var(--rose-dim)',
-              color: saveMsg === 'Saved' ? 'var(--green)' : 'var(--rose)',
-              border: `1px solid ${saveMsg === 'Saved' ? 'var(--green-dim)' : 'var(--rose-dim)'}`,
+              background: saveMsg === '已保存' ? 'var(--green-dim)' : 'var(--rose-dim)',
+              color: saveMsg === '已保存' ? 'var(--green)' : 'var(--rose)',
+              border: `1px solid ${saveMsg === '已保存' ? 'var(--green-dim)' : 'var(--rose-dim)'}`,
             }}
           >
             <CheckCircle size={11} /> {saveMsg}
@@ -214,13 +214,13 @@ export default function Settings() {
           <table className="data-table">
             <thead>
               <tr>
-                <th>Model</th>
-                <th>Provider</th>
-                <th style={{ textAlign: 'right' }}>Input $/M</th>
-                <th style={{ textAlign: 'right' }}>Output $/M</th>
-                <th style={{ textAlign: 'right' }}>Cache Read $/M</th>
-                <th style={{ textAlign: 'right' }}>Cache Write $/M</th>
-                <th>Source</th>
+                <th>模型</th>
+                <th>提供商</th>
+                <th style={{ textAlign: 'right' }}>输入 $/M</th>
+                <th style={{ textAlign: 'right' }}>输出 $/M</th>
+                <th style={{ textAlign: 'right' }}>缓存读取 $/M</th>
+                <th style={{ textAlign: 'right' }}>缓存写入 $/M</th>
+                <th>来源</th>
                 <th></th>
               </tr>
             </thead>
@@ -281,15 +281,15 @@ export default function Settings() {
                       {isEditing ? (
                         <div className="flex gap-1.5">
                           <ActionBtn
-                            label={saving ? '…' : 'Save'}
+                            label={saving ? '…' : '保存'}
                             color="var(--amber)"
                             onClick={saveEdit}
                             disabled={saving}
                           />
-                          <ActionBtn label="Cancel" color="var(--text-muted)" onClick={() => setEditRow(null)} />
+                          <ActionBtn label="取消" color="var(--text-muted)" onClick={() => setEditRow(null)} />
                         </div>
                       ) : (
-                        <ActionBtn label="Edit" color="var(--text-muted)" onClick={() => startEdit(row)} />
+                        <ActionBtn label="编辑" color="var(--text-muted)" onClick={() => startEdit(row)} />
                       )}
                     </td>
                   </tr>
@@ -299,13 +299,13 @@ export default function Settings() {
           </table>
           {prices.length === 0 && (
             <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)', fontSize: '12px' }}>
-              No prices loaded.
+              暂无价格数据。
             </div>
           )}
         </div>
         <p style={{ color: 'var(--text-muted)', fontSize: '10px', marginTop: 8 }}>
-          Editing a row marks it as 'manual' and prevents auto-overwrite from openclaw.json.
-          Token cost in session files takes precedence when available.
+          手动编辑后标记为 'manual'，不会被 openclaw.json 自动覆盖。
+          会话文件中包含的 Token 成本优先使用。
         </p>
       </section>
     </div>

@@ -6,6 +6,7 @@ import { ChannelsList, ChannelDetailPage } from './pages/Channels'
 import Sessions from './pages/Sessions'
 import SessionDetailPage from './pages/SessionDetail'
 import Settings from './pages/Settings'
+import ClaudeCode from './pages/ClaudeCode'
 
 export default function App() {
   return (
@@ -13,6 +14,7 @@ export default function App() {
       <Layout>
         <Routes>
           <Route path="/" element={<Dashboard />} />
+          <Route path="/claude-code" element={<ClaudeCode />} />
           <Route path="/models" element={<ModelsList />} />
           <Route path="/models/:modelId" element={<ModelDetailPage />} />
           <Route path="/channels" element={<ChannelsList />} />

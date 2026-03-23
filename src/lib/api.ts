@@ -50,9 +50,16 @@ export const api = {
   health: () => get<HealthData>('/health'),
   ingest: () => post<{ ok: boolean; stats: IngestionStats }>('/ingest'),
   fullIngest: () => post<{ ok: boolean; stats: IngestionStats }>('/ingest/full'),
+  claudeCodeSummary: () => get<ClaudeCodeSummary>('/claude-code/summary'),
+  claudeCodeConfig: () => get<ClaudeCodeConfig>('/claude-code/config'),
+  updateClaudeCodeConfig: (config: Partial<ClaudeCodeConfig>) => put<{ ok: boolean }>('/claude-code/config', config),
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
+
+export interface ProductStats {
+  totalTokens: number; totalCost: number; callCount: number; sessions: number
+}
 
 export interface SummaryData {
   today: { totalTokens: number; totalCost: number; sessions: number; channels: number; callCount: number }
@@ -61,6 +68,10 @@ export interface SummaryData {
   channelDistribution: Array<{ channel: string; tokens: number; cost: number; sessions: number }>
   topSessions: Array<{ session_id: string; channel: string; model: string; agent: string; tokens: number; cost: number; calls: number; firstAt: number; lastAt: number }>
   trend7: Array<{ day: string; tokens: number; cost: number }>
+  productBreakdown: {
+    claudeCode: { today: ProductStats; cost7d: number; tokens7d: number }
+    openClaw: { today: ProductStats; cost7d: number; tokens7d: number }
+  }
 }
 
 export interface DailyRow {
@@ -181,4 +192,26 @@ export interface IngestionStats {
   sessionsUpdated: number
   warnings: string[]
   duration: number
+}
+
+export interface ClaudeCodeConfig {
+  monthly_quota_usd: string
+  billing_cycle_day: string
+  plan_name: string
+}
+
+export interface ClaudeCodeSummary {
+  config: { monthlyQuota: number; billingDay: number; planName: string }
+  period: { startMs: number; endMs: number; daysLeft: number; daysTotal: number }
+  periodUsage: {
+    totalTokens: number; inputTokens: number; outputTokens: number
+    cacheReadTokens: number; cacheWriteTokens: number
+    totalCost: number; callCount: number; sessions: number
+  }
+  today: { totalTokens: number; totalCost: number; callCount: number; sessions: number }
+  yesterday: { totalTokens: number; totalCost: number; callCount: number }
+  week: { totalTokens: number; totalCost: number; callCount: number; sessions: number }
+  modelDistribution: Array<{ model: string; tokens: number; cost: number; calls: number }>
+  dailyTrend: Array<DailyRow>
+  topProjects: Array<{ project: string; tokens: number; cost: number; calls: number; sessions: number; lastAt: number }>
 }

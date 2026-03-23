@@ -61,6 +61,7 @@ export default function Dashboard() {
   if (!summary) return null
 
   const { today, yesterday, modelDistribution, trend7 } = summary
+  const chartData = period === '1d' ? trend7 : daily
   const tokenTrend = trendPct(today.totalTokens, yesterday.totalTokens)
   const costTrend = trendPct(today.totalCost, yesterday.totalCost)
   const trendCost = trend7.reduce((s, d) => s + d.cost, 0)
@@ -198,10 +199,10 @@ export default function Dashboard() {
               </Link>
             </div>
           </div>
-          {daily.length > 0 ? (
+          {chartData.length > 0 ? (
             period === '1d' ? (
               <ResponsiveContainer width="100%" height={140}>
-                <BarChart data={daily} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
+                <BarChart data={chartData} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
                   <XAxis
                     dataKey="day"
                     tick={{ fill: 'var(--text-muted)', fontSize: 9 }}
@@ -230,7 +231,7 @@ export default function Dashboard() {
               </ResponsiveContainer>
             ) : (
               <ResponsiveContainer width="100%" height={140}>
-                <ComposedChart data={daily} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
+                <ComposedChart data={chartData} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
                   <defs>
                     <linearGradient id="tokenGrad" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="0%" stopColor="var(--amber)" stopOpacity={0.25} />

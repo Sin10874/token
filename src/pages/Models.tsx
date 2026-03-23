@@ -186,7 +186,7 @@ export function ModelDetailPage() {
 
         <div className="card p-4">
           <div style={{ color: 'var(--text-secondary)', fontSize: '11px', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 8 }}>
-            渠道分布
+            频道分布
           </div>
           {channelMix.length > 0 ? (
             <div className="space-y-2 mt-2">

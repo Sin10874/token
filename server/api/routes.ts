@@ -242,9 +242,21 @@ router.get('/models/:modelId', (req: Request, res: Response) => {
 
 // ─── Channels ────────────────────────────────────────────────────────────────
 
-router.get('/channels', (_req: Request, res: Response) => {
+router.get('/channels', (req: Request, res: Response) => {
+  const period = req.query.period as string | undefined
+  let fromMs = 0
+  if (period === '1d') fromMs = daysAgoStart(0)
+  else if (period === '7d') fromMs = daysAgoStart(6)
+  else if (period === '30d') fromMs = daysAgoStart(29)
+
+  const timeFilter = fromMs > 0 ? ' AND timestamp_ms >= ?' : ''
+  const params = fromMs > 0 ? [fromMs] : []
+
   const rows = db.prepare(`
     SELECT channel,
+      COUNT(*) as messageCount,
+      SUM(input_tokens) as inputTokens,
+      SUM(output_tokens) as outputTokens,
       SUM(total_tokens) as totalTokens,
       SUM(total_cost) as totalCost,
       COUNT(*) as callCount,
@@ -253,10 +265,10 @@ router.get('/channels', (_req: Request, res: Response) => {
       MIN(timestamp_ms) as firstSeen,
       MAX(timestamp_ms) as lastSeen
     FROM usage_events
-    WHERE channel != 'claude-code'
+    WHERE channel != 'claude-code'${timeFilter}
     GROUP BY channel
     ORDER BY totalTokens DESC
-  `).all()
+  `).all(...params)
 
   res.json(rows)
 })

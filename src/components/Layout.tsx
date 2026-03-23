@@ -30,7 +30,7 @@ const NAV: NavEntry[] = [
     icon: Activity,
     matchPrefixes: ['/channels', '/sessions'],
     children: [
-      { to: '/channels', icon: Radio, label: '渠道' },
+      { to: '/channels', icon: Radio, label: '频道' },
       { to: '/sessions', icon: MessageSquare, label: '会话' },
     ],
   },

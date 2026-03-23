@@ -31,7 +31,7 @@ export const api = {
   daily: (days = 30) => get<DailyRow[]>(`/daily?days=${days}`),
   models: () => get<ModelRow[]>('/models'),
   modelDetail: (id: string, days = 30) => get<ModelDetail>(`/models/${encodeURIComponent(id)}?days=${days}`),
-  channels: () => get<ChannelRow[]>('/channels'),
+  channels: (period?: string) => get<ChannelRow[]>(period ? `/channels?period=${period}` : '/channels'),
   channelDetail: (ch: string, days = 30) => get<ChannelDetail>(`/channels/${encodeURIComponent(ch)}?days=${days}`),
   sessions: (params?: SessionsParams) => {
     const q = new URLSearchParams()
@@ -109,6 +109,9 @@ export interface ModelDetail {
 
 export interface ChannelRow {
   channel: string
+  messageCount: number
+  inputTokens: number
+  outputTokens: number
   totalTokens: number
   totalCost: number
   callCount: number

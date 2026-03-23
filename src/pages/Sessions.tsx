@@ -77,7 +77,7 @@ export default function Sessions() {
               cursor: 'pointer',
             }}
           >
-            <option value="">全部渠道</option>
+            <option value="">全部频道</option>
             {channels.map((c) => <option key={c} value={c}>{c}</option>)}
           </select>
 
@@ -130,7 +130,7 @@ export default function Sessions() {
           <thead>
             <tr>
               <th>会话 ID</th>
-              <th>渠道</th>
+              <th>频道</th>
               <th>Agent</th>
               <th>模型</th>
               <th style={{ textAlign: 'right' }}>调用</th>

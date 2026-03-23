@@ -332,7 +332,7 @@ export default function Dashboard() {
             <thead>
               <tr>
                 <th>会话</th>
-                <th>渠道</th>
+                <th>频道</th>
                 <th>模型</th>
                 <th style={{ textAlign: 'right' }}>Token</th>
                 <th style={{ textAlign: 'right' }}>预估成本</th>
@@ -390,7 +390,7 @@ export default function Dashboard() {
         <div className="card p-3">
           <div className="flex items-center justify-between mb-2">
             <span style={{ color: 'var(--text-muted)', fontSize: '10px', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-              渠道
+              频道
             </span>
             <Link to="/channels" style={{ color: 'var(--teal)', fontSize: '10px' }}>全部 →</Link>
           </div>

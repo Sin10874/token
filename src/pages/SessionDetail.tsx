@@ -72,7 +72,7 @@ export default function SessionDetailPage() {
           { label: '预估成本', value: fmtCost(summary.totalCost), color: 'var(--teal)', approx: true },
           { label: 'API调用', value: String(summary.callCount), color: 'var(--amber)', approx: false },
           { label: '时长', value: fmtDuration(duration), color: 'var(--teal)', approx: false },
-          { label: '渠道', value: summary.channel || '—', color: 'var(--text-secondary)', approx: false },
+          { label: '频道', value: summary.channel || '—', color: 'var(--text-secondary)', approx: false },
         ].map((c) => (
           <div key={c.label} className="card p-3">
             <div style={{ color: 'var(--text-muted)', fontSize: '9px', letterSpacing: '0.08em', textTransform: 'uppercase' }}>{c.label}</div>

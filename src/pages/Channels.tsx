@@ -14,21 +14,48 @@ const TOOLTIP_STYLE = {
   color: 'var(--text-primary)',
 }
 
+const PERIOD_OPTIONS = [
+  { value: '1d', label: '1d' },
+  { value: '7d', label: '7d' },
+  { value: '30d', label: '30d' },
+] as const
+
 export function ChannelsList() {
   const [channels, setChannels] = useState<ChannelRow[]>([])
   const [loading, setLoading] = useState(true)
+  const [period, setPeriod] = useState('7d')
   const navigate = useNavigate()
 
   useEffect(() => {
-    api.channels().then(setChannels).finally(() => setLoading(false))
-  }, [])
+    setLoading(true)
+    api.channels(period).then(setChannels).finally(() => setLoading(false))
+  }, [period])
 
-  if (loading) return <PageShell title="渠道"><Spinner /></PageShell>
+  if (loading) return <PageShell title="频道"><Spinner /></PageShell>
 
   const maxTokens = Math.max(...channels.map((c) => c.totalTokens), 1)
 
   return (
-    <PageShell title="渠道" sub={`共 ${channels.length} 个渠道`}>
+    <PageShell title="频道" sub={`共 ${channels.length} 个频道`}>
+      {/* Period filter */}
+      <div className="flex items-center gap-1.5">
+        {PERIOD_OPTIONS.map((opt) => (
+          <button
+            key={opt.value}
+            onClick={() => setPeriod(opt.value)}
+            className="px-3 py-1 rounded-sm text-xs font-medium transition-colors"
+            style={{
+              background: period === opt.value ? 'var(--amber-bg)' : 'var(--bg-elevated)',
+              border: `1px solid ${period === opt.value ? 'var(--amber-dim)' : 'var(--border-default)'}`,
+              color: period === opt.value ? 'var(--amber)' : 'var(--text-muted)',
+              cursor: 'pointer',
+            }}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+
       <div className="space-y-2">
         {channels.map((ch) => (
           <div
@@ -64,9 +91,10 @@ export function ChannelsList() {
 
               {/* Stats */}
               <div className="flex items-center gap-6 shrink-0">
-                <Stat label="会话" value={String(ch.sessionCount)} />
-                <Stat label="调用" value={ch.callCount.toLocaleString()} />
-                <Stat label="模型" value={String(ch.modelCount)} />
+                <Stat label="消息数" value={ch.messageCount.toLocaleString()} />
+                <Stat label="输入Token" value={fmtTokens(ch.inputTokens)} />
+                <Stat label="输出Token" value={fmtTokens(ch.outputTokens)} />
+                <Stat label="总Token" value={fmtTokens(ch.totalTokens)} />
                 <Stat label="预估成本" value={fmtCost(ch.totalCost)} approx />
                 <Stat label="最近" value={fmtRelative(ch.lastSeen)} />
               </div>
@@ -75,7 +103,7 @@ export function ChannelsList() {
         ))}
         {channels.length === 0 && (
           <div className="card p-8 text-center" style={{ color: 'var(--text-muted)', fontSize: '12px' }}>
-            暂无渠道数据。请点击侧边栏同步按钮。
+            暂无频道数据。请点击侧边栏同步按钮。
           </div>
         )}
       </div>
@@ -93,14 +121,14 @@ export function ChannelDetailPage() {
     api.channelDetail(decodeURIComponent(channel)).then(setDetail).finally(() => setLoading(false))
   }, [channel])
 
-  if (loading) return <PageShell title="渠道" back="/channels"><Spinner /></PageShell>
-  if (!detail || !detail.summary) return <PageShell title="渠道" back="/channels"><div style={{ color: 'var(--text-muted)' }}>未找到</div></PageShell>
+  if (loading) return <PageShell title="频道" back="/channels"><Spinner /></PageShell>
+  if (!detail || !detail.summary) return <PageShell title="频道" back="/channels"><div style={{ color: 'var(--text-muted)' }}>未找到</div></PageShell>
 
   const { summary, dailyTrend, modelMix, topSessions } = detail
   const decodedChannel = decodeURIComponent(channel || '')
 
   return (
-    <PageShell title={decodedChannel} sub="渠道详情" back="/channels">
+    <PageShell title={decodedChannel} sub="频道详情" back="/channels">
       {/* Summary */}
       <div className="grid grid-cols-4 gap-3 mb-4">
         {[

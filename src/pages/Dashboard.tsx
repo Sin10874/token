@@ -37,20 +37,23 @@ function DualTooltip({ active, payload, label }: Record<string, unknown>) {
 export default function Dashboard() {
   const [summary, setSummary] = useState<SummaryData | null>(null)
   const [daily, setDaily] = useState<DailyRow[]>([])
-  const [days, setDays] = useState(7)
+  const [period, setPeriod] = useState<'1d' | '7d' | '30d'>('1d')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  const periodDays = period === '1d' ? 1 : period === '7d' ? 7 : 30
+  const periodLabel = period === '1d' ? '今日' : period === '7d' ? '近7天' : '近30天'
 
   useEffect(() => {
     setLoading(true)
     Promise.all([
-      api.summary(),
-      api.daily(days),
+      api.summary(period),
+      api.daily(periodDays),
     ])
       .then(([s, d]) => { setSummary(s); setDaily(d) })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false))
-  }, [days])
+  }, [period, periodDays])
 
   if (loading) return <LoadingState />
   if (error) return <ErrorState message={error} />
@@ -59,18 +62,19 @@ export default function Dashboard() {
   const { today, yesterday, modelDistribution, channelDistribution, topSessions, trend7 } = summary
   const tokenTrend = trendPct(today.totalTokens, yesterday.totalTokens)
   const costTrend = trendPct(today.totalCost, yesterday.totalCost)
-  const cost7d = trend7.reduce((s, d) => s + d.cost, 0)
+  const trendCost = trend7.reduce((s, d) => s + d.cost, 0)
 
   const hasData = today.callCount > 0
 
   // Summary card data
   const avgCallCost = today.callCount > 0 ? today.totalCost / today.callCount : 0
+  const prevLabel = period === '1d' ? '昨日' : period === '7d' ? '上7天' : '上30天'
 
   const PERIOD_OPTIONS = [
-    { label: '1d', value: 1 },
-    { label: '7d', value: 7 },
-    { label: '30d', value: 30 },
-  ] as const
+    { label: '1d', value: '1d' as const },
+    { label: '7d', value: '7d' as const },
+    { label: '30d', value: '30d' as const },
+  ]
 
   return (
     <div className="p-6 space-y-6 fade-in">
@@ -93,20 +97,20 @@ export default function Dashboard() {
               className="text-xs px-2 py-1 rounded-sm mr-3"
               style={{ background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-dim)' }}
             >
-              今日暂无数据 — 点击同步按钮导入
+              {periodLabel}暂无数据 — 点击同步按钮导入
             </span>
           )}
           {PERIOD_OPTIONS.map((opt) => (
             <button
               key={opt.value}
-              onClick={() => setDays(opt.value)}
+              onClick={() => setPeriod(opt.value)}
               className="px-2.5 py-1 text-xs rounded-sm transition-colors"
               style={{
                 fontFamily: 'Barlow Condensed',
                 letterSpacing: '0.04em',
-                background: days === opt.value ? 'var(--amber-bg)' : 'transparent',
-                color: days === opt.value ? 'var(--amber)' : 'var(--text-muted)',
-                border: `1px solid ${days === opt.value ? 'var(--amber-dim)' : 'var(--border-subtle)'}`,
+                background: period === opt.value ? 'var(--amber-bg)' : 'transparent',
+                color: period === opt.value ? 'var(--amber)' : 'var(--text-muted)',
+                border: `1px solid ${period === opt.value ? 'var(--amber-dim)' : 'var(--border-subtle)'}`,
               }}
             >
               {opt.label}
@@ -118,13 +122,13 @@ export default function Dashboard() {
       {/* Summary cards row — 4 cards */}
       <div className="grid grid-cols-4 gap-3">
         <SummaryCard
-          label="今日总花费"
+          label={`${periodLabel}总花费`}
           value={fmtCost(today.totalCost)}
           trend={costTrend}
           costLike
         />
         <SummaryCard
-          label="今日Token用量"
+          label={`${periodLabel}Token用量`}
           value={fmtTokens(today.totalTokens)}
           trend={tokenTrend}
         />
@@ -141,7 +145,7 @@ export default function Dashboard() {
       {/* Metrics row */}
       <div className="grid grid-cols-4 gap-3">
         <MetricCard
-          label="今日Token"
+          label={`${periodLabel}Token`}
           value={fmtTokens(today.totalTokens)}
           sub={`${today.callCount} 次调用`}
           trend={tokenTrend}
@@ -149,9 +153,9 @@ export default function Dashboard() {
           approx
         />
         <MetricCard
-          label="今日预估成本"
+          label={`${periodLabel}预估成本`}
           value={fmtCost(today.totalCost)}
-          sub={`昨日 ${fmtCost(yesterday.totalCost)}`}
+          sub={`${prevLabel} ${fmtCost(yesterday.totalCost)}`}
           trend={costTrend}
           accent="teal"
           approx
@@ -159,13 +163,13 @@ export default function Dashboard() {
         <MetricCard
           label="会话数"
           value={String(today.sessions)}
-          sub="今日活跃"
+          sub={`${periodLabel}活跃`}
           accent="amber"
         />
         <MetricCard
-          label={`${days}日成本`}
-          value={fmtCost(cost7d)}
-          sub={`${trend7.length} 天`}
+          label={`${periodLabel}成本`}
+          value={fmtCost(trendCost)}
+          sub={`${trend7.length} ${period === '1d' ? '小时' : '天'}`}
           accent="teal"
           approx
         />
@@ -177,7 +181,7 @@ export default function Dashboard() {
         <div className="card col-span-2 p-4">
           <div className="flex items-center justify-between mb-3">
             <span style={{ color: 'var(--text-secondary)', fontSize: '11px', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-              {days}日趋势
+              {periodLabel}趋势
             </span>
             <div className="flex items-center gap-3">
               <div className="flex items-center gap-1.5">
@@ -207,7 +211,7 @@ export default function Dashboard() {
                   tick={{ fill: 'var(--text-muted)', fontSize: 9 }}
                   axisLine={false}
                   tickLine={false}
-                  tickFormatter={(v: string) => v.slice(5)}
+                  tickFormatter={(v: string) => period === '1d' ? v : v.slice(5)}
                 />
                 <YAxis
                   yAxisId="tokens"
@@ -254,7 +258,7 @@ export default function Dashboard() {
         {/* Model distribution */}
         <div className="card p-4">
           <div style={{ color: 'var(--text-secondary)', fontSize: '11px', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 12 }}>
-            模型分布 · 今日
+            模型分布 · {periodLabel}
           </div>
           {modelDistribution.length > 0 ? (
             <div>
@@ -312,7 +316,7 @@ export default function Dashboard() {
       <div className="card p-4">
         <div className="flex items-center justify-between mb-3">
           <span style={{ color: 'var(--text-secondary)', fontSize: '11px', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-            热门会话 · 今日
+            热门会话 · {periodLabel}
           </span>
           <Link to="/sessions" style={{ color: 'var(--teal)', fontSize: '10px' }}>全部会话 →</Link>
         </div>
@@ -369,7 +373,7 @@ export default function Dashboard() {
           </table>
         ) : (
           <div style={{ color: 'var(--text-muted)', fontSize: '12px', padding: '24px 0', textAlign: 'center' }}>
-            今日暂无会话
+            {periodLabel}暂无会话
           </div>
         )}
       </div>

@@ -27,7 +27,7 @@ async function put<T>(path: string, body: unknown): Promise<T> {
 }
 
 export const api = {
-  summary: () => get<SummaryData>('/summary'),
+  summary: (period?: string) => get<SummaryData>(period ? `/summary?period=${period}` : '/summary'),
   daily: (days = 30) => get<DailyRow[]>(`/daily?days=${days}`),
   models: () => get<ModelRow[]>('/models'),
   modelDetail: (id: string, days = 30) => get<ModelDetail>(`/models/${encodeURIComponent(id)}?days=${days}`),
@@ -42,6 +42,7 @@ export const api = {
     if (params?.sort) q.set('sort', params.sort)
     if (params?.limit) q.set('limit', String(params.limit))
     if (params?.offset) q.set('offset', String(params.offset))
+    if (params?.period) q.set('period', params.period)
     return get<SessionsResponse>(`/sessions?${q}`)
   },
   sessionDetail: (id: string) => get<SessionDetail>(`/sessions/${encodeURIComponent(id)}`),
@@ -136,6 +137,7 @@ export interface SessionsParams {
   sort?: string
   limit?: number
   offset?: number
+  period?: string
 }
 
 export interface SessionRow {

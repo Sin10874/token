@@ -25,11 +25,27 @@ function daysAgoStart(n: number): number {
 
 // ─── Summary / Dashboard ─────────────────────────────────────────────────────
 
-router.get('/summary', (_req: Request, res: Response) => {
-  const todayMs = todayStart()
-  const yesterdayMs = daysAgoStart(1)
+router.get('/summary', (req: Request, res: Response) => {
+  const period = req.query.period as string | undefined
+  let fromMs: number
+  let prevFromMs: number
+  let prevToMs: number
+  if (period === '7d') {
+    fromMs = daysAgoStart(6)
+    prevFromMs = daysAgoStart(13)
+    prevToMs = fromMs
+  } else if (period === '30d') {
+    fromMs = daysAgoStart(29)
+    prevFromMs = daysAgoStart(59)
+    prevToMs = fromMs
+  } else {
+    // 1d (default)
+    fromMs = todayStart()
+    prevFromMs = daysAgoStart(1)
+    prevToMs = fromMs
+  }
 
-  const todayRow = db.prepare(`
+  const currentRow = db.prepare(`
     SELECT
       COALESCE(SUM(total_tokens), 0) as totalTokens,
       COALESCE(SUM(total_cost), 0) as totalCost,
@@ -38,16 +54,16 @@ router.get('/summary', (_req: Request, res: Response) => {
       COUNT(*) as callCount
     FROM usage_events
     WHERE timestamp_ms >= ?
-  `).get(todayMs) as Record<string, number>
+  `).get(fromMs) as Record<string, number>
 
-  const yesterdayRow = db.prepare(`
+  const prevRow = db.prepare(`
     SELECT
       COALESCE(SUM(total_tokens), 0) as totalTokens,
       COALESCE(SUM(total_cost), 0) as totalCost,
       COUNT(*) as callCount
     FROM usage_events
     WHERE timestamp_ms >= ? AND timestamp_ms < ?
-  `).get(yesterdayMs, todayMs) as Record<string, number>
+  `).get(prevFromMs, prevToMs) as Record<string, number>
 
   const modelDist = db.prepare(`
     SELECT model, provider,
@@ -59,7 +75,7 @@ router.get('/summary', (_req: Request, res: Response) => {
     GROUP BY model
     ORDER BY tokens DESC
     LIMIT 10
-  `).all(todayMs)
+  `).all(fromMs)
 
   const channelDist = db.prepare(`
     SELECT channel,
@@ -70,7 +86,7 @@ router.get('/summary', (_req: Request, res: Response) => {
     WHERE timestamp_ms >= ?
     GROUP BY channel
     ORDER BY tokens DESC
-  `).all(todayMs)
+  `).all(fromMs)
 
   const topSessions = db.prepare(`
     SELECT session_id, channel, model, agent,
@@ -84,22 +100,36 @@ router.get('/summary', (_req: Request, res: Response) => {
     GROUP BY session_id
     ORDER BY tokens DESC
     LIMIT 8
-  `).all(todayMs)
+  `).all(fromMs)
 
-  // Last 7 days trend
-  const trend7 = db.prepare(`
-    SELECT
-      date(timestamp_ms / 1000, 'unixepoch', 'localtime') as day,
-      SUM(total_tokens) as tokens,
-      SUM(total_cost) as cost
-    FROM usage_events
-    WHERE timestamp_ms >= ?
-    GROUP BY day
-    ORDER BY day ASC
-  `).all(daysAgoStart(6))
+  // Trend data: for 1d use hourly, for 7d/30d use daily
+  let trend: unknown[]
+  if (period === '1d' || !period) {
+    trend = db.prepare(`
+      SELECT
+        strftime('%H:00', timestamp_ms / 1000, 'unixepoch', 'localtime') as day,
+        SUM(total_tokens) as tokens,
+        SUM(total_cost) as cost
+      FROM usage_events
+      WHERE timestamp_ms >= ?
+      GROUP BY day
+      ORDER BY day ASC
+    `).all(fromMs)
+  } else {
+    trend = db.prepare(`
+      SELECT
+        date(timestamp_ms / 1000, 'unixepoch', 'localtime') as day,
+        SUM(total_tokens) as tokens,
+        SUM(total_cost) as cost
+      FROM usage_events
+      WHERE timestamp_ms >= ?
+      GROUP BY day
+      ORDER BY day ASC
+    `).all(fromMs)
+  }
 
   // Product breakdown: OpenClaw vs Claude Code
-  const ccToday = db.prepare(`
+  const ccCurrent = db.prepare(`
     SELECT
       COALESCE(SUM(total_tokens), 0) as totalTokens,
       COALESCE(SUM(total_cost), 0) as totalCost,
@@ -107,9 +137,9 @@ router.get('/summary', (_req: Request, res: Response) => {
       COUNT(DISTINCT session_id) as sessions
     FROM usage_events
     WHERE timestamp_ms >= ? AND channel = 'claude-code'
-  `).get(todayMs) as Record<string, number>
+  `).get(fromMs) as Record<string, number>
 
-  const ocToday = db.prepare(`
+  const ocCurrent = db.prepare(`
     SELECT
       COALESCE(SUM(total_tokens), 0) as totalTokens,
       COALESCE(SUM(total_cost), 0) as totalCost,
@@ -117,7 +147,7 @@ router.get('/summary', (_req: Request, res: Response) => {
       COUNT(DISTINCT session_id) as sessions
     FROM usage_events
     WHERE timestamp_ms >= ? AND channel != 'claude-code'
-  `).get(todayMs) as Record<string, number>
+  `).get(fromMs) as Record<string, number>
 
   const cc7d = db.prepare(`
     SELECT
@@ -136,15 +166,15 @@ router.get('/summary', (_req: Request, res: Response) => {
   `).get(daysAgoStart(6)) as Record<string, number>
 
   res.json({
-    today: todayRow,
-    yesterday: yesterdayRow,
+    today: currentRow,
+    yesterday: prevRow,
     modelDistribution: modelDist,
     channelDistribution: channelDist,
     topSessions,
-    trend7,
+    trend7: trend,
     productBreakdown: {
-      claudeCode: { today: ccToday, cost7d: cc7d.cost, tokens7d: cc7d.tokens },
-      openClaw: { today: ocToday, cost7d: oc7d.cost, tokens7d: oc7d.tokens },
+      claudeCode: { today: ccCurrent, cost7d: cc7d.cost, tokens7d: cc7d.tokens },
+      openClaw: { today: ocCurrent, cost7d: oc7d.cost, tokens7d: oc7d.tokens },
     },
   })
 })
@@ -324,9 +354,13 @@ router.get('/channels/:channel', (req: Request, res: Response) => {
 // ─── Sessions ────────────────────────────────────────────────────────────────
 
 router.get('/sessions', (req: Request, res: Response) => {
-  const { channel, model, from, to, sort = 'tokens', limit = '50', offset = '0' } = req.query
+  const { channel, model, from, to, sort = 'tokens', limit = '50', offset = '0', period } = req.query
   const conditions: string[] = ["ue.channel != 'claude-code'"]
   const params: Array<string | number | bigint | null> = []
+
+  if (period === '1d') { conditions.push('ue.timestamp_ms >= ?'); params.push(todayStart()) }
+  else if (period === '7d') { conditions.push('ue.timestamp_ms >= ?'); params.push(daysAgoStart(6)) }
+  else if (period === '30d') { conditions.push('ue.timestamp_ms >= ?'); params.push(daysAgoStart(29)) }
 
   if (channel) { conditions.push('ue.channel = ?'); params.push(channel as string) }
   if (model) { conditions.push('ue.model = ?'); params.push(model as string) }

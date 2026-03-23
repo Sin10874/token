@@ -4,7 +4,7 @@ import {
   XAxis, YAxis, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, AreaChart, Area, Line, ComposedChart
 } from 'recharts'
-import { api, SummaryData, DailyRow, ClaudeCodeSummary } from '../lib/api'
+import { api, SummaryData, DailyRow } from '../lib/api'
 import MetricCard from '../components/MetricCard'
 import { fmtTokens, fmtCost, fmtRelative, shortId, modelColor, trendPct } from '../lib/format'
 
@@ -37,40 +37,40 @@ function DualTooltip({ active, payload, label }: Record<string, unknown>) {
 export default function Dashboard() {
   const [summary, setSummary] = useState<SummaryData | null>(null)
   const [daily, setDaily] = useState<DailyRow[]>([])
-  const [ccSummary, setCCSummary] = useState<ClaudeCodeSummary | null>(null)
+  const [days, setDays] = useState(7)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    setLoading(true)
     Promise.all([
       api.summary(),
-      api.daily(14),
-      api.claudeCodeSummary().catch(() => null),
+      api.daily(days),
     ])
-      .then(([s, d, cc]) => { setSummary(s); setDaily(d); setCCSummary(cc) })
+      .then(([s, d]) => { setSummary(s); setDaily(d) })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false))
-  }, [])
+  }, [days])
 
   if (loading) return <LoadingState />
   if (error) return <ErrorState message={error} />
   if (!summary) return null
 
-  const { today, yesterday, modelDistribution, channelDistribution, topSessions, trend7, productBreakdown } = summary
+  const { today, yesterday, modelDistribution, channelDistribution, topSessions, trend7 } = summary
   const tokenTrend = trendPct(today.totalTokens, yesterday.totalTokens)
   const costTrend = trendPct(today.totalCost, yesterday.totalCost)
   const cost7d = trend7.reduce((s, d) => s + d.cost, 0)
-
-  const cc = productBreakdown?.claudeCode
-  const oc = productBreakdown?.openClaw
 
   const hasData = today.callCount > 0
 
   // Summary card data
   const avgCallCost = today.callCount > 0 ? today.totalCost / today.callCount : 0
-  const ccQuotaPct = ccSummary && ccSummary.config.monthlyQuota > 0
-    ? (ccSummary.periodUsage.totalCost / ccSummary.config.monthlyQuota) * 100
-    : 0
+
+  const PERIOD_OPTIONS = [
+    { label: '1d', value: 1 },
+    { label: '7d', value: 7 },
+    { label: '30d', value: 30 },
+  ] as const
 
   return (
     <div className="p-6 space-y-6 fade-in">
@@ -87,18 +87,36 @@ export default function Dashboard() {
             {new Date().toLocaleDateString('zh-CN', { weekday: 'long', month: 'long', day: 'numeric' })}
           </p>
         </div>
-        {!hasData && (
-          <span
-            className="text-xs px-2 py-1 rounded-sm"
-            style={{ background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-dim)' }}
-          >
-            今日暂无数据 — 点击同步按钮导入
-          </span>
-        )}
+        <div className="flex items-center gap-1">
+          {!hasData && (
+            <span
+              className="text-xs px-2 py-1 rounded-sm mr-3"
+              style={{ background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-dim)' }}
+            >
+              今日暂无数据 — 点击同步按钮导入
+            </span>
+          )}
+          {PERIOD_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => setDays(opt.value)}
+              className="px-2.5 py-1 text-xs rounded-sm transition-colors"
+              style={{
+                fontFamily: 'Barlow Condensed',
+                letterSpacing: '0.04em',
+                background: days === opt.value ? 'var(--amber-bg)' : 'transparent',
+                color: days === opt.value ? 'var(--amber)' : 'var(--text-muted)',
+                border: `1px solid ${days === opt.value ? 'var(--amber-dim)' : 'var(--border-subtle)'}`,
+              }}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {/* Summary cards row — 5 cards */}
-      <div className="grid grid-cols-5 gap-3">
+      {/* Summary cards row — 4 cards */}
+      <div className="grid grid-cols-4 gap-3">
         <SummaryCard
           label="今日总花费"
           value={fmtCost(today.totalCost)}
@@ -117,11 +135,6 @@ export default function Dashboard() {
         <SummaryCard
           label="平均调用成本"
           value={fmtCost(avgCallCost)}
-        />
-        <SummaryCard
-          label="Claude Code额度"
-          value={`${ccQuotaPct.toFixed(1)}%`}
-          progress={ccQuotaPct}
         />
       </div>
 
@@ -150,7 +163,7 @@ export default function Dashboard() {
           accent="amber"
         />
         <MetricCard
-          label="7日成本"
+          label={`${days}日成本`}
           value={fmtCost(cost7d)}
           sub={`${trend7.length} 天`}
           accent="teal"
@@ -158,37 +171,13 @@ export default function Dashboard() {
         />
       </div>
 
-      {/* Product breakdown */}
-      {cc && oc && (
-        <div className="grid grid-cols-2 gap-3">
-          <ProductCard
-            name="Claude Code"
-            icon="terminal"
-            todayCost={cc.today.totalCost}
-            todayTokens={cc.today.totalTokens}
-            todayCalls={cc.today.callCount}
-            cost7d={cc.cost7d}
-            link="/claude-code"
-          />
-          <ProductCard
-            name="OpenClaw"
-            icon="openclaw"
-            todayCost={oc.today.totalCost}
-            todayTokens={oc.today.totalTokens}
-            todayCalls={oc.today.callCount}
-            cost7d={oc.cost7d}
-            link="/channels"
-          />
-        </div>
-      )}
-
       {/* Charts row */}
       <div className="grid grid-cols-3 gap-3">
         {/* 14-day dual trend: tokens + cost */}
         <div className="card col-span-2 p-4">
           <div className="flex items-center justify-between mb-3">
             <span style={{ color: 'var(--text-secondary)', fontSize: '11px', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-              14日趋势
+              {days}日趋势
             </span>
             <div className="flex items-center gap-3">
               <div className="flex items-center gap-1.5">
@@ -470,8 +459,8 @@ function LoadingState() {
   return (
     <div className="p-6 space-y-6">
       <div style={{ color: 'var(--text-muted)', fontSize: '12px' }}>加载仪表盘…</div>
-      <div className="grid grid-cols-5 gap-3">
-        {[0, 1, 2, 3, 4].map((i) => (
+      <div className="grid grid-cols-4 gap-3">
+        {[0, 1, 2, 3].map((i) => (
           <div key={i} className="card p-4 h-20 animate-pulse" style={{ background: 'var(--bg-elevated)' }} />
         ))}
       </div>
@@ -489,50 +478,6 @@ function ErrorState({ message }: { message: string }) {
         </div>
       </div>
     </div>
-  )
-}
-
-function ProductCard({ name, icon, todayCost, todayTokens, todayCalls, cost7d, link }: {
-  name: string; icon: string; todayCost: number; todayTokens: number; todayCalls: number; cost7d: number; link: string
-}) {
-  const totalToday = todayCost
-  return (
-    <Link to={link} className="card p-4 transition-colors hover:border-amber-500/30" style={{ textDecoration: 'none' }}>
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <div
-            className="w-6 h-6 rounded-sm flex items-center justify-center"
-            style={{ background: 'var(--bg-elevated)' }}
-          >
-            <span style={{ fontSize: '12px' }}>{icon === 'terminal' ? '>' : 'O'}</span>
-          </div>
-          <span
-            className="text-xs font-medium"
-            style={{ color: 'var(--text-primary)', fontFamily: 'Barlow', letterSpacing: '0.02em' }}
-          >
-            {name}
-          </span>
-        </div>
-        <span style={{ color: 'var(--text-muted)', fontSize: '10px' }}>→</span>
-      </div>
-      <div className="grid grid-cols-3 gap-3">
-        <div>
-          <div style={{ color: 'var(--text-muted)', fontSize: '9px', textTransform: 'uppercase', letterSpacing: '0.06em' }}>今日成本</div>
-          <span className="num text-sm" style={{ color: 'var(--amber)' }}>{fmtCost(totalToday)}</span>
-        </div>
-        <div>
-          <div style={{ color: 'var(--text-muted)', fontSize: '9px', textTransform: 'uppercase', letterSpacing: '0.06em' }}>今日Token</div>
-          <span className="num text-sm" style={{ color: 'var(--text-primary)' }}>{fmtTokens(todayTokens)}</span>
-        </div>
-        <div>
-          <div style={{ color: 'var(--text-muted)', fontSize: '9px', textTransform: 'uppercase', letterSpacing: '0.06em' }}>7日成本</div>
-          <span className="num text-sm" style={{ color: 'var(--teal)' }}>{fmtCost(cost7d)}</span>
-        </div>
-      </div>
-      <div className="mt-2" style={{ color: 'var(--text-muted)', fontSize: '10px' }}>
-        今日 {todayCalls} 次调用
-      </div>
-    </Link>
   )
 }
 

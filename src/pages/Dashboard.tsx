@@ -59,7 +59,7 @@ export default function Dashboard() {
   if (error) return <ErrorState message={error} />
   if (!summary) return null
 
-  const { today, yesterday, modelDistribution, channelDistribution, topSessions, trend7 } = summary
+  const { today, yesterday, modelDistribution, trend7 } = summary
   const tokenTrend = trendPct(today.totalTokens, yesterday.totalTokens)
   const costTrend = trendPct(today.totalCost, yesterday.totalCost)
   const trendCost = trend7.reduce((s, d) => s + d.cost, 0)
@@ -312,103 +312,7 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Top sessions */}
-      <div className="card p-4">
-        <div className="flex items-center justify-between mb-3">
-          <span style={{ color: 'var(--text-secondary)', fontSize: '11px', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-            热门会话 · {periodLabel}
-          </span>
-          <Link to="/sessions" style={{ color: 'var(--teal)', fontSize: '10px' }}>全部会话 →</Link>
-        </div>
-        {topSessions.length > 0 ? (
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>会话</th>
-                <th>频道</th>
-                <th>模型</th>
-                <th style={{ textAlign: 'right' }}>Token</th>
-                <th style={{ textAlign: 'right' }}>预估成本</th>
-                <th style={{ textAlign: 'right' }}>最近</th>
-              </tr>
-            </thead>
-            <tbody>
-              {topSessions.map((s) => (
-                <tr key={s.session_id}>
-                  <td>
-                    <Link
-                      to={`/sessions/${s.session_id}`}
-                      className="num hover:underline"
-                      style={{ color: 'var(--teal)', fontSize: '11px' }}
-                    >
-                      {shortId(s.session_id)}
-                    </Link>
-                  </td>
-                  <td>
-                    <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>
-                      {s.channel}
-                    </span>
-                  </td>
-                  <td>
-                    <span className="text-2xs px-1.5 py-0.5 rounded-sm" style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)' }}>
-                      {s.model ? s.model.split('/').pop() : '—'}
-                    </span>
-                  </td>
-                  <td style={{ textAlign: 'right' }}>
-                    <span className="num text-xs" style={{ color: 'var(--amber)' }}>{fmtTokens(s.tokens)}</span>
-                  </td>
-                  <td style={{ textAlign: 'right' }}>
-                    <span className="num text-xs" style={{ color: 'var(--text-secondary)' }}>
-                      {fmtCost(s.cost)} <span style={{ color: 'var(--text-muted)', fontSize: '9px' }}>~</span>
-                    </span>
-                  </td>
-                  <td style={{ textAlign: 'right' }}>
-                    <span style={{ color: 'var(--text-muted)', fontSize: '10px' }}>
-                      {fmtRelative(s.lastAt)}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : (
-          <div style={{ color: 'var(--text-muted)', fontSize: '12px', padding: '24px 0', textAlign: 'center' }}>
-            {periodLabel}暂无会话
-          </div>
-        )}
-      </div>
 
-      {/* Channel distribution — compact at bottom */}
-      {channelDistribution.length > 0 && (
-        <div className="card p-3">
-          <div className="flex items-center justify-between mb-2">
-            <span style={{ color: 'var(--text-muted)', fontSize: '10px', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-              频道
-            </span>
-            <Link to="/channels" style={{ color: 'var(--teal)', fontSize: '10px' }}>全部 →</Link>
-          </div>
-          <div className="flex gap-4 flex-wrap">
-            {channelDistribution.map((ch) => {
-              const maxTokens = Math.max(...channelDistribution.map((c) => c.tokens))
-              const pct = maxTokens ? (ch.tokens / maxTokens) * 100 : 0
-              return (
-                <div key={ch.channel} className="flex-1 min-w-[120px] max-w-[200px]">
-                  <div className="flex items-center justify-between mb-0.5">
-                    <span style={{ color: 'var(--text-secondary)', fontSize: '10px' }}>{ch.channel}</span>
-                    <span className="num" style={{ color: 'var(--amber)', fontSize: '10px' }}>{fmtTokens(ch.tokens)}</span>
-                  </div>
-                  <div className="h-1 rounded-full" style={{ background: 'var(--border-default)' }}>
-                    <div
-                      className="h-1 rounded-full transition-all"
-                      style={{ width: `${pct}%`, background: modelColor(ch.channel) }}
-                    />
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      )}
     </div>
   )
 }

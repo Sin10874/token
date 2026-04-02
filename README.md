@@ -1,6 +1,6 @@
-# ClawMeter
+# Tokend
 
-ClawMeter is a local single-user cost monitoring cockpit for OpenClaw.
+Tokend is a local single-user cost monitoring cockpit for OpenClaw.
 
 It reads historical usage primarily from local OpenClaw session files, stores normalized events in SQLite, and shows breakdowns by:
 
@@ -24,7 +24,7 @@ It also supports estimated cost tracking via an editable model price table.
 
 - Cost is only as good as the configured or inferred price table
 - Some models may show `$0.00` until you add prices manually
-- Realtime activity is limited; ClawMeter is strongest on historical accounting
+- Realtime activity is limited; Tokend is strongest on historical accounting
 - No file watcher / auto-refresh loop yet
 - Single-user local app only
 
@@ -36,7 +36,7 @@ It also supports estimated cost tracking via an editable model price table.
 ## Install
 
 ```bash
-cd /Users/xinzechao/.openclaw/workspace/ClawMeter
+cd /Users/xinzechao/.openclaw/workspace/Tokend
 npm install
 ```
 
@@ -47,7 +47,7 @@ This starts:
 - frontend dev server on `127.0.0.1:4173`
 
 ```bash
-cd /Users/xinzechao/.openclaw/workspace/ClawMeter
+cd /Users/xinzechao/.openclaw/workspace/Tokend
 npm run dev
 ```
 
@@ -59,7 +59,7 @@ http://127.0.0.1:4173
 
 ### Important
 
-ClawMeter now uses **frontend port 4173** by default instead of 5173, to avoid common Vite port collisions.
+Tokend now uses **frontend port 4173** by default instead of 5173, to avoid common Vite port collisions.
 
 If 4173 is already occupied, Vite is configured with `strictPort: true`, so startup should fail loudly instead of silently hopping to another port.
 
@@ -68,7 +68,7 @@ If 4173 is already occupied, Vite is configured with `strictPort: true`, so star
 Build frontend and serve it from the backend on port 3001:
 
 ```bash
-cd /Users/xinzechao/.openclaw/workspace/ClawMeter
+cd /Users/xinzechao/.openclaw/workspace/Tokend
 npm run build
 npm run prod
 ```
@@ -137,9 +137,9 @@ PORT=3011 npm run dev
 
 Go to **Settings** and update the model price table.
 
-Some providers/models do not currently have trustworthy built-in pricing, so ClawMeter may need manual price inputs.
+Some providers/models do not currently have trustworthy built-in pricing, so Tokend may need manual price inputs.
 
 ## Notes
 
-- ClawMeter does **not** modify core OpenClaw config
+- Tokend does **not** modify core OpenClaw config
 - It is intended as a local observability tool, not a billing source of truth

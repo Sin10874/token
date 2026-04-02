@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <rect width="32" height="32" rx="4" fill="#060709"/>
+  <!-- T-account horizontal -->
+  <line x1="6" y1="8" x2="26" y2="8" stroke="#f5a623" stroke-width="2.2" stroke-linecap="round"/>
+  <!-- T-account vertical -->
+  <line x1="16" y1="8" x2="16" y2="26" stroke="#f5a623" stroke-width="2.2" stroke-linecap="round"/>
+  <!-- Debit entries — fading ticks -->
+  <line x1="9" y1="13.5" x2="14.5" y2="13.5" stroke="#f5a623" stroke-width="1.5" stroke-linecap="round" opacity="0.8"/>
+  <line x1="9" y1="18.5" x2="13.5" y2="18.5" stroke="#f5a623" stroke-width="1.5" stroke-linecap="round" opacity="0.5"/>
+  <line x1="9" y1="23.5" x2="12" y2="23.5" stroke="#f5a623" stroke-width="1.5" stroke-linecap="round" opacity="0.3"/>
+</svg>

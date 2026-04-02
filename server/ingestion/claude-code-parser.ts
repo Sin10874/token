@@ -1,4 +1,6 @@
 import fs from 'fs'
+import path from 'path'
+import os from 'os'
 import { RawUsageEvent, ParseResult } from './parser.js'
 
 /**
@@ -25,6 +27,7 @@ export function parseClaudeCodeFile(
   let currentModel: string | undefined
   let firstSeenAt: number | undefined
   let lastSeenAt: number | undefined
+  let detectedProjectName: string | undefined
 
   let content: string
   try {
@@ -45,6 +48,16 @@ export function parseClaudeCodeFile(
       parsed = JSON.parse(line)
     } catch (_e) {
       continue // Skip non-JSON lines silently
+    }
+
+    // Extract cwd from first line that has it to determine project name
+    if (!detectedProjectName && parsed.cwd) {
+      const cwd = parsed.cwd as string
+      const home = os.homedir()
+      if (cwd !== home) {
+        detectedProjectName = path.basename(cwd)
+      }
+      // When cwd is home, leave detectedProjectName undefined so scanner's project name is used
     }
 
     const type = parsed.type as string
@@ -81,7 +94,7 @@ export function parseClaudeCodeFile(
       timestampMs: ts,
       sessionId: msgSessionId,
       sessionKey: null,
-      agent: project,
+      agent: detectedProjectName || cleanProjectDir(project),
       provider: 'anthropic',
       model,
       channel: 'claude-code',
@@ -100,7 +113,7 @@ export function parseClaudeCodeFile(
     })
   }
 
-  return { events, currentModel, firstSeenAt, lastSeenAt, warnings, linesRead }
+  return { events, currentModel, firstSeenAt, lastSeenAt, warnings, linesRead, projectName: detectedProjectName }
 }
 
 function resolveTimestamp(raw: unknown): number {
@@ -110,4 +123,18 @@ function resolveTimestamp(raw: unknown): number {
     return isNaN(n) ? Date.now() : n
   }
   return Date.now()
+}
+
+/** Convert Claude Code project dir name like "-Users-xinzechao-ClawMeter" to "ClawMeter" */
+function cleanProjectDir(dir: string): string {
+  // Format: -Users-<username>-<project-path-segments>
+  const parts = dir.split('-')
+  const usersIdx = parts.indexOf('Users')
+  if (usersIdx >= 0) {
+    // Skip "-Users-<username>-" prefix, take the rest
+    const projectParts = parts.slice(usersIdx + 2)
+    const name = projectParts.join('-')
+    return name || ''
+  }
+  return dir || ''
 }

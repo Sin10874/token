@@ -1,5 +1,7 @@
 node_modules/
 dist/
+data/tokend.db
+data/tokend.db-*
 data/clawmeter.db
 data/clawmeter.db-*
 .env

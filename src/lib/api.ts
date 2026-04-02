@@ -28,6 +28,8 @@ async function put<T>(path: string, body: unknown): Promise<T> {
 
 export const api = {
   summary: (period?: string) => get<SummaryData>(period ? `/summary?period=${period}` : '/summary'),
+  platformOverview: (product: PlatformOverviewProduct, period: PlatformOverviewPeriod = '7d') =>
+    get<PlatformOverviewData>(`/platforms/${encodeURIComponent(product)}/overview?period=${period}`),
   daily: (days = 30) => get<DailyRow[]>(`/daily?days=${days}`),
   models: () => get<ModelRow[]>('/models'),
   modelDetail: (id: string, days = 30) => get<ModelDetail>(`/models/${encodeURIComponent(id)}?days=${days}`),
@@ -43,6 +45,7 @@ export const api = {
     if (params?.limit) q.set('limit', String(params.limit))
     if (params?.offset) q.set('offset', String(params.offset))
     if (params?.period) q.set('period', params.period)
+    if (params?.product) q.set('product', params.product)
     return get<SessionsResponse>(`/sessions?${q}`)
   },
   sessionDetail: (id: string) => get<SessionDetail>(`/sessions/${encodeURIComponent(id)}`),
@@ -63,15 +66,17 @@ export interface ProductStats {
 }
 
 export interface SummaryData {
-  today: { totalTokens: number; totalCost: number; sessions: number; channels: number; callCount: number }
-  yesterday: { totalTokens: number; totalCost: number; callCount: number }
+  today: { totalTokens: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; totalCost: number; sessions: number; channels: number; callCount: number; messageCount: number; userMessageCount: number }
+  yesterday: { totalTokens: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; totalCost: number; callCount: number; messageCount: number; userMessageCount: number }
   modelDistribution: Array<{ model: string; provider: string; tokens: number; cost: number; calls: number }>
   channelDistribution: Array<{ channel: string; tokens: number; cost: number; sessions: number }>
-  topSessions: Array<{ session_id: string; channel: string; model: string; agent: string; tokens: number; cost: number; calls: number; firstAt: number; lastAt: number }>
-  trend7: Array<{ day: string; tokens: number; cost: number }>
+  topSessions: Array<{ session_id: string; channel: string; agent: string; session_key: string | null; tokens: number; cost: number; calls: number; firstAt: number; lastAt: number }>
+  botNicknames: Record<string, string>
+  trend7: Array<{ day: string; tokens: number; inputTokens: number; outputTokens: number; cost: number; inputCost: number; outputCost: number }>
   productBreakdown: {
     claudeCode: { today: ProductStats; cost7d: number; tokens7d: number }
     openClaw: { today: ProductStats; cost7d: number; tokens7d: number }
+    codex: { today: ProductStats; cost7d: number; tokens7d: number }
   }
 }
 
@@ -83,6 +88,8 @@ export interface DailyRow {
   cacheReadTokens: number
   cacheWriteTokens: number
   cost: number
+  inputCost: number
+  outputCost: number
   calls: number
   sessions: number
 }
@@ -138,10 +145,83 @@ export interface SessionsParams {
   limit?: number
   offset?: number
   period?: string
+  product?: 'openclaw' | 'codex' | 'claude-code' | 'gemini-cli' | 'copilot-cli' | 'opencode'
+}
+
+export type PlatformOverviewProduct = 'openclaw' | 'codex' | 'claude-code'
+export type PlatformOverviewPeriod = '1d' | '7d' | '30d'
+
+export interface OverviewStats {
+  totalTokens: number
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  totalCost: number
+  callCount: number
+  sessions: number
+  projectCount: number
+  channelCount: number
+}
+
+export interface OverviewTrendRow {
+  bucket: string
+  totalTokens: number
+  totalCost: number
+  callCount: number
+  sessions: number
+}
+
+export interface OverviewBreakdownRow {
+  label: string
+  tokens: number
+  cost: number
+  calls: number
+  sessions: number
+  lastAt?: number
+}
+
+export interface OverviewChannelAgentRow {
+  channel: string
+  agent: string
+  tokens: number
+  cost: number
+  calls: number
+  sessions: number
+}
+
+export interface OverviewSessionRow {
+  session_id: string
+  channel: string
+  agent: string
+  session_key: string | null
+  models: string
+  tokens: number
+  cost: number
+  calls: number
+  firstAt: number
+  lastAt: number
+}
+
+export interface PlatformOverviewData {
+  product: PlatformOverviewProduct
+  period: PlatformOverviewPeriod
+  current: OverviewStats
+  previous: OverviewStats
+  trend: OverviewTrendRow[]
+  peak: OverviewTrendRow | null
+  topModels: OverviewBreakdownRow[]
+  topProjects: OverviewBreakdownRow[]
+  topChannels: OverviewBreakdownRow[]
+  topAgents: OverviewBreakdownRow[]
+  topChannelAgents: OverviewChannelAgentRow[]
+  topSessions: OverviewSessionRow[]
+  botNicknames: Record<string, string>
 }
 
 export interface SessionRow {
   session_id: string
+  session_key: string | null
   channel: string
   agent: string
   models: string
@@ -155,6 +235,7 @@ export interface SessionRow {
 export interface SessionsResponse {
   sessions: SessionRow[]
   total: number
+  botNicknames: Record<string, string>
 }
 
 export interface SessionDetail {

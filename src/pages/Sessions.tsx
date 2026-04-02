@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, SessionRow } from '../lib/api'
-import { fmtTokens, fmtCost, fmtRelative, fmtDuration, shortId } from '../lib/format'
+import { fmtTokens, fmtCost, fmtRelative, fmtDuration, shortId, fmtSessionName } from '../lib/format'
 import { Filter, X } from 'lucide-react'
 
 const SORT_OPTIONS = [
@@ -15,6 +15,7 @@ const PAGE_SIZE = 50
 export default function Sessions() {
   const [sessions, setSessions] = useState<SessionRow[]>([])
   const [total, setTotal] = useState(0)
+  const [botNicknames, setBotNicknames] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(true)
   const [page, setPage] = useState(0)
 
@@ -41,8 +42,9 @@ export default function Sessions() {
       sort,
       limit: PAGE_SIZE,
       offset: page * PAGE_SIZE,
+      product: 'openclaw',
     })
-      .then(({ sessions, total }) => { setSessions(sessions); setTotal(total) })
+      .then((data) => { setSessions(data.sessions); setTotal(data.total); setBotNicknames(data.botNicknames || {}) })
       .finally(() => setLoading(false))
   }, [filterChannel, filterModel, sort, page])
 
@@ -130,6 +132,7 @@ export default function Sessions() {
           <thead>
             <tr>
               <th>会话 ID</th>
+              <th>会话名称</th>
               <th>频道</th>
               <th>Agent</th>
               <th>模型</th>
@@ -154,6 +157,11 @@ export default function Sessions() {
                     >
                       {shortId(s.session_id)}
                     </Link>
+                  </td>
+                  <td>
+                    <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+                      {fmtSessionName(s.agent, s.channel, s.session_key, botNicknames)}
+                    </span>
                   </td>
                   <td>
                     <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>{s.channel}</span>

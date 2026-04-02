@@ -134,16 +134,16 @@ body {
 }
 .data-table th {
   text-align: left;
-  padding: 6px 12px;
-  font-size: 10px;
+  padding: 10px 14px;
+  font-size: 12px;
   font-weight: 500;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   border-bottom: 1px solid var(--border-default);
 }
 .data-table td {
-  padding: 8px 12px;
+  padding: 11px 14px;
   border-bottom: 1px solid var(--border-subtle);
   vertical-align: middle;
 }
@@ -157,6 +157,10 @@ body {
 /* Chart tooltip */
 .recharts-tooltip-wrapper {
   outline: none !important;
+}
+.recharts-tooltip-cursor {
+  fill: transparent !important;
+  stroke: transparent !important;
 }
 
 /* Scanline overlay (subtle) */
@@ -190,4 +194,368 @@ body {
 }
 .count-up {
   animation: count-up 0.3s ease-out forwards;
+}
+
+/* ===== CRT Terminal Theme ===== */
+[data-theme="crt"] {
+  --bg-base: #050505;
+  --bg-surface: #0a0a08;
+  --bg-elevated: #111110;
+  --bg-hover: #181814;
+
+  --border-subtle: #1a1a14;
+  --border-default: #252518;
+  --border-bright: #33331e;
+
+  --text-primary: #d4c9a0;
+  --text-secondary: #8a8060;
+  --text-muted: #4a4530;
+
+  --amber: #c8a030;
+  --amber-bright: #d4b040;
+  --amber-dim: #6a5418;
+  --amber-bg: #0a0804;
+
+  --teal: #7ab060;
+  --teal-bright: #90c070;
+  --teal-dim: #2a4020;
+  --teal-bg: #060a04;
+
+  --green: #7ab060;
+  --green-dim: #2a4020;
+
+  --rose: #c07850;
+  --rose-dim: #4a2a18;
+
+  --violet: #9a8868;
+  --violet-dim: #3a3020;
+
+  --orange: #b89040;
+  --orange-dim: #4a3810;
+}
+
+/* CRT font override — forces monospace everywhere */
+[data-theme="crt"] * {
+  font-family: 'IBM Plex Mono', monospace !important;
+}
+
+/* CRT scanline overlay */
+[data-theme="crt"] body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 0, 0.06) 2px,
+    rgba(0, 0, 0, 0.06) 3px
+  );
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* CRT vignette */
+[data-theme="crt"] body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(
+    ellipse at center,
+    transparent 60%,
+    rgba(0, 0, 0, 0.3) 100%
+  );
+  pointer-events: none;
+  z-index: 9998;
+}
+
+/* CRT: sharp corners on cards */
+[data-theme="crt"] .card,
+[data-theme="crt"] .card-elevated {
+  border-radius: 0;
+}
+
+/* CRT: kill glow effects */
+[data-theme="crt"] .glow-amber,
+[data-theme="crt"] .glow-teal {
+  box-shadow: none;
+}
+
+/* CRT: scrollbar */
+[data-theme="crt"] ::-webkit-scrollbar-thumb {
+  border-radius: 0;
+}
+
+/* ===== Receipt / Dot Matrix Theme ===== */
+[data-theme="receipt"] {
+  --bg-base: #f0ece0;
+  --bg-surface: #e8e4d6;
+  --bg-elevated: #dfdacc;
+  --bg-hover: #d6d0c0;
+
+  --border-subtle: #ccc6b4;
+  --border-default: #b8b2a0;
+  --border-bright: #a8a290;
+
+  --text-primary: #1a1a18;
+  --text-secondary: #3a3a32;
+  --text-muted: #6a685c;
+
+  /* Red ink — faded, like a receipt's cost column */
+  --amber: #8b2500;
+  --amber-bright: #a03020;
+  --amber-dim: #c4a898;
+  --amber-bg: #ece6d8;
+
+  /* Dark accounting green */
+  --teal: #2a6030;
+  --teal-bright: #3a7040;
+  --teal-dim: #b8ccb8;
+  --teal-bg: #e8ece4;
+
+  --green: #2a6030;
+  --green-dim: #b8ccb8;
+
+  --rose: #8b2500;
+  --rose-dim: #d4b8a8;
+
+  --violet: #4a4040;
+  --violet-dim: #c8c0b8;
+
+  --orange: #6b3a2a;
+  --orange-dim: #d0c0b0;
+
+  color-scheme: light;
+}
+
+/* Receipt font — Special Elite has that typewriter ink-strike character */
+[data-theme="receipt"] * {
+  font-family: 'Special Elite', 'Courier New', monospace !important;
+}
+
+/* Paper grain texture */
+[data-theme="receipt"] body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 256px 256px;
+  pointer-events: none;
+  z-index: 9998;
+}
+
+/* Perforation / tear-edge line at top of page */
+[data-theme="receipt"] body::after {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: repeating-linear-gradient(
+    90deg,
+    #b8b2a0 0px,
+    #b8b2a0 4px,
+    transparent 4px,
+    transparent 8px
+  );
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* Receipt: sharp corners, dashed borders — like tear lines */
+[data-theme="receipt"] .card {
+  background: var(--bg-surface);
+  border: 1px dashed var(--border-default);
+  border-radius: 0;
+}
+
+[data-theme="receipt"] .card-elevated {
+  background: var(--bg-elevated);
+  border: 1px dashed var(--border-bright);
+  border-radius: 0;
+}
+
+/* Receipt: kill all glow, shadow, dot-grid */
+[data-theme="receipt"] .glow-amber,
+[data-theme="receipt"] .glow-teal {
+  box-shadow: none;
+}
+
+[data-theme="receipt"] .dot-grid {
+  background-image: none;
+}
+
+/* Receipt: dashed table borders like ledger ruling */
+[data-theme="receipt"] .data-table th {
+  border-bottom: 1px dashed var(--border-default);
+}
+
+[data-theme="receipt"] .data-table td {
+  border-bottom: 1px dashed var(--border-subtle);
+}
+
+/* Receipt: scrollbar */
+[data-theme="receipt"] ::-webkit-scrollbar-thumb {
+  background: var(--border-bright);
+  border-radius: 0;
+}
+
+[data-theme="receipt"] ::-webkit-scrollbar-track {
+  background: var(--bg-base);
+}
+
+/* Receipt: sidebar border dashed */
+[data-theme="receipt"] aside {
+  border-right-style: dashed !important;
+}
+
+/* ========================================================================
+   OCEAN — 3D frosted glass with cyan-teal color mesh.
+   ======================================================================== */
+
+[data-theme="ocean"] {
+  --bg-base: #dce8f0;
+  --bg-surface: #eaf0f4;
+  --bg-elevated: #f0f4f6;
+  --bg-hover: #e0eaf0;
+
+  --border-subtle: #ccdae6;
+  --border-default: #b8cad8;
+  --border-bright: #a0b4c6;
+
+  --text-primary: #1a2430;
+  --text-secondary: #4a6274;
+  --text-muted: #8aa0b4;
+
+  --amber: #0891b2;
+  --amber-bright: #06b6d4;
+  --amber-dim: #67e8f9;
+  --amber-bg: #ecfeff;
+
+  --teal: #0284c7;
+  --teal-bright: #0ea5e9;
+  --teal-dim: #7dd3fc;
+  --teal-bg: #f0f9ff;
+
+  --green: #10b981;
+  --green-dim: #a7f3d0;
+
+  --rose: #ef4444;
+  --rose-dim: #fecaca;
+
+  --violet: #3b82f6;
+  --violet-dim: #93c5fd;
+
+  --orange: #f59e0b;
+  --orange-dim: #fde68a;
+
+  color-scheme: light;
+}
+
+[data-theme="ocean"] body {
+  font-family: 'Manrope', system-ui, sans-serif;
+  background:
+    radial-gradient(ellipse 70% 55% at 5% 10%, rgba(14, 165, 233, 0.30) 0%, transparent 65%),
+    radial-gradient(ellipse 65% 50% at 92% 80%, rgba(20, 184, 166, 0.25) 0%, transparent 65%),
+    radial-gradient(ellipse 50% 40% at 50% 50%, rgba(56, 189, 248, 0.15) 0%, transparent 55%),
+    radial-gradient(ellipse 45% 35% at 78% 15%, rgba(34, 211, 238, 0.18) 0%, transparent 55%),
+    linear-gradient(155deg, #e0eaf4 0%, #d8e6f2 50%, #e2ecf4 100%);
+}
+[data-theme="ocean"] .metric-num {
+  font-family: 'Manrope', system-ui, sans-serif;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+[data-theme="ocean"] .num {
+  font-family: 'Manrope', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+[data-theme="ocean"] #root > div,
+[data-theme="ocean"] main {
+  background: transparent !important;
+}
+
+[data-theme="ocean"] .card {
+  background: rgba(255, 255, 255, 0.40);
+  backdrop-filter: blur(40px) saturate(1.3);
+  -webkit-backdrop-filter: blur(40px) saturate(1.3);
+  border-top: 1px solid rgba(255, 255, 255, 0.80);
+  border-left: 1px solid rgba(255, 255, 255, 0.50);
+  border-right: 1px solid rgba(255, 255, 255, 0.25);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 16px;
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.50),
+    0 0.5px 1px rgba(0, 0, 0, 0.03),
+    0 2px 6px rgba(0, 0, 0, 0.04),
+    0 8px 24px rgba(0, 0, 0, 0.05),
+    0 20px 48px rgba(0, 0, 0, 0.04);
+}
+[data-theme="ocean"] .card-elevated {
+  background: rgba(255, 255, 255, 0.50);
+  backdrop-filter: blur(48px) saturate(1.4);
+  -webkit-backdrop-filter: blur(48px) saturate(1.4);
+  border-top: 1px solid rgba(255, 255, 255, 0.85);
+  border-left: 1px solid rgba(255, 255, 255, 0.55);
+  border-right: 1px solid rgba(255, 255, 255, 0.30);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 16px;
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.60),
+    0 0.5px 1px rgba(0, 0, 0, 0.04),
+    0 3px 8px rgba(0, 0, 0, 0.05),
+    0 12px 32px rgba(0, 0, 0, 0.06),
+    0 24px 56px rgba(0, 0, 0, 0.04);
+}
+
+[data-theme="ocean"] aside {
+  background: rgba(255, 255, 255, 0.35) !important;
+  backdrop-filter: blur(48px) saturate(1.3);
+  -webkit-backdrop-filter: blur(48px) saturate(1.3);
+  border-right: 1px solid rgba(255, 255, 255, 0.40) !important;
+}
+
+[data-theme="ocean"] .data-table th {
+  border-bottom: 0.5px solid rgba(0, 0, 0, 0.06);
+  font-family: 'Manrope', system-ui, sans-serif;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+[data-theme="ocean"] .data-table td {
+  border-bottom: 0.5px solid rgba(0, 0, 0, 0.03);
+}
+[data-theme="ocean"] .data-table tbody tr:hover td {
+  background: rgba(255, 255, 255, 0.30);
+}
+
+[data-theme="ocean"] .dot-grid {
+  background-image: none;
+}
+
+[data-theme="ocean"] .glow-amber {
+  box-shadow: 0 0 24px rgba(8, 145, 178, 0.10);
+}
+[data-theme="ocean"] .glow-teal {
+  box-shadow: 0 0 24px rgba(2, 132, 199, 0.08);
+}
+
+[data-theme="ocean"] * {
+  transition-timing-function: cubic-bezier(0.25, 0.1, 0.25, 1.0);
+}
+
+[data-theme="ocean"] ::-webkit-scrollbar {
+  width: 5px;
+}
+[data-theme="ocean"] ::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.12);
+  border-radius: 4px;
+}
+[data-theme="ocean"] ::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.20);
+}
+[data-theme="ocean"] ::-webkit-scrollbar-track {
+  background: transparent;
 }

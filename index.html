@@ -2,17 +2,27 @@
 <html lang="en" class="dark">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/svg+xml" id="favicon" href="/favicon-classic.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ClawMeter</title>
+    <title>Tokend</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Barlow:wght@300;400;500;600&family=Barlow+Condensed:wght@400;500;600;700&family=DM+Mono:wght@300;400;500&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Barlow:wght@300;400;500;600&family=Barlow+Condensed:wght@400;500;600;700&family=DM+Mono:wght@300;400;500&family=IBM+Plex+Mono:wght@300;400;500;600;700&family=Special+Elite&family=Manrope:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap"
       rel="stylesheet"
     />
   </head>
   <body>
+    <script>
+      try {
+        var t = localStorage.getItem('tokend-theme');
+        if (['crt','receipt','ocean'].indexOf(t) !== -1) {
+          document.documentElement.setAttribute('data-theme', t);
+          var f = document.getElementById('favicon');
+          if (f) f.setAttribute('href', '/favicon-' + t + '.svg');
+        }
+      } catch(e) {}
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

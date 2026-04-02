@@ -1,4 +1,4 @@
-# ClawMeter
+# Tokend
 
 OpenClaw & Claude Code 成本监控工具 — 本地运行的 LLM API 用量与费用看板。
 
@@ -21,7 +21,7 @@ server/                 # 后端源码
   db/index.ts           # SQLite 初始化、表结构、种子数据
   ingestion/            # 数据解析层 (scanner 扫描日志文件, parser 解析事件, claude-code-parser/scanner 专用解析)
   index.ts              # Express 入口
-data/                   # SQLite 数据库文件 (clawmeter.db, 自动创建)
+data/                   # SQLite 数据库文件 (tokend.db, 自动创建)
 dist/client/            # Vite 构建产物
 ```
 
@@ -88,7 +88,7 @@ npm run ingest       # 手动运行数据导入
 npx tsc --noEmit     # 类型检查
 ```
 
-数据库重建: 删除 `data/clawmeter.db` 后重启服务即可自动重建。
+数据库重建: 删除 `data/tokend.db` 后重启服务即可自动重建。
 
 ## 开发流程
 

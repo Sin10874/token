@@ -3,6 +3,15 @@ import { discoverSessionFiles } from './scanner.js'
 import { parseSessionFile } from './parser.js'
 import { discoverClaudeCodeFiles } from './claude-code-scanner.js'
 import { parseClaudeCodeFile } from './claude-code-parser.js'
+import { discoverCodexFiles } from './codex-scanner.js'
+import { parseCodexFile } from './codex-parser.js'
+import { discoverGeminiCliFiles } from './gemini-cli-scanner.js'
+import { parseGeminiCliFile } from './gemini-cli-parser.js'
+import { discoverCopilotCliFiles } from './copilot-cli-scanner.js'
+import { parseCopilotCliFile } from './copilot-cli-parser.js'
+import { discoverOpencodeFiles } from './opencode-scanner.js'
+import { parseOpencodeFile } from './opencode-parser.js'
+import { rebuildSessionsFromUsage, upsertSessionSnapshot } from './session-upsert.js'
 
 interface IngestionStats {
   filesProcessed: number
@@ -24,19 +33,6 @@ const insertEvent = db.prepare(`
     @inputCost, @outputCost, @cacheReadCost, @cacheWriteCost, @totalCost,
     @sourcePath, @stopReason
   )
-`)
-
-const upsertSession = db.prepare(`
-  INSERT INTO sessions (session_id, session_key, agent, channel, first_seen_at, last_seen_at, current_model, call_count, total_tokens, total_cost, source_path)
-  VALUES (@sessionId, @sessionKey, @agent, @channel, @firstSeenAt, @lastSeenAt, @currentModel, @callCount, @totalTokens, @totalCost, @sourcePath)
-  ON CONFLICT(session_id) DO UPDATE SET
-    channel = COALESCE(excluded.channel, sessions.channel),
-    last_seen_at = MAX(excluded.last_seen_at, sessions.last_seen_at),
-    first_seen_at = MIN(excluded.first_seen_at, sessions.first_seen_at),
-    current_model = COALESCE(excluded.current_model, sessions.current_model),
-    call_count = sessions.call_count + excluded.call_count,
-    total_tokens = sessions.total_tokens + excluded.total_tokens,
-    total_cost = sessions.total_cost + excluded.total_cost
 `)
 
 const upsertState = db.prepare(`
@@ -67,6 +63,22 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
     duration: 0,
   }
 
+  // Preload model prices for cost calculation
+  const priceRows = db.prepare('SELECT * FROM model_prices').all() as Array<{
+    model_id: string; input_price: number; output_price: number;
+    cache_read_price: number; cache_write_price: number; per_tokens: number
+  }>
+  const priceMap = new Map(priceRows.map(p => [p.model_id, p]))
+
+  // Lookup price: exact match first, then strip date suffix (e.g. claude-opus-4-5-20251101 → claude-opus-4-5)
+  function findPrice(model: string) {
+    let p = priceMap.get(model)
+    if (p) return p
+    const stripped = model.replace(/-\d{8,}$/, '')
+    if (stripped !== model) p = priceMap.get(stripped)
+    return p || null
+  }
+
   const files = await discoverSessionFiles()
 
   for (const fileInfo of files) {
@@ -79,6 +91,21 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
     if (result.events.length === 0 && result.warnings.length === 0 && !forceReindex && startLine > 0) {
       // No new content
       continue
+    }
+
+    // Calculate costs from model_prices if event has zero cost
+    for (const event of result.events) {
+      if (event.totalCost === 0 && event.totalTokens > 0) {
+        const price = findPrice(event.model)
+        if (price) {
+          const perTokens = price.per_tokens || 1000000
+          event.inputCost = (event.inputTokens * price.input_price) / perTokens
+          event.outputCost = (event.outputTokens * price.output_price) / perTokens
+          event.cacheReadCost = (event.cacheReadTokens * price.cache_read_price) / perTokens
+          event.cacheWriteCost = 0
+          event.totalCost = event.inputCost + event.outputCost + event.cacheReadCost
+        }
+      }
     }
 
     // Insert events in a transaction
@@ -98,24 +125,17 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
     stats.eventsInserted += inserted
     stats.filesProcessed++
 
-    // Upsert session
     if (result.events.length > 0) {
-      const totalTokens = result.events.reduce((s, e) => s + e.totalTokens, 0)
-      const totalCost = result.events.reduce((s, e) => s + e.totalCost, 0)
-      upsertSession.run({
+      if (upsertSessionSnapshot(db, {
         sessionId,
         sessionKey: sessionKey || null,
         agent,
         channel: channel || 'unknown',
-        firstSeenAt: result.firstSeenAt || Date.now(),
-        lastSeenAt: result.lastSeenAt || Date.now(),
         currentModel: result.currentModel || null,
-        callCount: result.events.length,
-        totalTokens,
-        totalCost,
         sourcePath: filePath,
-      })
-      stats.sessionsUpdated++
+      })) {
+        stats.sessionsUpdated++
+      }
     }
 
     // Update warnings
@@ -137,13 +157,6 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
   // ─── Claude Code ingestion ───────────────────────────────────────────────
   const ccFiles = await discoverClaudeCodeFiles()
 
-  // Preload model prices for cost calculation
-  const priceRows = db.prepare('SELECT * FROM model_prices').all() as Array<{
-    model_id: string; input_price: number; output_price: number;
-    cache_read_price: number; cache_write_price: number; per_tokens: number
-  }>
-  const priceMap = new Map(priceRows.map(p => [p.model_id, p]))
-
   for (const fileInfo of ccFiles) {
     const { sessionId, project, filePath } = fileInfo
     const state = getState.get(filePath) as { last_processed_lines: number } | undefined
@@ -157,7 +170,7 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
 
     // Calculate costs from model_prices
     for (const event of result.events) {
-      const price = priceMap.get(event.model)
+      const price = findPrice(event.model)
       if (price) {
         const perTokens = price.per_tokens || 1000000
         event.inputCost = (event.inputTokens * price.input_price) / perTokens
@@ -185,22 +198,16 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
     stats.filesProcessed++
 
     if (result.events.length > 0) {
-      const totalTokens = result.events.reduce((s, e) => s + e.totalTokens, 0)
-      const totalCost = result.events.reduce((s, e) => s + e.totalCost, 0)
-      upsertSession.run({
+      if (upsertSessionSnapshot(db, {
         sessionId,
         sessionKey: null,
-        agent: project,
+        agent: result.projectName || project,
         channel: 'claude-code',
-        firstSeenAt: result.firstSeenAt || Date.now(),
-        lastSeenAt: result.lastSeenAt || Date.now(),
         currentModel: result.currentModel || null,
-        callCount: result.events.length,
-        totalTokens,
-        totalCost,
         sourcePath: filePath,
-      })
-      stats.sessionsUpdated++
+      })) {
+        stats.sessionsUpdated++
+      }
     }
 
     clearWarnings.run(filePath)
@@ -215,6 +222,186 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
       scanAt: Date.now(),
       eventCount: result.events.length,
     })
+  }
+
+  // ─── Codex ingestion (CLI + App) ─────────────────────────────────────────
+  const codexFiles = await discoverCodexFiles()
+
+  for (const fileInfo of codexFiles) {
+    const { sessionId, filePath } = fileInfo
+    const state = getState.get(filePath) as { last_processed_lines: number } | undefined
+    const startLine = forceReindex ? 0 : state?.last_processed_lines || 0
+
+    const result = parseCodexFile(filePath, sessionId, fileInfo.title, fileInfo.cwd, startLine)
+
+    if (result.events.length === 0 && result.warnings.length === 0 && !forceReindex && startLine > 0) {
+      continue
+    }
+
+    // Calculate costs from model_prices
+    for (const event of result.events) {
+      const price = findPrice(event.model)
+      if (price) {
+        const perTokens = price.per_tokens || 1000000
+        event.inputCost = (event.inputTokens * price.input_price) / perTokens
+        event.outputCost = (event.outputTokens * price.output_price) / perTokens
+        event.cacheReadCost = (event.cacheReadTokens * price.cache_read_price) / perTokens
+        event.cacheWriteCost = 0
+        event.totalCost = event.inputCost + event.outputCost + event.cacheReadCost
+      }
+    }
+
+    let inserted = 0
+    db.exec('BEGIN')
+    try {
+      for (const event of result.events) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const info = insertEvent.run(event as any) as { changes: number }
+        inserted += info.changes
+      }
+      db.exec('COMMIT')
+    } catch (e) {
+      db.exec('ROLLBACK')
+      throw e
+    }
+    stats.eventsInserted += inserted
+    stats.filesProcessed++
+
+    if (result.events.length > 0) {
+      if (upsertSessionSnapshot(db, {
+        sessionId,
+        sessionKey: null,
+        agent: result.projectName || '~',
+        channel: 'codex',
+        currentModel: result.currentModel || null,
+        sourcePath: filePath,
+      })) {
+        stats.sessionsUpdated++
+      }
+    }
+
+    clearWarnings.run(filePath)
+    for (const w of result.warnings) {
+      insertWarning.run(filePath, w, Date.now())
+      stats.warnings.push(`${filePath}: ${w}`)
+    }
+
+    upsertState.run({
+      sourcePath: filePath,
+      lines: result.linesRead,
+      scanAt: Date.now(),
+      eventCount: result.events.length,
+    })
+  }
+
+  // ─── Gemini CLI ingestion ────────────────────────────────────────────────
+  const geminiFiles = await discoverGeminiCliFiles()
+
+  for (const fileInfo of geminiFiles) {
+    const result = parseGeminiCliFile(fileInfo.filePath, fileInfo.sessionId)
+    let inserted = 0
+    db.exec('BEGIN')
+    try {
+      for (const event of result.events) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const info = insertEvent.run(event as any) as { changes: number }
+        inserted += info.changes
+      }
+      db.exec('COMMIT')
+    } catch (e) {
+      db.exec('ROLLBACK')
+      throw e
+    }
+    stats.eventsInserted += inserted
+    stats.filesProcessed++
+
+    if (result.events.length > 0) {
+      if (upsertSessionSnapshot(db, {
+        sessionId: fileInfo.sessionId,
+        sessionKey: null,
+        agent: 'unknown',
+        channel: 'gemini-cli',
+        currentModel: result.currentModel || null,
+        sourcePath: fileInfo.filePath,
+      })) {
+        stats.sessionsUpdated++
+      }
+    }
+  }
+
+  // ─── Copilot CLI ingestion ───────────────────────────────────────────────
+  const copilotFiles = await discoverCopilotCliFiles()
+
+  for (const fileInfo of copilotFiles) {
+    const result = parseCopilotCliFile(fileInfo.filePath, fileInfo.sessionId)
+    let inserted = 0
+    db.exec('BEGIN')
+    try {
+      for (const event of result.events) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const info = insertEvent.run(event as any) as { changes: number }
+        inserted += info.changes
+      }
+      db.exec('COMMIT')
+    } catch (e) {
+      db.exec('ROLLBACK')
+      throw e
+    }
+    stats.eventsInserted += inserted
+    stats.filesProcessed++
+
+    if (result.events.length > 0) {
+      if (upsertSessionSnapshot(db, {
+        sessionId: fileInfo.sessionId,
+        sessionKey: null,
+        agent: result.projectName || 'unknown',
+        channel: 'copilot-cli',
+        currentModel: result.currentModel || null,
+        sourcePath: fileInfo.filePath,
+      })) {
+        stats.sessionsUpdated++
+      }
+    }
+  }
+
+  // ─── OpenCode ingestion ──────────────────────────────────────────────────
+  const opencodeFiles = await discoverOpencodeFiles()
+
+  for (const fileInfo of opencodeFiles) {
+    const result = parseOpencodeFile(fileInfo)
+    let inserted = 0
+    db.exec('BEGIN')
+    try {
+      for (const event of result.events) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const info = insertEvent.run(event as any) as { changes: number }
+        inserted += info.changes
+      }
+      db.exec('COMMIT')
+    } catch (e) {
+      db.exec('ROLLBACK')
+      throw e
+    }
+    stats.eventsInserted += inserted
+    stats.filesProcessed++
+
+    const sessionIds = new Set(result.events.map((event) => event.sessionId))
+    for (const sessionId of sessionIds) {
+      if (upsertSessionSnapshot(db, {
+        sessionId,
+        sessionKey: null,
+        agent: result.projectName || 'unknown',
+        channel: 'opencode',
+        currentModel: result.currentModel || null,
+        sourcePath: fileInfo.filePath,
+      })) {
+        stats.sessionsUpdated++
+      }
+    }
+  }
+
+  if (forceReindex) {
+    stats.sessionsUpdated = rebuildSessionsFromUsage(db)
   }
 
   stats.duration = Date.now() - start

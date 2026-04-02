@@ -6,7 +6,17 @@ import os from 'os'
 const DATA_DIR = path.join(process.cwd(), 'data')
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true })
 
-const DB_PATH = path.join(DATA_DIR, 'clawmeter.db')
+// Auto-migrate from old name
+const OLD_DB = path.join(DATA_DIR, 'clawmeter.db')
+const DB_PATH = path.join(DATA_DIR, 'tokend.db')
+if (fs.existsSync(OLD_DB) && !fs.existsSync(DB_PATH)) {
+  fs.renameSync(OLD_DB, DB_PATH)
+  // Also migrate WAL/SHM if present
+  for (const suffix of ['-wal', '-shm']) {
+    const old = OLD_DB + suffix
+    if (fs.existsSync(old)) fs.renameSync(old, DB_PATH + suffix)
+  }
+}
 export const db = new DatabaseSync(DB_PATH)
 
 db.exec('PRAGMA journal_mode = WAL')
@@ -112,7 +122,11 @@ if (priceCountRow.c === 0) {
     ['claude-haiku-3', 'anthropic', 0.25, 1.25, 0.03, 0.3],
     ['gpt-5.4', 'openai', 0, 0, 0, 0],
     ['gpt-4o', 'openai', 2.5, 10, 0, 0],
-    ['kimi-k2.5', 'moonshot', 0, 0, 0, 0],
+    ['kimi-k2.5', 'moonshot', 0.6, 3, 0.1, 0],
+    ['glm-5-turbo', 'zhipu', 1.2, 4, 0.24, 0],
+    ['glm-4.7', 'zhipu', 0.6, 2.2, 0.11, 0],
+    ['glm-4.5-air', 'zhipu', 0.2, 1.1, 0.03, 0],
+    ['MiniMax-M2.7', 'minimax', 0.3, 1.2, 0.03, 0.12],
   ]
   for (const [modelId, provider, inp, out, cr, cw] of defaultPrices) {
     insert.run(modelId, provider, inp, out, cr, cw, now)
@@ -155,12 +169,13 @@ function loadOpenClawPrices() {
       const models = (providerData as any)?.models || []
       for (const model of models) {
         if (model.cost) {
-          upsert.run(
-            model.id, providerName,
-            model.cost.input || 0, model.cost.output || 0,
-            model.cost.cacheRead || 0, model.cost.cacheWrite || 0,
-            now
-          )
+          const inp = model.cost.input || 0
+          const out = model.cost.output || 0
+          const cr = model.cost.cacheRead || 0
+          const cw = model.cost.cacheWrite || 0
+          // Skip all-zero pricing — don't overwrite seed data with zeros
+          if (inp === 0 && out === 0 && cr === 0 && cw === 0) continue
+          upsert.run(model.id, providerName, inp, out, cr, cw, now)
         }
       }
     }

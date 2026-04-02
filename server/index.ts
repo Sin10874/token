@@ -30,7 +30,7 @@ if (IS_PROD) {
 }
 
 app.listen(PORT, '127.0.0.1', async () => {
-  console.log(`\n  ClawMeter API  →  http://127.0.0.1:${PORT}`)
+  console.log(`\n  Tokend API  →  http://127.0.0.1:${PORT}`)
   if (IS_PROD) {
     console.log(`  Frontend       →  http://127.0.0.1:${PORT}`)
   } else {

@@ -30,6 +30,16 @@ export interface ParseResult {
   lastSeenAt?: number
   warnings: string[]
   linesRead: number
+  projectName?: string
+}
+
+// Normalize model names (merge aliases into canonical name)
+const MODEL_ALIASES: Record<string, string> = {
+  'M-2.7': 'MiniMax-M2.7',
+}
+
+function normalizeModel(model: string): string {
+  return MODEL_ALIASES[model] || model
 }
 
 function resolveTimestamp(raw: unknown): number {
@@ -116,7 +126,7 @@ export function parseSessionFile(
 
     const msgTimestamp = (msg.timestamp as number) || ts
     const msgId = (parsed.id as string) || `${sessionId}-${i}`
-    const model = (msg.model as string) || currentModel || 'unknown'
+    const model = normalizeModel((msg.model as string) || currentModel || 'unknown')
     const provider = (msg.provider as string) || 'unknown'
 
     currentModel = model

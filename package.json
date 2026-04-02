@@ -9,7 +9,9 @@
     "build": "vite build",
     "start": "NODE_ENV=production tsx server/index.ts",
     "prod": "npm run build && NODE_ENV=production tsx server/index.ts",
-    "ingest": "tsx server/ingestion/index.ts"
+    "ingest": "tsx server/ingestion/index.ts",
+    "setup-hooks": "git config core.hooksPath .githooks",
+    "update-version-record": "node scripts/update-version-record.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",

@@ -1,0 +1,9 @@
+{
+  "version": "1.0.0",
+  "coreFeatures": [
+    "支持 OpenClaw / Claude Code / Codex / Gemini CLI / OpenCode / Copilot CLI",
+    "提供仪表盘、平台页、模型 / 频道 / 会话分析",
+    "支持增量同步与全量重算 ingestion",
+    "支持价格表维护与成本估算"
+  ]
+}

@@ -87,6 +87,37 @@ http://127.0.0.1:3001
 npm run ingest
 ```
 
+### Install Project Hooks
+
+This project can auto-update the Feishu `版本记录` sheet before `git push`.
+
+```bash
+npm run setup-hooks
+```
+
+After that, each push will run:
+
+```bash
+npm run update-version-record
+```
+
+Release content is read from:
+
+```text
+release/current-version.json
+```
+
+Before publishing a new version:
+
+1. Update `package.json` version
+2. Update `release/current-version.json`
+3. Run `git push`
+
+The hook currently writes to:
+
+- spreadsheet: `ICA2s2tgGhonFjtLblRctv8AnGc`
+- sheet: `版本记录` (`cVwJUD`)
+
 ### Rebuild frontend
 
 ```bash

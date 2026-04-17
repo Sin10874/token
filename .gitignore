@@ -4,5 +4,19 @@ data/tokend.db
 data/tokend.db-*
 data/clawmeter.db
 data/clawmeter.db-*
+/tokend.db
+
+# Secrets
 .env
+.npmrc
 *.local
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# npm pack artifacts
+*.tgz
+
+# Claude Code local workspace (settings.local.json, worktrees, cache)
+.claude/

@@ -1,7 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
-import { RawUsageEvent, ParseResult } from './parser.js'
+import { ParseResult, RawMessageEvent, RawUsageEvent } from './parser.js'
 
 /**
  * Parse Claude Code conversation JSONL files.
@@ -23,17 +23,19 @@ export function parseClaudeCodeFile(
   startLine = 0
 ): ParseResult {
   const events: RawUsageEvent[] = []
+  const messages = new Map<string, RawMessageEvent>()
   const warnings: string[] = []
   let currentModel: string | undefined
   let firstSeenAt: number | undefined
   let lastSeenAt: number | undefined
-  let detectedProjectName: string | undefined
+  const rootProjectName = cleanProjectDir(project)
+  let detectedProjectName: string | undefined = rootProjectName || undefined
 
   let content: string
   try {
     content = fs.readFileSync(filePath, 'utf8')
   } catch (e) {
-    return { events, warnings: [`Cannot read ${filePath}`], linesRead: 0 }
+    return { events, messages: [], warnings: [`Cannot read ${filePath}`], linesRead: 0 }
   }
 
   const lines = content.split('\n')
@@ -50,8 +52,8 @@ export function parseClaudeCodeFile(
       continue // Skip non-JSON lines silently
     }
 
-    // Extract cwd from first line that has it to determine project name
-    if (!detectedProjectName && parsed.cwd) {
+    // Only fall back to cwd when scanner project root cannot be derived.
+    if (!rootProjectName && !detectedProjectName && parsed.cwd) {
       const cwd = parsed.cwd as string
       const home = os.homedir()
       if (cwd !== home) {
@@ -67,10 +69,77 @@ export function parseClaudeCodeFile(
     if (!lastSeenAt || ts > lastSeenAt) lastSeenAt = ts
 
     // Only process assistant messages
-    if (type !== 'assistant') continue
-
     const msg = parsed.message as Record<string, unknown> | undefined
     if (!msg) continue
+    const msgSessionId = (parsed.sessionId as string) || sessionId
+    const contentParts = Array.isArray(msg.content) ? msg.content as Array<Record<string, unknown>> : []
+
+    if (type === 'user') {
+      const toolResultId = extractClaudeToolResultId(contentParts)
+      if (toolResultId) {
+        messages.set(`cc-tool-result::${msgSessionId}::${toolResultId}`, {
+          id: `cc-tool-result::${msgSessionId}::${toolResultId}`,
+          timestampMs: ts,
+          sessionId: msgSessionId,
+          sessionKey: null,
+          agent: detectedProjectName || rootProjectName,
+          provider: 'anthropic',
+          model: currentModel || 'unknown',
+          channel: 'claude-code',
+          kind: 'tool_result',
+          sourcePath: filePath,
+        })
+      } else if (contentParts.some((part) => part.type === 'text')) {
+        const logicalId = String((msg.id as string) || (parsed.uuid as string) || `${msgSessionId}-${i}`)
+        messages.set(`cc-msg::${msgSessionId}::${logicalId}`, {
+          id: `cc-msg::${msgSessionId}::${logicalId}`,
+          timestampMs: ts,
+          sessionId: msgSessionId,
+          sessionKey: null,
+          agent: detectedProjectName || rootProjectName,
+          provider: 'anthropic',
+          model: currentModel || 'unknown',
+          channel: 'claude-code',
+          kind: 'user',
+          sourcePath: filePath,
+        })
+      }
+      continue
+    }
+
+    if (type !== 'assistant') continue
+
+    const logicalId = String((msg.id as string) || (parsed.uuid as string) || `${msgSessionId}-${i}`)
+    if (contentParts.some((part) => part.type === 'text')) {
+      messages.set(`cc-msg::${msgSessionId}::${logicalId}`, {
+        id: `cc-msg::${msgSessionId}::${logicalId}`,
+        timestampMs: ts,
+        sessionId: msgSessionId,
+        sessionKey: null,
+        agent: detectedProjectName || rootProjectName,
+        provider: 'anthropic',
+        model: String((msg.model as string) || currentModel || 'unknown'),
+        channel: 'claude-code',
+        kind: 'assistant',
+        sourcePath: filePath,
+      })
+    }
+    for (const part of contentParts) {
+      if (part.type !== 'tool_use') continue
+      const toolId = typeof part.id === 'string' ? part.id : `${logicalId}-tool`
+      messages.set(`cc-tool-call::${msgSessionId}::${toolId}`, {
+        id: `cc-tool-call::${msgSessionId}::${toolId}`,
+        timestampMs: ts,
+        sessionId: msgSessionId,
+        sessionKey: null,
+        agent: detectedProjectName || rootProjectName,
+        provider: 'anthropic',
+        model: String((msg.model as string) || currentModel || 'unknown'),
+        channel: 'claude-code',
+        kind: 'tool_call',
+        sourcePath: filePath,
+      })
+    }
 
     const usage = msg.usage as Record<string, unknown> | undefined
     if (!usage) continue
@@ -87,24 +156,25 @@ export function parseClaudeCodeFile(
     currentModel = model
 
     const msgUuid = (parsed.uuid as string) || `${sessionId}-${i}`
-    const msgSessionId = (parsed.sessionId as string) || sessionId
 
     events.push({
       id: `cc::${msgSessionId}::${msgUuid}`,
       timestampMs: ts,
       sessionId: msgSessionId,
       sessionKey: null,
-      agent: detectedProjectName || cleanProjectDir(project),
+      agent: detectedProjectName || rootProjectName,
       provider: 'anthropic',
       model,
       channel: 'claude-code',
       inputTokens,
       outputTokens,
+      reasoningTokens: 0,
       cacheReadTokens,
       cacheWriteTokens: cacheCreationTokens,
       totalTokens,
       inputCost: 0, // Costs will be calculated from model_prices during query
       outputCost: 0,
+      reasoningCost: 0,
       cacheReadCost: 0,
       cacheWriteCost: 0,
       totalCost: 0,
@@ -113,7 +183,16 @@ export function parseClaudeCodeFile(
     })
   }
 
-  return { events, currentModel, firstSeenAt, lastSeenAt, warnings, linesRead, projectName: detectedProjectName }
+  return {
+    events,
+    messages: Array.from(messages.values()),
+    currentModel,
+    firstSeenAt,
+    lastSeenAt,
+    warnings,
+    linesRead,
+    projectName: detectedProjectName || rootProjectName,
+  }
 }
 
 function resolveTimestamp(raw: unknown): number {
@@ -137,4 +216,12 @@ function cleanProjectDir(dir: string): string {
     return name || ''
   }
   return dir || ''
+}
+
+function extractClaudeToolResultId(contentParts: Array<Record<string, unknown>>): string | null {
+  for (const part of contentParts) {
+    if (part.type !== 'tool_result') continue
+    if (typeof part.tool_use_id === 'string') return part.tool_use_id
+  }
+  return null
 }

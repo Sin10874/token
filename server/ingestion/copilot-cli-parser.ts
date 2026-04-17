@@ -1,6 +1,6 @@
 import fs from 'fs'
 import path from 'path'
-import { ParseResult, RawUsageEvent } from './parser.js'
+import { ParseResult, RawMessageEvent, RawUsageEvent } from './parser.js'
 
 function resolveTimestamp(raw: unknown): number | null {
   if (typeof raw === 'number') return raw
@@ -18,6 +18,7 @@ function getProject(context: Record<string, unknown> | undefined): string {
 
 export function parseCopilotCliFile(filePath: string, sessionId: string): ParseResult {
   const events: RawUsageEvent[] = []
+  const messages: RawMessageEvent[] = []
   const warnings: string[] = []
   let currentModel: string | undefined
   let firstSeenAt: number | undefined
@@ -29,7 +30,7 @@ export function parseCopilotCliFile(filePath: string, sessionId: string): ParseR
   try {
     content = fs.readFileSync(filePath, 'utf8')
   } catch {
-    return { events, warnings: [`Cannot read ${filePath}`], linesRead: 0 }
+    return { events, messages, warnings: [`Cannot read ${filePath}`], linesRead: 0 }
   }
 
   const lines = content.split('\n')
@@ -83,11 +84,13 @@ export function parseCopilotCliFile(filePath: string, sessionId: string): ParseR
         channel: 'copilot-cli',
         inputTokens,
         outputTokens,
+        reasoningTokens: 0,
         cacheReadTokens: cachedRead,
         cacheWriteTokens,
         totalTokens,
         inputCost: 0,
         outputCost: 0,
+        reasoningCost: 0,
         cacheReadCost: 0,
         cacheWriteCost: 0,
         totalCost: 0,
@@ -99,6 +102,7 @@ export function parseCopilotCliFile(filePath: string, sessionId: string): ParseR
 
   return {
     events,
+    messages,
     currentModel,
     firstSeenAt,
     lastSeenAt,

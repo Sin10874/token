@@ -1,5 +1,5 @@
 import fs from 'fs'
-import { ParseResult, RawUsageEvent } from './parser.js'
+import { ParseResult, RawMessageEvent, RawUsageEvent } from './parser.js'
 
 interface GeminiMessage {
   id?: string
@@ -34,6 +34,7 @@ export function parseGeminiCliFile(
   sessionId: string,
 ): ParseResult {
   const events: RawUsageEvent[] = []
+  const messageEvents: RawMessageEvent[] = []
   const warnings: string[] = []
   let currentModel: string | undefined
   let firstSeenAt: number | undefined
@@ -43,7 +44,7 @@ export function parseGeminiCliFile(
   try {
     data = JSON.parse(fs.readFileSync(filePath, 'utf8'))
   } catch {
-    return { events, warnings: [`Cannot read ${filePath}`], linesRead: 0 }
+    return { events, messages: messageEvents, warnings: [`Cannot read ${filePath}`], linesRead: 0 }
   }
 
   const messages = data.messages || data.history || []
@@ -56,10 +57,39 @@ export function parseGeminiCliFile(
     if (!lastSeenAt || ts > lastSeenAt) lastSeenAt = ts
 
     const role = msg.role || msg.type
-    if (role === 'user') continue
+    if (role === 'user') {
+      messageEvents.push({
+        id: `gemini-cli-msg::${sessionId}::${msg.id || index}`,
+        timestampMs: ts,
+        sessionId,
+        sessionKey: null,
+        agent: 'unknown',
+        provider: 'google',
+        model: msg.model || data.model || currentModel || 'unknown',
+        channel: 'gemini-cli',
+        kind: 'user',
+        sourcePath: filePath,
+      })
+      continue
+    }
 
     const model = msg.model || data.model || currentModel || 'unknown'
     currentModel = model
+
+    if (role === 'gemini' || role === 'assistant' || role === 'model') {
+      messageEvents.push({
+        id: `gemini-cli-msg::${sessionId}::${msg.id || index}`,
+        timestampMs: ts,
+        sessionId,
+        sessionKey: null,
+        agent: 'unknown',
+        provider: 'google',
+        model,
+        channel: 'gemini-cli',
+        kind: 'assistant',
+        sourcePath: filePath,
+      })
+    }
 
     const tokens = msg.tokens
     const usage = msg.usage || msg.usageMetadata || msg.token_count
@@ -98,11 +128,13 @@ export function parseGeminiCliFile(
       channel: 'gemini-cli',
       inputTokens,
       outputTokens,
+      reasoningTokens,
       cacheReadTokens,
       cacheWriteTokens: 0,
       totalTokens,
       inputCost: 0,
       outputCost: 0,
+      reasoningCost: 0,
       cacheReadCost: 0,
       cacheWriteCost: 0,
       totalCost: 0,
@@ -111,5 +143,5 @@ export function parseGeminiCliFile(
     })
   }
 
-  return { events, currentModel, firstSeenAt, lastSeenAt, warnings, linesRead: messages.length }
+  return { events, messages: messageEvents, currentModel, firstSeenAt, lastSeenAt, warnings, linesRead: messages.length }
 }

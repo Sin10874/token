@@ -11,11 +11,13 @@ export interface RawUsageEvent {
   channel: string
   inputTokens: number
   outputTokens: number
+  reasoningTokens: number
   cacheReadTokens: number
   cacheWriteTokens: number
   totalTokens: number
   inputCost: number
   outputCost: number
+  reasoningCost: number
   cacheReadCost: number
   cacheWriteCost: number
   totalCost: number
@@ -23,8 +25,24 @@ export interface RawUsageEvent {
   stopReason: string
 }
 
+export type MessageKind = 'user' | 'assistant' | 'tool_call' | 'tool_result'
+
+export interface RawMessageEvent {
+  id: string
+  timestampMs: number
+  sessionId: string
+  sessionKey?: string | null
+  agent: string
+  provider: string
+  model: string
+  channel: string
+  kind: MessageKind
+  sourcePath: string
+}
+
 export interface ParseResult {
   events: RawUsageEvent[]
+  messages: RawMessageEvent[]
   currentModel?: string
   firstSeenAt?: number
   lastSeenAt?: number
@@ -60,6 +78,7 @@ export function parseSessionFile(
   startLine = 0
 ): ParseResult {
   const events: RawUsageEvent[] = []
+  const messages: RawMessageEvent[] = []
   const warnings: string[] = []
   let currentModel: string | undefined
   let firstSeenAt: number | undefined
@@ -69,7 +88,7 @@ export function parseSessionFile(
   try {
     content = fs.readFileSync(filePath, 'utf8')
   } catch (e) {
-    return { events, warnings: [`Cannot read ${filePath}`], linesRead: 0 }
+    return { events, messages, warnings: [`Cannot read ${filePath}`], linesRead: 0 }
   }
 
   const lines = content.split('\n')
@@ -101,7 +120,76 @@ export function parseSessionFile(
     if (type !== 'message') continue
 
     const msg = parsed.message as Record<string, unknown> | undefined
-    if (!msg || msg.role !== 'assistant') continue
+    if (!msg) continue
+
+    const role = msg.role as string | undefined
+    const msgTimestamp = (msg.timestamp as number) || ts
+    const msgId = (parsed.id as string) || `${sessionId}-${i}`
+    const model = normalizeModel((msg.model as string) || currentModel || 'unknown')
+    const provider = (msg.provider as string) || 'unknown'
+    const contentParts = Array.isArray(msg.content) ? msg.content as Array<Record<string, unknown>> : []
+
+    if (role === 'user') {
+      messages.push({
+        id: `openclaw-msg::${sessionId}::${msgId}`,
+        timestampMs: msgTimestamp,
+        sessionId,
+        sessionKey: sessionKey ?? null,
+        agent,
+        provider,
+        model,
+        channel,
+        kind: 'user',
+        sourcePath: filePath,
+      })
+    } else if (role === 'assistant') {
+      if (contentParts.some((part) => part.type === 'text')) {
+        messages.push({
+          id: `openclaw-msg::${sessionId}::${msgId}`,
+          timestampMs: msgTimestamp,
+          sessionId,
+          sessionKey: sessionKey ?? null,
+          agent,
+          provider,
+          model,
+          channel,
+          kind: 'assistant',
+          sourcePath: filePath,
+        })
+      }
+      for (const part of contentParts) {
+        if (part.type !== 'toolCall') continue
+        const toolId = typeof part.id === 'string' ? part.id : `${msgId}-tool`
+        messages.push({
+          id: `openclaw-tool-call::${sessionId}::${toolId}`,
+          timestampMs: msgTimestamp,
+          sessionId,
+          sessionKey: sessionKey ?? null,
+          agent,
+          provider,
+          model,
+          channel,
+          kind: 'tool_call',
+          sourcePath: filePath,
+        })
+      }
+    } else if (role === 'toolResult') {
+      const toolCallId = typeof msg.toolCallId === 'string' ? msg.toolCallId : msgId
+      messages.push({
+        id: `openclaw-tool-result::${sessionId}::${toolCallId}`,
+        timestampMs: msgTimestamp,
+        sessionId,
+        sessionKey: sessionKey ?? null,
+        agent,
+        provider,
+        model,
+        channel,
+        kind: 'tool_result',
+        sourcePath: filePath,
+      })
+    }
+
+    if (role !== 'assistant') continue
 
     const usage = msg.usage as Record<string, unknown> | undefined
     if (!usage) continue
@@ -124,11 +212,6 @@ export function parseSessionFile(
     const cacheWriteCost = costRaw?.cacheWrite || 0
     const totalCost = costRaw?.total || inputCost + outputCost + cacheReadCost + cacheWriteCost
 
-    const msgTimestamp = (msg.timestamp as number) || ts
-    const msgId = (parsed.id as string) || `${sessionId}-${i}`
-    const model = normalizeModel((msg.model as string) || currentModel || 'unknown')
-    const provider = (msg.provider as string) || 'unknown'
-
     currentModel = model
 
     events.push({
@@ -142,11 +225,13 @@ export function parseSessionFile(
       channel,
       inputTokens,
       outputTokens,
+      reasoningTokens: 0,
       cacheReadTokens,
       cacheWriteTokens,
       totalTokens,
       inputCost,
       outputCost,
+      reasoningCost: 0,
       cacheReadCost,
       cacheWriteCost,
       totalCost,
@@ -155,5 +240,5 @@ export function parseSessionFile(
     })
   }
 
-  return { events, currentModel, firstSeenAt, lastSeenAt, warnings, linesRead }
+  return { events, messages, currentModel, firstSeenAt, lastSeenAt, warnings, linesRead }
 }

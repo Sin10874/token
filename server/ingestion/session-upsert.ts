@@ -4,6 +4,7 @@ interface SessionFallback {
   sessionId: string
   sessionKey?: string | null
   agent?: string | null
+  title?: string | null
   channel?: string | null
   currentModel?: string | null
   sourcePath?: string | null
@@ -17,6 +18,7 @@ interface SessionSnapshotRow {
   totalCost: number
   sessionKey: string | null
   agent: string | null
+  title?: string | null
   channel: string | null
 }
 
@@ -44,16 +46,17 @@ const selectLatestModelSql = `
 
 const upsertSessionSql = `
   INSERT INTO sessions (
-    session_id, session_key, agent, channel, first_seen_at, last_seen_at,
+    session_id, session_key, agent, title, channel, first_seen_at, last_seen_at,
     current_model, call_count, total_tokens, total_cost, source_path
   )
   VALUES (
-    @sessionId, @sessionKey, @agent, @channel, @firstSeenAt, @lastSeenAt,
+    @sessionId, @sessionKey, @agent, @title, @channel, @firstSeenAt, @lastSeenAt,
     @currentModel, @callCount, @totalTokens, @totalCost, @sourcePath
   )
   ON CONFLICT(session_id) DO UPDATE SET
     session_key = COALESCE(excluded.session_key, sessions.session_key),
     agent = COALESCE(excluded.agent, sessions.agent),
+    title = COALESCE(excluded.title, sessions.title),
     channel = COALESCE(excluded.channel, sessions.channel),
     first_seen_at = excluded.first_seen_at,
     last_seen_at = excluded.last_seen_at,
@@ -80,6 +83,7 @@ export function upsertSessionSnapshot(db: DatabaseSync, fallback: SessionFallbac
     sessionId: fallback.sessionId,
     sessionKey: snapshot.sessionKey ?? fallback.sessionKey ?? null,
     agent: snapshot.agent ?? fallback.agent ?? null,
+    title: fallback.title ?? null,
     channel: snapshot.channel ?? fallback.channel ?? 'unknown',
     firstSeenAt: snapshot.firstSeenAt,
     lastSeenAt: snapshot.lastSeenAt,
@@ -94,6 +98,13 @@ export function upsertSessionSnapshot(db: DatabaseSync, fallback: SessionFallbac
 }
 
 export function rebuildSessionsFromUsage(db: DatabaseSync): number {
+  const existingTitles = new Map(
+    (db.prepare(`
+      SELECT session_id as sessionId, title
+      FROM sessions
+    `).all() as Array<{ sessionId: string; title: string | null }>).map((row) => [row.sessionId, row.title ?? null])
+  )
+
   db.exec('DELETE FROM sessions')
 
   const rows = db.prepare(`
@@ -126,6 +137,7 @@ export function rebuildSessionsFromUsage(db: DatabaseSync): number {
     totalCost: number
     sessionKey: string | null
     agent: string | null
+    title?: string | null
     channel: string | null
     currentModel: string | null
     sourcePath: string | null
@@ -133,7 +145,12 @@ export function rebuildSessionsFromUsage(db: DatabaseSync): number {
 
   const upsertStmt = db.prepare(upsertSessionSql)
   for (const row of rows) {
-    upsertStmt.run(row)
+    const existingTitle = existingTitles.get(row.sessionId) ?? null
+    const fallbackTitle = row.channel === 'hermes' ? row.agent ?? null : null
+    upsertStmt.run({
+      ...row,
+      title: existingTitle ?? fallbackTitle,
+    })
   }
 
   return rows.length

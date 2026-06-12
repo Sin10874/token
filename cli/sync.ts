@@ -73,7 +73,9 @@ function stripEvent(e: RawUsageEvent, project?: string): Record<string, unknown>
     cacheWriteCost: e.cacheWriteCost,
     totalCost: e.totalCost,
     stopReason: e.stopReason,
-    project: project || null,
+    // codex 等渠道的 title 可能是整段 prompt（实测 46KB），超过
+    // Postgres 索引行 8191 字节上限会导致整批上传失败
+    project: project ? project.slice(0, 256) : null,
   }
 }
 

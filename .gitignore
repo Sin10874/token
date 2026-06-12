@@ -20,3 +20,4 @@ data/clawmeter.db-*
 
 # Claude Code local workspace (settings.local.json, worktrees, cache)
 .claude/
+.npmrc.bak

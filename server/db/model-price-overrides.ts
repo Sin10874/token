@@ -14,6 +14,13 @@ const OFFICIAL_PRICE_OVERRIDES: Record<string, ModelPriceValues> = {
     cache_read_price: 0.5,
     cache_write_price: 6.25,
   },
+  // openclaw.json 缓存价为旧版（0.03/0.12），官方现价见 platform.minimax.io
+  'MiniMax-M2.7': {
+    input_price: 0.3,
+    output_price: 1.2,
+    cache_read_price: 0.06,
+    cache_write_price: 0.375,
+  },
 }
 
 export function resolveOfficialPriceOverride(modelId: string, prices: ModelPriceValues): ModelPriceValues {

@@ -29,6 +29,25 @@ if (IS_PROD) {
   }
 }
 
+// 定时增量导入；手动 sync（POST /api/ingest）期间跳过本轮，避免并发写
+const INGEST_INTERVAL_MS = parseInt(process.env.INGEST_INTERVAL_MS || `${5 * 60 * 1000}`, 10)
+let ingesting = false
+
+async function scheduledIngestion() {
+  if (ingesting) return
+  ingesting = true
+  try {
+    const stats = await runIngestion(false)
+    if (stats.eventsInserted > 0) {
+      console.log(`  [ingest] +${stats.eventsInserted} events from ${stats.filesProcessed} files (${stats.duration}ms)`)
+    }
+  } catch (e) {
+    console.error(`  [ingest] error:`, e)
+  } finally {
+    ingesting = false
+  }
+}
+
 app.listen(PORT, '127.0.0.1', async () => {
   console.log(`\n  Tokend API  →  http://127.0.0.1:${PORT}`)
   if (IS_PROD) {
@@ -37,11 +56,8 @@ app.listen(PORT, '127.0.0.1', async () => {
     console.log(`  Frontend dev   →  ${FRONTEND_DEV_URL}`)
   }
   console.log(`  Running initial ingestion...`)
-  try {
-    const stats = await runIngestion(false)
-    console.log(`  Ingestion complete: ${stats.eventsInserted} new events from ${stats.filesProcessed} files (${stats.duration}ms)`)
-  } catch (e) {
-    console.error(`  Ingestion error:`, e)
-  }
+  await scheduledIngestion()
+  setInterval(scheduledIngestion, INGEST_INTERVAL_MS)
+  console.log(`  Auto-ingest every ${Math.round(INGEST_INTERVAL_MS / 60000)}min`)
   console.log()
 })

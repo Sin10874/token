@@ -135,6 +135,9 @@ ensureColumn('ingestion_state', 'parser_version', 'INTEGER DEFAULT 1')
 ensureColumn('sessions', 'title', 'TEXT')
 
 const DEFAULT_MODEL_PRICES = [
+  ['claude-fable-5', 'anthropic', 10, 50, 1, 12.5],
+  ['claude-opus-4-8', 'anthropic', 5, 25, 0.5, 6.25],
+  ['claude-opus-4-7', 'anthropic', 5, 25, 0.5, 6.25],
   ['claude-opus-4-6', 'anthropic', 5, 25, 0.5, 6.25],
   ['claude-opus-4-5', 'anthropic', 5, 25, 0.5, 6.25],
   ['claude-opus-4-1', 'anthropic', 15, 75, 1.5, 18.75],
@@ -147,13 +150,33 @@ const DEFAULT_MODEL_PRICES = [
   ['claude-haiku-4-5-20251001', 'anthropic', 1, 5, 0.1, 1.25],
   ['claude-haiku-3-5', 'anthropic', 0.8, 4, 0.08, 1],
   ['claude-haiku-3', 'anthropic', 0.25, 1.25, 0.03, 0.3],
+  ['gpt-5.5', 'openai', 5, 30, 0.5, 0],
   ['gpt-5.4', 'openai', 2.5, 15, 0.25, 0],
+  ['gpt-5-codex', 'openai', 1.25, 10, 0.125, 0],
+  ['gpt-5.3-codex', 'openai', 1.75, 14, 0.175, 0],
+  ['gpt-5.3-codex-spark', 'openai', 1.75, 14, 0.175, 0],
+  ['codex-auto-review', 'openai', 0, 0, 0, 0],
   ['gpt-4o', 'openai', 2.5, 10, 1.25, 0],
+  ['gemini-3-pro-preview', 'google', 2, 12, 0.2, 0],
+  ['gemini-2.5-pro', 'google', 1.25, 10, 0.31, 0],
+  ['kimi-k2.6', 'moonshot', 0.95, 4, 0.16, 0],
+  ['k2p6', 'moonshot', 0.95, 4, 0.16, 0],
   ['kimi-k2.5', 'moonshot', 0.6, 3, 0.1, 0],
+  ['k2p5', 'moonshot', 0.6, 3, 0.1, 0],
+  ['kimi-code/kimi-for-coding', 'moonshot', 0.6, 3, 0.1, 0],
+  ['kimi-k2-thinking', 'moonshot', 0.6, 2.5, 0.15, 0],
+  ['grok-code', 'xai', 0.2, 1.5, 0.02, 0],
+  ['glm-4.7-free', 'zhipu', 0, 0, 0, 0],
+  ['minimax-m2.1-free', 'minimax', 0, 0, 0, 0],
+  ['glm-5.1', 'zhipu', 1.4, 4.4, 0.26, 0],
+  ['glm-5', 'zhipu', 1, 3.2, 0.2, 0],
   ['glm-5-turbo', 'zhipu', 1.2, 4, 0.24, 0],
   ['glm-4.7', 'zhipu', 0.6, 2.2, 0.11, 0],
+  ['glm-4.7-flashx', 'zhipu', 0.07, 0.4, 0.01, 0],
   ['glm-4.5-air', 'zhipu', 0.2, 1.1, 0.03, 0],
-  ['MiniMax-M2.7', 'minimax', 0.3, 1.2, 0.03, 0.12],
+  // MiniMax M3 缓存写未公布，按 M2.7 同款 1.25x input 估算
+  ['MiniMax-M3', 'minimax', 0.3, 1.2, 0.06, 0.375],
+  ['MiniMax-M2.7', 'minimax', 0.3, 1.2, 0.06, 0.375],
 ] as const
 
 function upsertDefaultModelPrices() {

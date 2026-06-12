@@ -1,9 +1,9 @@
 {
-  "version": "1.0.0",
+  "version": "2.3.0",
   "coreFeatures": [
-    "支持 OpenClaw / Claude Code / Codex / Gemini CLI / OpenCode / Copilot CLI",
-    "提供仪表盘、平台页、模型 / 频道 / 会话分析",
-    "支持增量同步与全量重算 ingestion",
-    "支持价格表维护与成本估算"
+    "价格表全面更新：新增 Claude Fable 5 / Opus 4.8 / 4.7、GPT-5.5 / Codex 系列、Gemini 3 Pro、Kimi K2.6、GLM-5 / 5.1、MiniMax M3 等",
+    "云端兜底计价：旧版本 CLI 上传的零成本数据由服务端自动按价格表补算",
+    "历史零成本数据一次性回填修复（服务端执行，用户无需操作）",
+    "修复 OpenCode / Gemini CLI / Copilot CLI 渠道成本缺失问题"
   ]
 }

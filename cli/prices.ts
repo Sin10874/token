@@ -33,9 +33,11 @@ const DEFAULT_MODEL_PRICES: Array<[string, string, number, number, number, numbe
   ['gpt-4o', 'openai', 2.5, 10, 1.25, 0],
   ['gemini-3-pro-preview', 'google', 2, 12, 0.2, 0],
   ['gemini-2.5-pro', 'google', 1.25, 10, 0.31, 0],
+  ['kimi-k2.7', 'moonshot', 0.95, 4, 0.19, 0],
   ['kimi-k2.6', 'moonshot', 0.95, 4, 0.16, 0],
   ['kimi-k2.5', 'moonshot', 0.6, 3, 0.1, 0],
   ['kimi-k2-thinking', 'moonshot', 0.6, 2.5, 0.15, 0],
+  ['glm-5.2', 'zhipu', 1.4, 4.4, 0.26, 0],
   ['glm-5.1', 'zhipu', 1.4, 4.4, 0.26, 0],
   ['glm-5', 'zhipu', 1, 3.2, 0.2, 0],
   ['glm-5-turbo', 'zhipu', 1.2, 4, 0.24, 0],
@@ -52,6 +54,7 @@ const DEFAULT_MODEL_PRICES: Array<[string, string, number, number, number, numbe
 
 // 注意：alias 优先于精确匹配——有专属价格行的模型不要放进来
 const MODEL_PRICE_ALIASES: Record<string, string> = {
+  'k2p7': 'kimi-k2.7',
   'k2p6': 'kimi-k2.6',
   'k2p5': 'kimi-k2.5',
   'kimi-for-coding': 'kimi-k2.5',

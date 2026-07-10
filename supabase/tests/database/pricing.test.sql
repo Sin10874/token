@@ -36,7 +36,7 @@ CREATE TABLE public.tokend_model_prices (
 \ir ../../migrations/202607100001_pricing_core.sql
 \ir ../../migrations/202607100001_pricing_core.sql
 
-SELECT plan(29);
+SELECT plan(34);
 
 SELECT pass('pricing migration compiles and applies twice');
 
@@ -206,6 +206,127 @@ SELECT is(
   ),
   0,
   'authenticated has no direct table privileges'
+);
+
+SELECT is(
+  (
+    SELECT count(*)::INTEGER
+    FROM (VALUES
+      ('tokend_pricing_catalogs'),
+      ('tokend_pricing_canonical_models'),
+      ('tokend_pricing_models'),
+      ('tokend_pricing_aliases'),
+      ('tokend_event_cost_revisions'),
+      ('tokend_pricing_state'),
+      ('tokend_pricing_backfill_runs'),
+      ('tokend_pricing_backfill_targets'),
+      ('tokend_pricing_shadow_sessions'),
+      ('tokend_pricing_audit')
+    ) AS expected_tables(table_name)
+    WHERE has_table_privilege(
+      'service_role',
+      'public.' || table_name,
+      'SELECT'
+    )
+  ),
+  10,
+  'service_role has SELECT on all ten pricing tables'
+);
+
+SELECT ok(
+  has_table_privilege(
+    'service_role',
+    'public.tokend_event_cost_revisions',
+    'DELETE'
+  ),
+  'service_role can delete event-cost revisions'
+);
+
+SELECT is(
+  (
+    SELECT count(*)::INTEGER
+    FROM (VALUES
+      ('tokend_pricing_catalogs'),
+      ('tokend_pricing_canonical_models'),
+      ('tokend_pricing_models'),
+      ('tokend_pricing_aliases'),
+      ('tokend_pricing_state'),
+      ('tokend_pricing_backfill_runs'),
+      ('tokend_pricing_backfill_targets'),
+      ('tokend_pricing_shadow_sessions'),
+      ('tokend_pricing_audit')
+    ) AS non_revision_tables(table_name)
+    WHERE has_table_privilege(
+      'service_role',
+      'public.' || table_name,
+      'DELETE'
+    )
+  ),
+  0,
+  'service_role has DELETE on no other pricing table'
+);
+
+SELECT results_eq(
+  $actual$
+    SELECT
+      privilege,
+      (
+        SELECT count(*)::INTEGER
+        FROM (VALUES
+          ('tokend_pricing_catalogs'),
+          ('tokend_pricing_canonical_models'),
+          ('tokend_pricing_models'),
+          ('tokend_pricing_aliases'),
+          ('tokend_event_cost_revisions'),
+          ('tokend_pricing_state'),
+          ('tokend_pricing_backfill_runs'),
+          ('tokend_pricing_backfill_targets'),
+          ('tokend_pricing_shadow_sessions'),
+          ('tokend_pricing_audit')
+        ) AS pricing_tables(table_name)
+        WHERE has_table_privilege(
+          'service_role',
+          'public.' || table_name,
+          privilege
+        )
+      ) AS granted_count
+    FROM (VALUES
+      ('INSERT'),
+      ('REFERENCES'),
+      ('TRIGGER'),
+      ('TRUNCATE'),
+      ('UPDATE')
+    ) AS forbidden_privileges(privilege)
+    ORDER BY privilege
+  $actual$,
+  $expected$
+    VALUES
+      ('INSERT'::TEXT, 0::INTEGER),
+      ('REFERENCES'::TEXT, 0::INTEGER),
+      ('TRIGGER'::TEXT, 0::INTEGER),
+      ('TRUNCATE'::TEXT, 0::INTEGER),
+      ('UPDATE'::TEXT, 0::INTEGER)
+  $expected$,
+  'service_role has no write or DDL-adjacent table privileges beyond revision DELETE'
+);
+
+SELECT is(
+  (
+    SELECT count(*)::INTEGER
+    FROM (VALUES
+      ('public.tokend_install_pricing_catalog(text,text,date)'),
+      ('public.tokend_reject_pricing_catalog_mutation()'),
+      ('public.tokend_guard_pricing_catalog_content()'),
+      ('public.tokend_guard_pricing_backfill_target()')
+    ) AS protected_functions(function_identity)
+    WHERE has_function_privilege(
+      'service_role',
+      function_identity,
+      'EXECUTE'
+    )
+  ),
+  0,
+  'service_role cannot execute the installer or trigger guard functions'
 );
 
 SELECT ok(

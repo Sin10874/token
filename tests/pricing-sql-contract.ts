@@ -353,9 +353,31 @@ function testMigrationLocksDownCatalogAndTableAccess(): void {
       migration,
       new RegExp(`REVOKE ALL PRIVILEGES ON TABLE public\\.${table} FROM PUBLIC, anon, authenticated`, 'i'),
     )
+    assert.match(
+      migration,
+      new RegExp(`REVOKE ALL PRIVILEGES ON TABLE public\\.${table} FROM service_role`, 'i'),
+    )
+    assert.match(
+      migration,
+      new RegExp(`GRANT SELECT ON TABLE public\\.${table} TO service_role`, 'i'),
+    )
   }
+  assert.match(
+    migration,
+    /GRANT DELETE ON TABLE public\.tokend_event_cost_revisions TO service_role/i,
+  )
+  for (const table of NEW_TABLES.filter(table => table !== 'tokend_event_cost_revisions')) {
+    assert.doesNotMatch(
+      migration,
+      new RegExp(`GRANT DELETE ON TABLE public\\.${table} TO service_role`, 'i'),
+    )
+  }
+  assert.doesNotMatch(
+    migration,
+    /GRANT (?:ALL(?: PRIVILEGES)?|INSERT|UPDATE|TRUNCATE|REFERENCES|TRIGGER)[^;]*TO service_role/i,
+  )
   assert.doesNotMatch(migration, /\bCREATE\s+POLICY\b/i)
-  assert.doesNotMatch(migration, /\bGRANT\b[^;]*(?:anon|authenticated)/i)
+  assert.doesNotMatch(migration, /\bGRANT\b[^;]*\bTO\s+(?:anon|authenticated)\b/i)
 
   const functions = [...migration.matchAll(/CREATE OR REPLACE FUNCTION public\.([a-z0-9_]+)\s*\(/gi)]
   assert.ok(functions.length >= 3)
@@ -368,6 +390,10 @@ function testMigrationLocksDownCatalogAndTableAccess(): void {
     assert.match(
       migration,
       new RegExp(`REVOKE ALL ON FUNCTION public\\.${functionName}\\([^;]+FROM PUBLIC, anon, authenticated`, 'i'),
+    )
+    assert.match(
+      migration,
+      new RegExp(`REVOKE ALL ON FUNCTION public\\.${functionName}\\([^;]+FROM service_role`, 'i'),
     )
   }
 
@@ -441,7 +467,7 @@ function testPgTapContractIsSelfContained(): void {
   )
   assert.match(pgTap, /^BEGIN;/m)
   assert.match(pgTap, /^ROLLBACK;/m)
-  assert.match(pgTap, /SELECT plan\(29\);/)
+  assert.match(pgTap, /SELECT plan\(34\);/)
   assert.equal(
     (pgTap.match(/^\\ir \.\.\/\.\.\/migrations\/202607100001_pricing_core\.sql$/gm) ?? []).length,
     2,
@@ -461,6 +487,15 @@ function testPgTapContractIsSelfContained(): void {
   assert.doesNotMatch(pgTap, /SELECT has_fk\(/i)
   assert.ok((pgTap.match(/throws_ok\(/g) ?? []).length >= 11)
   assert.ok((pgTap.match(/'55000'/g) ?? []).length >= 11)
+  assert.match(pgTap, /has_table_privilege\(\s*'service_role'[\s\S]*'SELECT'\s*\)/i)
+  assert.match(pgTap, /has_table_privilege\(\s*'service_role'[\s\S]*'DELETE'\s*\)/i)
+  for (const privilege of ['INSERT', 'UPDATE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) {
+    assert.match(
+      pgTap,
+      new RegExp(`has_table_privilege\\(\\s*'service_role'[\\s\\S]*'${privilege}'\\s*\\)`, 'i'),
+    )
+  }
+  assert.match(pgTap, /has_function_privilege\(\s*'service_role'[\s\S]*'EXECUTE'\s*\)/i)
   assert.doesNotMatch(pgTap, /\/Users\/|\/home\/|SUPABASE_(?:KEY|TOKEN)|NPM_TOKEN|member[_ -]?secret/i)
 }
 

@@ -878,6 +878,10 @@ REVOKE ALL ON FUNCTION public.tokend_install_pricing_catalog(TEXT, TEXT, DATE) F
 REVOKE ALL ON FUNCTION public.tokend_reject_pricing_catalog_mutation() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.tokend_guard_pricing_catalog_content() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.tokend_guard_pricing_backfill_target() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.tokend_install_pricing_catalog(TEXT, TEXT, DATE) FROM service_role;
+REVOKE ALL ON FUNCTION public.tokend_reject_pricing_catalog_mutation() FROM service_role;
+REVOKE ALL ON FUNCTION public.tokend_guard_pricing_catalog_content() FROM service_role;
+REVOKE ALL ON FUNCTION public.tokend_guard_pricing_backfill_target() FROM service_role;
 
 DO $triggers$
 BEGIN
@@ -959,6 +963,29 @@ REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_backfill_runs FROM PUBLIC, 
 REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_backfill_targets FROM PUBLIC, anon, authenticated;
 REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_shadow_sessions FROM PUBLIC, anon, authenticated;
 REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_audit FROM PUBLIC, anon, authenticated;
+
+REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_catalogs FROM service_role;
+REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_canonical_models FROM service_role;
+REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_models FROM service_role;
+REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_aliases FROM service_role;
+REVOKE ALL PRIVILEGES ON TABLE public.tokend_event_cost_revisions FROM service_role;
+REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_state FROM service_role;
+REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_backfill_runs FROM service_role;
+REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_backfill_targets FROM service_role;
+REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_shadow_sessions FROM service_role;
+REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_audit FROM service_role;
+
+GRANT SELECT ON TABLE public.tokend_pricing_catalogs TO service_role;
+GRANT SELECT ON TABLE public.tokend_pricing_canonical_models TO service_role;
+GRANT SELECT ON TABLE public.tokend_pricing_models TO service_role;
+GRANT SELECT ON TABLE public.tokend_pricing_aliases TO service_role;
+GRANT SELECT ON TABLE public.tokend_event_cost_revisions TO service_role;
+GRANT SELECT ON TABLE public.tokend_pricing_state TO service_role;
+GRANT SELECT ON TABLE public.tokend_pricing_backfill_runs TO service_role;
+GRANT SELECT ON TABLE public.tokend_pricing_backfill_targets TO service_role;
+GRANT SELECT ON TABLE public.tokend_pricing_shadow_sessions TO service_role;
+GRANT SELECT ON TABLE public.tokend_pricing_audit TO service_role;
+GRANT DELETE ON TABLE public.tokend_event_cost_revisions TO service_role;
 
 INSERT INTO public.tokend_pricing_state (
   singleton,

@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import {
   CATALOG_HASH,
   CATALOG_SNAPSHOT,
@@ -16,6 +19,10 @@ import { estimateCost } from '../cli/pricing/estimate.ts'
 import type { CatalogSnapshot, PriceVersion, PricingEvent } from '../cli/pricing/types.ts'
 import { applyEstimatedCosts } from '../cli/prices.ts'
 import type { RawUsageEvent } from '../server/ingestion/parser.ts'
+import {
+  createLocalPriceResolver,
+  type LocalModelPriceRow,
+} from '../server/ingestion/local-price-resolver.ts'
 
 function testCatalogResolution() {
   assert.equal(PRICE_VERSIONS, CATALOG_SNAPSHOT.rows)
@@ -555,15 +562,239 @@ function testDefaultSeedRowsComeFromEffectiveCatalogVersions() {
   assert.deepEqual(getDefaultSeedRows(), rows)
 }
 
-function testSqliteInitializationUsesSharedCatalogSeeds() {
-  const source = fs.readFileSync(path.resolve(process.cwd(), 'server/db/index.ts'), 'utf8')
+function localPriceRow(
+  modelId: string,
+  source: string,
+  rates: [number, number, number, number],
+): LocalModelPriceRow {
+  return {
+    model_id: modelId,
+    input_price: rates[0],
+    output_price: rates[1],
+    cache_read_price: rates[2],
+    cache_write_price: rates[3],
+    per_tokens: 1_000_000,
+    source,
+  }
+}
+
+function testLocalPriceResolverUsesCatalogCanonicalizationAndExactOverrides() {
+  const canonical = localPriceRow('kimi-k2.5', 'default', [0.6, 3, 0.1, 0])
+  const staleDefaultAlias = localPriceRow('k2p5', 'default', [90, 90, 90, 90])
+  const openClawAlias = localPriceRow('k2p6', 'openclaw.json', [9, 8, 7, 6])
+  const manualAlias = localPriceRow('k2p7', 'manual', [5, 4, 3, 2])
+  const zeroOpenClawAlias = localPriceRow('kimi-code/kimi-for-coding', 'openclaw.json', [0, 0, 0, 0])
+  const findPrice = createLocalPriceResolver([
+    canonical,
+    staleDefaultAlias,
+    openClawAlias,
+    manualAlias,
+    zeroOpenClawAlias,
+  ])
+
+  assert.equal(findPrice('kimi-k2.5'), canonical)
+  assert.equal(findPrice('k2p5'), canonical)
+  assert.equal(findPrice('k2p6'), openClawAlias)
+  assert.equal(findPrice('k2p7'), manualAlias)
+  assert.equal(findPrice('kimi-code/kimi-for-coding'), canonical)
+  assert.equal(findPrice('kimi-k2.5-20260709'), canonical)
+  assert.equal(findPrice('kimi-k2.5-202607099'), null)
+}
+
+function runLocalPricingDbChild<T>(temporaryHome: string, body: string): T {
+  const projectRoot = process.cwd()
+  const tsxBin = path.join(projectRoot, 'node_modules', '.bin', 'tsx')
+  const dbModuleUrl = pathToFileURL(path.join(projectRoot, 'server', 'db', 'index.ts')).href
+  const resolverModuleUrl = pathToFileURL(
+    path.join(projectRoot, 'server', 'ingestion', 'local-price-resolver.ts'),
+  ).href
+  const childSource = `
+    (async () => {
+      const loadedDb = await import(${JSON.stringify(dbModuleUrl)})
+      const dbExports = loadedDb.default && typeof loadedDb.default === 'object' && 'db' in loadedDb.default
+        ? loadedDb.default
+        : loadedDb
+      const db = dbExports.db ?? dbExports.default
+      const loadedResolver = await import(${JSON.stringify(resolverModuleUrl)})
+      const resolverExports = loadedResolver.default
+        && typeof loadedResolver.default === 'object'
+        && 'createLocalPriceResolver' in loadedResolver.default
+        ? loadedResolver.default
+        : loadedResolver
+      const priceRows = db.prepare('SELECT * FROM model_prices').all()
+      const findPrice = resolverExports.createLocalPriceResolver(priceRows)
+      ${body}
+      db.close()
+    })().catch(error => {
+      console.error(error)
+      process.exitCode = 1
+    })
+  `
+  const child = spawnSync(tsxBin, ['-e', childSource], {
+    cwd: temporaryHome,
+    env: { ...process.env, HOME: temporaryHome },
+    encoding: 'utf8',
+  })
+  assert.equal(
+    child.status,
+    0,
+    `local pricing DB child failed\nstdout:\n${child.stdout}\nstderr:\n${child.stderr}`,
+  )
+  const outputLines = child.stdout.trim().split('\n').filter(Boolean)
+  assert.ok(outputLines.length > 0, 'local pricing DB child should emit JSON')
+  return JSON.parse(outputLines[outputLines.length - 1]) as T
+}
+
+function testSqliteFreshAndUpgradePricingUsesCanonicalSeedsAndPreservesOverrides() {
+  const temporaryHome = fs.mkdtempSync(path.join(os.tmpdir(), 'tokend-local-pricing-'))
+  try {
+    const openClawDir = path.join(temporaryHome, '.openclaw')
+    fs.mkdirSync(openClawDir, { recursive: true })
+    fs.writeFileSync(path.join(openClawDir, 'openclaw.json'), JSON.stringify({
+      models: {
+        providers: {
+          test: {
+            models: [
+              {
+                id: 'k2p6',
+                cost: { input: 9, output: 8, cacheRead: 7, cacheWrite: 6 },
+              },
+              {
+                id: 'k2p7',
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              },
+              {
+                id: 'gpt-5.6-sol',
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              },
+            ],
+          },
+        },
+      },
+    }))
+
+    const fresh = runLocalPricingDbChild<{
+      defaultIds: string[]
+      seedRows: Array<[string, string, number, number, number, number]>
+      k2p5: LocalModelPriceRow | null
+      k2p6: LocalModelPriceRow | null
+      k2p7Exact: LocalModelPriceRow | null
+      k2p7Resolved: LocalModelPriceRow | null
+      sol: LocalModelPriceRow | null
+    }>(temporaryHome, `
+      const defaultIds = priceRows
+        .filter(row => row.source === 'default')
+        .map(row => row.model_id)
+        .sort()
+      const seedRows = db.prepare(\`
+        SELECT model_id, provider, input_price, output_price, cache_read_price, cache_write_price
+        FROM model_prices
+        WHERE model_id IN ('claude-fable-5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna')
+        ORDER BY model_id
+      \`).all().map(row => [
+        row.model_id,
+        row.provider,
+        row.input_price,
+        row.output_price,
+        row.cache_read_price,
+        row.cache_write_price,
+      ])
+      console.log(JSON.stringify({
+        defaultIds,
+        seedRows,
+        k2p5: findPrice('k2p5'),
+        k2p6: findPrice('k2p6'),
+        k2p7Exact: priceRows.find(row => row.model_id === 'k2p7') ?? null,
+        k2p7Resolved: findPrice('k2p7'),
+        sol: findPrice('gpt-5.6-sol'),
+      }))
+    `)
+
+    assert.deepEqual(fresh.defaultIds, getDefaultSeedRows().map(row => row[0]))
+    assert.deepEqual(fresh.seedRows, [
+      ['claude-fable-5', 'anthropic', 10, 50, 1, 12.5],
+      ['gpt-5.6-luna', 'openai', 1, 6, 0.1, 1.25],
+      ['gpt-5.6-sol', 'openai', 5, 30, 0.5, 6.25],
+      ['gpt-5.6-terra', 'openai', 2.5, 15, 0.25, 3.125],
+    ])
+    assert.equal(fresh.k2p5?.model_id, 'kimi-k2.5')
+    assert.equal(fresh.k2p5?.source, 'default')
+    assert.equal(fresh.k2p6?.model_id, 'k2p6')
+    assert.equal(fresh.k2p6?.source, 'openclaw.json')
+    assert.equal(fresh.k2p6?.input_price, 9)
+    assert.equal(fresh.k2p7Exact, null)
+    assert.equal(fresh.k2p7Resolved?.model_id, 'kimi-k2.7')
+    assert.equal(fresh.sol?.source, 'default')
+    assert.equal(fresh.sol?.input_price, 5)
+    fs.rmSync(path.join(openClawDir, 'openclaw.json'))
+
+    runLocalPricingDbChild<{ inserted: true }>(temporaryHome, `
+      db.prepare(\`
+        INSERT OR REPLACE INTO model_prices (
+          model_id, provider, input_price, output_price, cache_read_price, cache_write_price,
+          per_tokens, source, updated_at
+        ) VALUES ('k2p5', 'moonshot', 90, 90, 90, 90, 1000000, 'default', 1)
+      \`).run()
+      console.log(JSON.stringify({ inserted: true }))
+    `)
+
+    const afterUpgrade = runLocalPricingDbChild<{
+      staleDefaultAlias: LocalModelPriceRow | null
+      resolvedAlias: LocalModelPriceRow | null
+      openClawAlias: LocalModelPriceRow | null
+    }>(temporaryHome, `
+      console.log(JSON.stringify({
+        staleDefaultAlias: priceRows.find(row => row.model_id === 'k2p5') ?? null,
+        resolvedAlias: findPrice('k2p5'),
+        openClawAlias: findPrice('k2p6'),
+      }))
+    `)
+    assert.equal(afterUpgrade.staleDefaultAlias, null)
+    assert.equal(afterUpgrade.resolvedAlias?.model_id, 'kimi-k2.5')
+    assert.equal(afterUpgrade.resolvedAlias?.input_price, 0.6)
+    assert.equal(afterUpgrade.openClawAlias?.source, 'openclaw.json')
+    assert.equal(afterUpgrade.openClawAlias?.input_price, 9)
+
+    runLocalPricingDbChild<{ inserted: true }>(temporaryHome, `
+      db.prepare(\`
+        INSERT OR REPLACE INTO model_prices (
+          model_id, provider, input_price, output_price, cache_read_price, cache_write_price,
+          per_tokens, source, updated_at
+        ) VALUES ('k2p5', 'moonshot', 5, 4, 3, 2, 1000000, 'manual', 2)
+      \`).run()
+      console.log(JSON.stringify({ inserted: true }))
+    `)
+
+    const withManualOverride = runLocalPricingDbChild<{
+      exactAlias: LocalModelPriceRow | null
+      resolvedAlias: LocalModelPriceRow | null
+      openClawAlias: LocalModelPriceRow | null
+    }>(temporaryHome, `
+      console.log(JSON.stringify({
+        exactAlias: priceRows.find(row => row.model_id === 'k2p5') ?? null,
+        resolvedAlias: findPrice('k2p5'),
+        openClawAlias: findPrice('k2p6'),
+      }))
+    `)
+    assert.equal(withManualOverride.exactAlias?.source, 'manual')
+    assert.equal(withManualOverride.resolvedAlias?.model_id, 'k2p5')
+    assert.equal(withManualOverride.resolvedAlias?.input_price, 5)
+    assert.equal(withManualOverride.openClawAlias?.source, 'openclaw.json')
+    assert.equal(withManualOverride.openClawAlias?.input_price, 9)
+  } finally {
+    fs.rmSync(temporaryHome, { recursive: true, force: true })
+  }
+}
+
+function testIngestionUsesCanonicalLocalPriceResolver() {
+  const source = fs.readFileSync(path.resolve(process.cwd(), 'server/ingestion/index.ts'), 'utf8')
 
   assert.match(
     source,
-    /import\s+\{\s*getDefaultSeedRows\s*\}\s+from\s+['"]\.\.\/\.\.\/cli\/pricing\/catalog(?:\.js|\.ts)['"]/,
+    /import\s+\{[^}]*createLocalPriceResolver[^}]*\}\s+from\s+['"]\.\/local-price-resolver\.js['"]/,
   )
-  assert.doesNotMatch(source, /DEFAULT_MODEL_PRICES/)
-  assert.match(source, /of\s+getDefaultSeedRows\(\)/)
+  assert.match(source, /const findPrice\s*=\s*createLocalPriceResolver\(priceRows\)/)
+  assert.doesNotMatch(source, /replace\(\/-\\d\{8,/)
 }
 
 function testStandardEstimationAndEffectiveDates() {
@@ -989,7 +1220,9 @@ async function main() {
   testCatalogHashIsStableAcrossObjectKeyOrder()
   testApplyEstimatedCostsCompatibilityWrapper()
   testDefaultSeedRowsComeFromEffectiveCatalogVersions()
-  testSqliteInitializationUsesSharedCatalogSeeds()
+  testLocalPriceResolverUsesCatalogCanonicalizationAndExactOverrides()
+  testSqliteFreshAndUpgradePricingUsesCanonicalSeedsAndPreservesOverrides()
+  testIngestionUsesCanonicalLocalPriceResolver()
   testStandardEstimationAndEffectiveDates()
   testLongContextTierSelection()
   testReportedCostsTakePrecedenceAndReconcile()

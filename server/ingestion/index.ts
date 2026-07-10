@@ -17,6 +17,7 @@ import {
   resolveStartLine,
   type IngestionState,
 } from './ingestion-state.js'
+import { createLocalPriceResolver, type LocalModelPriceRow } from './local-price-resolver.js'
 import { PARSER_VERSIONS } from './parser-versions.js'
 
 export { resolveStartLine }
@@ -63,20 +64,8 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
   }
 
   // Preload model prices for cost calculation
-  const priceRows = db.prepare('SELECT * FROM model_prices').all() as Array<{
-    model_id: string; input_price: number; output_price: number;
-    cache_read_price: number; cache_write_price: number; per_tokens: number
-  }>
-  const priceMap = new Map(priceRows.map(p => [p.model_id, p]))
-
-  // Lookup price: exact match first, then strip date suffix (e.g. claude-opus-4-5-20251101 → claude-opus-4-5)
-  function findPrice(model: string) {
-    let p = priceMap.get(model)
-    if (p) return p
-    const stripped = model.replace(/-\d{8,}$/, '')
-    if (stripped !== model) p = priceMap.get(stripped)
-    return p || null
-  }
+  const priceRows = db.prepare('SELECT * FROM model_prices').all() as unknown as LocalModelPriceRow[]
+  const findPrice = createLocalPriceResolver(priceRows)
 
   // 日志自带成本时优先用日志值，否则按价格表补算
   function applyCostsFromPrices(events: Array<{

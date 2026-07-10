@@ -96,23 +96,22 @@ function reportedEstimate(event: PricingEvent, snapshot: CatalogSnapshot): CostE
     event.cacheReadCost,
     event.cacheWriteCost,
   ]
-  const tolerance = Number.EPSILON * Math.max(1, event.totalCost, ...components) * 8
   let componentTotal = 0
   let componentsExceedTotal = false
   for (const component of components) {
     const remaining = event.totalCost - componentTotal
-    if (component - remaining > tolerance) {
+    if (component > remaining) {
       componentsExceedTotal = true
       break
     }
     componentTotal += component
-    if (!Number.isFinite(componentTotal)) {
+    if (!Number.isFinite(componentTotal) || componentTotal > event.totalCost) {
       componentsExceedTotal = true
       break
     }
   }
   const difference = event.totalCost - componentTotal
-  const unallocatedCost = !componentsExceedTotal && difference > tolerance ? difference : 0
+  const unallocatedCost = !componentsExceedTotal && difference > 0 ? difference : 0
   const hasUnallocatedCost = unallocatedCost > 0
 
   return {

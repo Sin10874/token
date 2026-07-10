@@ -144,6 +144,58 @@ export const CATALOG_ALIASES: Record<string, string> = Object.fromEntries(Object
   'kimi-for-coding': 'kimi-k2.5',
 }).sort(([left], [right]) => compareText(left, right)))
 
+export const PRICE_VERSIONS = CATALOG_ROWS
+export const MODEL_ALIASES = CATALOG_ALIASES
+
+function isNonBlankString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+function isStrictCalendarDate(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (!match) return false
+
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const date = new Date(0)
+  date.setUTCHours(0, 0, 0, 0)
+  date.setUTCFullYear(year, month - 1, day)
+  return date.getUTCFullYear() === year
+    && date.getUTCMonth() === month - 1
+    && date.getUTCDate() === day
+}
+
+function parseStrictUtcTimestamp(value: unknown): number | null {
+  if (typeof value !== 'string') return null
+  const match = value.match(
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/,
+  )
+  if (!match) return null
+
+  const datePart = `${match[1]}-${match[2]}-${match[3]}`
+  const hour = Number(match[4])
+  const minute = Number(match[5])
+  const second = Number(match[6])
+  if (!isStrictCalendarDate(datePart) || hour > 23 || minute > 59 || second > 59) return null
+
+  const timestampMs = Date.parse(value)
+  return Number.isFinite(timestampMs) ? timestampMs : null
+}
+
+function isValidSourceUrl(value: unknown): value is string {
+  if (!isNonBlankString(value) || value !== value.trim()) return false
+  if (/^legacy:[^\s]+$/.test(value)) return true
+
+  try {
+    const url = new URL(value)
+    return (url.protocol === 'http:' || url.protocol === 'https:') && url.hostname.length > 0
+  } catch {
+    return false
+  }
+}
+
 function validateRates(modelId: string, tier: string, tokenRates: TokenRates): void {
   for (const [bucket, rate] of Object.entries(tokenRates ?? {})) {
     if (!Number.isFinite(rate) || rate < 0) {
@@ -163,30 +215,31 @@ export function validateCatalog(rows: PriceVersion[], aliases: Record<string, st
   const intervalsByModel = new Map<string, Array<{ start: number; end: number }>>()
 
   for (const row of rows) {
-    if (typeof row.modelId !== 'string' || row.modelId.length === 0) {
+    if (!isNonBlankString(row.modelId)) {
       throw new Error('Invalid modelId')
     }
-    if (typeof row.provider !== 'string' || row.provider.length === 0) {
+    if (!isNonBlankString(row.provider)) {
       throw new Error(`Invalid provider for ${row.modelId}`)
     }
-    if (typeof row.catalogVersion !== 'string' || row.catalogVersion.length === 0) {
+    if (!isNonBlankString(row.catalogVersion)) {
       throw new Error(`Invalid catalogVersion for ${row.modelId}`)
     }
-    if (typeof row.sourceCheckedAt !== 'string' || row.sourceCheckedAt.trim().length === 0) {
-      throw new Error(`Missing sourceCheckedAt for ${row.modelId}`)
+    if (!isStrictCalendarDate(row.sourceCheckedAt)) {
+      throw new Error(`Invalid sourceCheckedAt for ${row.modelId}`)
     }
-    if (typeof row.sourceUrl !== 'string' || row.sourceUrl.trim().length === 0) {
-      throw new Error(`Missing sourceUrl for ${row.modelId}`)
+    if (!isValidSourceUrl(row.sourceUrl)) {
+      throw new Error(`Invalid sourceUrl for ${row.modelId}`)
     }
 
-    const validFromMs = Date.parse(row.validFrom)
-    if (!Number.isFinite(validFromMs)) {
+    const validFromMs = parseStrictUtcTimestamp(row.validFrom)
+    if (validFromMs === null) {
       throw new Error(`Invalid validFrom for ${row.modelId}`)
     }
-    const validToMs = row.validTo === undefined ? Number.POSITIVE_INFINITY : Date.parse(row.validTo)
-    if (!Number.isFinite(validToMs) && row.validTo !== undefined) {
+    const parsedValidToMs = row.validTo === undefined ? null : parseStrictUtcTimestamp(row.validTo)
+    if (row.validTo !== undefined && parsedValidToMs === null) {
       throw new Error(`Invalid validTo for ${row.modelId}`)
     }
+    const validToMs = parsedValidToMs ?? Number.POSITIVE_INFINITY
     if (validToMs <= validFromMs) {
       throw new Error(`Invalid interval for ${row.modelId}`)
     }
@@ -198,9 +251,14 @@ export function validateCatalog(rows: PriceVersion[], aliases: Record<string, st
     seenVersions.add(versionKey)
 
     validateRates(row.modelId, 'standard', row.standard)
-    if (row.longContext) validateRates(row.modelId, 'long-context', row.longContext)
+    const hasLongContext = row.longContext !== undefined
+    const hasLongContextThreshold = row.longContextThreshold !== undefined
+    if (hasLongContext !== hasLongContextThreshold) {
+      throw new Error(`longContext and longContextThreshold must be provided together for ${row.modelId}`)
+    }
+    if (row.longContext !== undefined) validateRates(row.modelId, 'long-context', row.longContext)
     if (row.longContextThreshold !== undefined
-      && (!Number.isFinite(row.longContextThreshold) || row.longContextThreshold < 0)) {
+      && (!Number.isInteger(row.longContextThreshold) || row.longContextThreshold <= 0)) {
       throw new Error(`Invalid long-context threshold for ${row.modelId}`)
     }
 

@@ -5,6 +5,8 @@ import {
   CATALOG_HASH,
   CATALOG_SNAPSHOT,
   CATALOG_VERSION,
+  MODEL_ALIASES,
+  PRICE_VERSIONS,
   computeCatalogHash,
   resolveModelPrice,
   validateCatalog,
@@ -13,6 +15,9 @@ import { estimateCost } from '../cli/pricing/estimate.ts'
 import type { CatalogSnapshot, PriceVersion, PricingEvent } from '../cli/pricing/types.ts'
 
 function testCatalogResolution() {
+  assert.equal(PRICE_VERSIONS, CATALOG_SNAPSHOT.rows)
+  assert.equal(MODEL_ALIASES, CATALOG_SNAPSHOT.aliases)
+
   assert.equal(resolveModelPrice('gpt-5.6-sol'), 'gpt-5.6-sol')
   assert.equal(resolveModelPrice('gpt-5.6-terra'), 'gpt-5.6-terra')
   assert.equal(resolveModelPrice('gpt-5.6-luna'), 'gpt-5.6-luna')
@@ -174,7 +179,10 @@ function testCatalogValidation() {
     catalogRow({ standard: { input: -1, output: 2, cacheRead: 0.1, cacheWrite: 1.25 } }),
   ], {}), /rate/i)
   assert.throws(() => validateCatalog([
-    catalogRow({ longContext: { input: 1, output: Number.POSITIVE_INFINITY, cacheRead: 0.1, cacheWrite: 1.25 } }),
+    catalogRow({
+      longContext: { input: 1, output: Number.POSITIVE_INFINITY, cacheRead: 0.1, cacheWrite: 1.25 },
+      longContextThreshold: 272_000,
+    }),
   ], {}), /rate/i)
   assert.throws(() => validateCatalog([
     catalogRow({ sourceCheckedAt: '' }),
@@ -192,7 +200,10 @@ function testCatalogValidation() {
     catalogRow({ validTo: '2026-01-01T00:00:00Z' }),
   ], {}), /interval/i)
   assert.throws(() => validateCatalog([
-    catalogRow({ longContextThreshold: -1 }),
+    catalogRow({
+      longContext: { input: 2, output: 4, cacheRead: 0.2, cacheWrite: 2.5 },
+      longContextThreshold: -1,
+    }),
   ], {}), /threshold/i)
   assert.throws(() => validateCatalog([
     catalogRow({ standard: { input: 1, output: 2, cacheRead: 0.1 } as PriceVersion['standard'] }),
@@ -208,6 +219,87 @@ function testCatalogValidation() {
   assert.throws(() => validateCatalog([catalogRow()], {
     alias: 'missing-model',
   }), /target/i)
+
+  for (const [field, value] of [
+    ['modelId', '   '],
+    ['provider', '\t'],
+    ['catalogVersion', '\n'],
+  ] as const) {
+    assert.throws(
+      () => validateCatalog([catalogRow({ [field]: value })], {}),
+      new RegExp(field, 'i'),
+    )
+  }
+
+  assert.throws(() => validateCatalog([
+    catalogRow({ sourceCheckedAt: '2026-02-30' }),
+  ], {}), /sourceCheckedAt/i)
+  assert.throws(() => validateCatalog([
+    catalogRow({ sourceCheckedAt: '2026-2-03' }),
+  ], {}), /sourceCheckedAt/i)
+  assert.doesNotThrow(() => validateCatalog([
+    catalogRow({ sourceCheckedAt: '2024-02-29' }),
+  ], {}))
+
+  for (const sourceUrl of [
+    'ftp://example.com/pricing',
+    'not-a-url',
+    'legacy:',
+  ]) {
+    assert.throws(
+      () => validateCatalog([catalogRow({ sourceUrl })], {}),
+      /sourceUrl/i,
+    )
+  }
+  assert.doesNotThrow(() => validateCatalog([
+    catalogRow({ sourceUrl: 'http://example.com/pricing' }),
+  ], {}))
+  assert.doesNotThrow(() => validateCatalog([
+    catalogRow({ sourceUrl: 'legacy:test-catalog-v1' }),
+  ], {}))
+
+  for (const validFrom of [
+    '2026-02-30T00:00:00Z',
+    '2026-01-01T00:00:00+00:00',
+    '2026-01-01',
+  ]) {
+    assert.throws(
+      () => validateCatalog([catalogRow({ validFrom })], {}),
+      /validFrom/i,
+    )
+  }
+  assert.throws(() => validateCatalog([
+    catalogRow({ validTo: '2026-02-30T00:00:00Z' }),
+  ], {}), /validTo/i)
+  assert.doesNotThrow(() => validateCatalog([
+    catalogRow({
+      validFrom: '2026-01-01T00:00:00.123Z',
+      validTo: '2026-02-01T00:00:00.456Z',
+    }),
+  ], {}))
+
+  const longRates = { input: 2, output: 4, cacheRead: 0.2, cacheWrite: 2.5 }
+  assert.throws(() => validateCatalog([
+    catalogRow({ longContext: longRates }),
+  ], {}), /threshold|longContext/i)
+  assert.throws(() => validateCatalog([
+    catalogRow({ longContextThreshold: 272_000 }),
+  ], {}), /threshold|longContext/i)
+  assert.throws(() => validateCatalog([
+    catalogRow({ longContext: longRates, longContextThreshold: 0 }),
+  ], {}), /threshold/i)
+  assert.throws(() => validateCatalog([
+    catalogRow({ longContext: longRates, longContextThreshold: 1.5 }),
+  ], {}), /threshold/i)
+  assert.throws(() => validateCatalog([
+    catalogRow({
+      longContext: null as unknown as PriceVersion['longContext'],
+      longContextThreshold: 1,
+    }),
+  ], {}), /rate|longContext/i)
+  assert.doesNotThrow(() => validateCatalog([
+    catalogRow({ longContext: longRates, longContextThreshold: 1 }),
+  ], {}))
 }
 
 function testCatalogHashIsStableAcrossObjectKeyOrder() {
@@ -444,6 +536,42 @@ function testLongContextTierSelection() {
 }
 
 function testReportedCostsTakePrecedenceAndReconcile() {
+  const exactlyReconciled = estimateCost(pricedEvent({
+    inputCost: 1,
+    outputCost: 2,
+    reasoningCost: 1,
+    cacheReadCost: 1,
+    cacheWriteCost: 2,
+    totalCost: 7,
+    pricingStatus: 'reported',
+  }))
+  assert.equal(exactlyReconciled.breakdownStatus, 'reconciled')
+  assert.equal(exactlyReconciled.unallocatedCost, 0)
+
+  const minimallyUnallocated = estimateCost(pricedEvent({
+    inputCost: 1 - Number.EPSILON,
+    outputCost: 0,
+    reasoningCost: 0,
+    cacheReadCost: 0,
+    cacheWriteCost: 0,
+    totalCost: 1,
+    pricingStatus: 'reported',
+  }))
+  assert.equal(minimallyUnallocated.breakdownStatus, 'unallocated')
+  assert.equal(minimallyUnallocated.unallocatedCost, Number.EPSILON)
+
+  const minimallyInvalid = estimateCost(pricedEvent({
+    inputCost: 1,
+    outputCost: 0,
+    reasoningCost: 0,
+    cacheReadCost: 0,
+    cacheWriteCost: 0,
+    totalCost: 1 - Number.EPSILON,
+    pricingStatus: 'reported',
+  }))
+  assert.equal(minimallyInvalid.breakdownStatus, 'invalid')
+  assert.ok(minimallyInvalid.warnings.includes('reported_cost_components_exceed_total'))
+
   const explicitlyReported = estimateCost(pricedEvent({
     model: 'unknown-model',
     timestampMs: undefined,

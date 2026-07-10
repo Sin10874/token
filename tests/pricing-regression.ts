@@ -5,6 +5,7 @@ import {
   CATALOG_HASH,
   CATALOG_SNAPSHOT,
   CATALOG_VERSION,
+  getDefaultSeedRows,
   MODEL_ALIASES,
   PRICE_VERSIONS,
   computeCatalogHash,
@@ -13,6 +14,8 @@ import {
 } from '../cli/pricing/catalog.ts'
 import { estimateCost } from '../cli/pricing/estimate.ts'
 import type { CatalogSnapshot, PriceVersion, PricingEvent } from '../cli/pricing/types.ts'
+import { applyEstimatedCosts } from '../cli/prices.ts'
+import type { RawUsageEvent } from '../server/ingestion/parser.ts'
 
 function testCatalogResolution() {
   assert.equal(PRICE_VERSIONS, CATALOG_SNAPSHOT.rows)
@@ -152,37 +155,24 @@ function testDefaultCatalogIsDeeplyImmutable() {
   assert.equal(estimateCost(pricedEvent()).totalCost, originalCost)
 }
 
-function testLegacyCatalogMigration() {
-  const source = fs.readFileSync(path.resolve(process.cwd(), 'cli/prices.ts'), 'utf8')
-  const tuplePattern = /^\s*\['([^']+)', '([^']+)', (-?\d+(?:\.\d+)?), (-?\d+(?:\.\d+)?), (-?\d+(?:\.\d+)?), (-?\d+(?:\.\d+)?)\],$/gm
-  const sourceTuples = [...source.matchAll(tuplePattern)].map(match => ({
-    modelId: match[1],
-    provider: match[2],
-    rates: [Number(match[3]), Number(match[4]), Number(match[5]), Number(match[6])],
-  }))
-  assert.equal(sourceTuples.length, 40)
-
-  const expectedLegacyRows: PriceVersion[] = sourceTuples
-    .filter(tuple => tuple.modelId !== 'claude-fable-5')
-    .map(tuple => ({
-      modelId: tuple.modelId,
-      provider: tuple.provider,
-      catalogVersion: '2026-07-10',
-      validFrom: '2026-06-12T00:00:00Z',
-      standard: {
-        input: tuple.rates[0],
-        output: tuple.rates[1],
-        cacheRead: tuple.rates[2],
-        cacheWrite: tuple.rates[3],
-      },
-      sourceCheckedAt: '2026-06-12',
-      sourceUrl: 'legacy:tokend-cli-2.4.0',
-    }))
-    .sort((left, right) => left.modelId < right.modelId ? -1 : left.modelId > right.modelId ? 1 : 0)
+function testLegacyCatalogRemainsInSharedCatalog() {
   const actualLegacyRows = CATALOG_SNAPSHOT.rows.filter(row => row.sourceUrl === 'legacy:tokend-cli-2.4.0')
 
-  assert.equal(expectedLegacyRows.length, 39)
-  assert.deepEqual(actualLegacyRows, expectedLegacyRows)
+  assert.equal(actualLegacyRows.length, 39)
+  assert.equal(new Set(actualLegacyRows.map(row => row.modelId)).size, 39)
+  assert.deepEqual(actualLegacyRows.find(row => row.modelId === 'gpt-5.4'), {
+    modelId: 'gpt-5.4',
+    provider: 'openai',
+    catalogVersion: '2026-07-10',
+    validFrom: '2026-06-12T00:00:00Z',
+    standard: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 },
+    sourceCheckedAt: '2026-06-12',
+    sourceUrl: 'legacy:tokend-cli-2.4.0',
+  })
+
+  const wrapperSource = fs.readFileSync(path.resolve(process.cwd(), 'cli/prices.ts'), 'utf8')
+  assert.doesNotMatch(wrapperSource, /DEFAULT_MODEL_PRICES|MODEL_PRICE_ALIASES|interface ModelPrice/)
+  assert.match(wrapperSource, /estimateCost/)
 }
 
 function catalogRow(overrides: Partial<PriceVersion> = {}): PriceVersion {
@@ -398,7 +388,7 @@ function testCatalogHashIsStableAcrossObjectKeyOrder() {
 function pricedEvent(overrides: Partial<PricingEvent> = {}): PricingEvent {
   return {
     model: 'gpt-5.6-sol',
-    timestampMs: Date.parse('2026-07-09T12:00:00Z'),
+    timestampMs: Date.parse('2026-07-09T00:00:00Z'),
     inputTokens: 100_000,
     outputTokens: 20_000,
     reasoningTokens: 5_000,
@@ -413,6 +403,167 @@ function pricedEvent(overrides: Partial<PricingEvent> = {}): PricingEvent {
     tokenSemantics: 'disjoint',
     ...overrides,
   }
+}
+
+function rawUsageEvent(overrides: Partial<RawUsageEvent> = {}): RawUsageEvent {
+  return {
+    id: 'pricing-wrapper-event',
+    timestampMs: Date.parse('2026-07-09T12:00:00Z'),
+    sessionId: 'pricing-wrapper-session',
+    sessionKey: null,
+    agent: 'pricing-regression',
+    provider: 'openai',
+    model: 'gpt-5.6-sol',
+    channel: 'test',
+    inputTokens: 100_000,
+    outputTokens: 20_000,
+    reasoningTokens: 5_000,
+    cacheReadTokens: 50_000,
+    cacheWriteTokens: 10_000,
+    tokenSemantics: 'disjoint',
+    totalTokens: 185_000,
+    inputCost: 0,
+    outputCost: 0,
+    reasoningCost: 0,
+    cacheReadCost: 0,
+    cacheWriteCost: 0,
+    totalCost: 0,
+    sourcePath: '/tmp/pricing-wrapper.jsonl',
+    stopReason: 'end_turn',
+    ...overrides,
+  }
+}
+
+function testApplyEstimatedCostsCompatibilityWrapper() {
+  const estimated = rawUsageEvent()
+  const returned = applyEstimatedCosts(estimated)
+
+  assert.equal(estimated.inputCost, 0.5)
+  assert.equal(estimated.outputCost, 0.6)
+  assert.equal(estimated.reasoningCost, 0.15)
+  assert.equal(estimated.cacheReadCost, 0.025)
+  assert.equal(estimated.cacheWriteCost, 0.0625)
+  assert.equal(estimated.totalCost, 1.3375)
+  assert.equal(estimated.unallocatedCost, 0)
+  assert.equal(estimated.pricingStatus, 'estimated')
+  assert.equal(estimated.pricingTier, 'standard')
+  assert.equal(estimated.matchedModelId, 'gpt-5.6-sol')
+  assert.ok(estimated.priceVersion)
+  assert.equal(estimated.breakdownStatus, 'reconciled')
+  assert.equal(Object.prototype.hasOwnProperty.call(estimated, 'catalogHash'), false)
+  assert.equal(Object.prototype.hasOwnProperty.call(estimated, 'warnings'), false)
+  assert.equal(returned, estimated)
+
+  const inferredReported = rawUsageEvent({
+    model: 'unknown-model',
+    inputCost: 0.1,
+    outputCost: 0.2,
+    reasoningCost: 0.3,
+    cacheReadCost: 0.4,
+    cacheWriteCost: 0.5,
+    totalCost: 2,
+  })
+  const reportedCosts = {
+    inputCost: inferredReported.inputCost,
+    outputCost: inferredReported.outputCost,
+    reasoningCost: inferredReported.reasoningCost,
+    cacheReadCost: inferredReported.cacheReadCost,
+    cacheWriteCost: inferredReported.cacheWriteCost,
+    totalCost: inferredReported.totalCost,
+  }
+
+  assert.equal(applyEstimatedCosts(inferredReported), inferredReported)
+  assert.deepEqual({
+    inputCost: inferredReported.inputCost,
+    outputCost: inferredReported.outputCost,
+    reasoningCost: inferredReported.reasoningCost,
+    cacheReadCost: inferredReported.cacheReadCost,
+    cacheWriteCost: inferredReported.cacheWriteCost,
+    totalCost: inferredReported.totalCost,
+  }, reportedCosts)
+  assert.equal(inferredReported.pricingStatus, 'reported')
+  assert.equal(inferredReported.unallocatedCost, 0.5)
+  assert.equal(inferredReported.breakdownStatus, 'unallocated')
+
+  const explicitlyReported = rawUsageEvent({
+    pricingStatus: 'reported',
+    inputCost: 0.6,
+    outputCost: 0.7,
+    reasoningCost: 0.8,
+    cacheReadCost: 0.9,
+    cacheWriteCost: 1,
+    totalCost: 4,
+  })
+  const explicitCosts = {
+    inputCost: explicitlyReported.inputCost,
+    outputCost: explicitlyReported.outputCost,
+    reasoningCost: explicitlyReported.reasoningCost,
+    cacheReadCost: explicitlyReported.cacheReadCost,
+    cacheWriteCost: explicitlyReported.cacheWriteCost,
+    totalCost: explicitlyReported.totalCost,
+  }
+
+  applyEstimatedCosts(explicitlyReported)
+  assert.deepEqual({
+    inputCost: explicitlyReported.inputCost,
+    outputCost: explicitlyReported.outputCost,
+    reasoningCost: explicitlyReported.reasoningCost,
+    cacheReadCost: explicitlyReported.cacheReadCost,
+    cacheWriteCost: explicitlyReported.cacheWriteCost,
+    totalCost: explicitlyReported.totalCost,
+  }, explicitCosts)
+  assert.equal(explicitlyReported.pricingStatus, 'reported')
+}
+
+function testDefaultSeedRowsComeFromEffectiveCatalogVersions() {
+  const rows = getDefaultSeedRows()
+  assert.equal(Object.isFrozen(rows), true)
+  const modelIds = rows.map(row => row[0])
+  assert.deepEqual(modelIds, [...modelIds].sort())
+  assert.equal(new Set(modelIds).size, modelIds.length)
+  assert.equal(rows.length, new Set(PRICE_VERSIONS.map(row => row.modelId)).size)
+  assert.equal(modelIds.includes('gpt-5.6'), false)
+  assert.equal(modelIds.includes('k2p5'), false)
+
+  const rowsByModel = new Map(rows.map(row => [row[0], row]))
+  assert.deepEqual(rowsByModel.get('claude-fable-5'), [
+    'claude-fable-5', 'anthropic', 10, 50, 1, 12.5,
+  ])
+  assert.deepEqual(rowsByModel.get('gpt-5.6-sol'), [
+    'gpt-5.6-sol', 'openai', 5, 30, 0.5, 6.25,
+  ])
+  assert.deepEqual(rowsByModel.get('gpt-5.6-terra'), [
+    'gpt-5.6-terra', 'openai', 2.5, 15, 0.25, 3.125,
+  ])
+  assert.deepEqual(rowsByModel.get('gpt-5.6-luna'), [
+    'gpt-5.6-luna', 'openai', 1, 6, 0.1, 1.25,
+  ])
+
+  assert.throws(
+    () => getDefaultSeedRows(Date.parse('2026-06-08T23:59:59.999Z')),
+    /effective.*price|price.*effective/i,
+  )
+
+  const solCatalogRow = PRICE_VERSIONS.find(row => row.modelId === 'gpt-5.6-sol')!
+  const solSeedRow = rowsByModel.get('gpt-5.6-sol')!
+  const mutableSolSeedRow = solSeedRow as unknown as number[]
+  const catalogInputRate = solCatalogRow.standard.input
+  attemptMutation(() => {
+    mutableSolSeedRow[2] = 999
+  })
+  assert.equal(solCatalogRow.standard.input, catalogInputRate)
+  assert.deepEqual(getDefaultSeedRows(), rows)
+}
+
+function testSqliteInitializationUsesSharedCatalogSeeds() {
+  const source = fs.readFileSync(path.resolve(process.cwd(), 'server/db/index.ts'), 'utf8')
+
+  assert.match(
+    source,
+    /import\s+\{\s*getDefaultSeedRows\s*\}\s+from\s+['"]\.\.\/\.\.\/cli\/pricing\/catalog(?:\.js|\.ts)['"]/,
+  )
+  assert.doesNotMatch(source, /DEFAULT_MODEL_PRICES/)
+  assert.match(source, /of\s+getDefaultSeedRows\(\)/)
 }
 
 function testStandardEstimationAndEffectiveDates() {
@@ -833,9 +984,12 @@ function testInjectedSnapshotsAndExclusiveValidTo() {
 async function main() {
   testCatalogResolution()
   testDefaultCatalogIsDeeplyImmutable()
-  testLegacyCatalogMigration()
+  testLegacyCatalogRemainsInSharedCatalog()
   testCatalogValidation()
   testCatalogHashIsStableAcrossObjectKeyOrder()
+  testApplyEstimatedCostsCompatibilityWrapper()
+  testDefaultSeedRowsComeFromEffectiveCatalogVersions()
+  testSqliteInitializationUsesSharedCatalogSeeds()
   testStandardEstimationAndEffectiveDates()
   testLongContextTierSelection()
   testReportedCostsTakePrecedenceAndReconcile()

@@ -157,6 +157,46 @@ export const CATALOG_ALIASES: Record<string, string> = deepFreeze(
 export const PRICE_VERSIONS = CATALOG_ROWS
 export const MODEL_ALIASES = CATALOG_ALIASES
 
+type DefaultSeedRow = [string, string, number, number, number, number]
+
+export function getDefaultSeedRows(
+  atMs = Date.parse('2026-07-10T00:00:00Z'),
+): readonly DefaultSeedRow[] {
+  if (!Number.isFinite(atMs)) {
+    throw new RangeError('atMs must be a finite timestamp')
+  }
+
+  const modelIds = [...new Set(PRICE_VERSIONS.map(row => row.modelId))].sort(compareText)
+  const seedRows: DefaultSeedRow[] = modelIds.map(modelId => {
+    const effectiveRows = PRICE_VERSIONS.filter(row => {
+      if (row.modelId !== modelId) return false
+      const validFromMs = Date.parse(row.validFrom)
+      const validToMs = row.validTo === undefined
+        ? Number.POSITIVE_INFINITY
+        : Date.parse(row.validTo)
+      return validFromMs <= atMs && atMs < validToMs
+    })
+
+    if (effectiveRows.length !== 1) {
+      throw new Error(
+        `Expected exactly one effective price version for ${modelId} at ${atMs}; found ${effectiveRows.length}`,
+      )
+    }
+
+    const row = effectiveRows[0]
+    return [
+      row.modelId,
+      row.provider,
+      row.standard.input,
+      row.standard.output,
+      row.standard.cacheRead,
+      row.standard.cacheWrite,
+    ]
+  })
+
+  return deepFreeze(seedRows)
+}
+
 function isNonBlankString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
 }

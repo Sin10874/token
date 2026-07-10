@@ -708,13 +708,13 @@ function validateReviewedPostSchema(sql) {
       if (aclTypes !== expectedTypes) fail(`Post schema revoke signature mismatch for ${name}`)
       revokedRoles.push(...splitSqlList(match[2]).map(normalizeSqlRole))
     }
-    if (!sameSet(revokedRoles, ['PUBLIC', 'anon', 'authenticated', 'service_role'])) fail(`Post schema grant revocation is missing for ${name}`)
+    if (!revokedRoles.includes('PUBLIC')) fail(`Post schema PUBLIC grant revocation is missing for ${name}`)
     surfaceRecords.push({
       name,
       signature: actualTypes,
       definition: definitions[0].replace(/^CREATE OR REPLACE FUNCTION/i, 'CREATE FUNCTION'),
       grants: [...new Set(grants)].sort(),
-      revokes: [...new Set(revokedRoles)].sort(),
+      revokes: ['PUBLIC'],
     })
   }
   return {

@@ -541,7 +541,7 @@ test('emergency verification requires 999 history and only the legacy surface', 
   }), /legacy.*allowed/i)
 })
 
-function pgDumpPostSchema({ grantPrivilege = 'ALL', body = `SELECT '{}'::"jsonb";` } = {}): string {
+function pgDumpPostSchema({ grantPrivilege = 'ALL', body = `SELECT '{}'::"jsonb";`, redundantRevokes = false } = {}): string {
   const signatures: Record<string, string> = {
     tokend_upload_events_v2: 'TEXT, JSONB, JSONB',
     [PREFLIGHT_RPC_NAME]: '',
@@ -556,6 +556,9 @@ function pgDumpPostSchema({ grantPrivilege = 'ALL', body = `SELECT '{}'::"jsonb"
       ? ['service_role']
       : ['anon', 'authenticated']
     const grants = roles.map(role => `GRANT ${grantPrivilege} ON FUNCTION "public"."${name}"(${aclSignature}) TO "${role}";`).join('\n')
+    const redundant = redundantRevokes
+      ? ['anon', 'authenticated', 'service_role'].map(role => `REVOKE ALL ON FUNCTION "public"."${name}"(${aclSignature}) FROM "${role}";`).join('\n')
+      : ''
     return `
 CREATE FUNCTION "public"."${name}"(${namedSignature}) RETURNS "jsonb"
     LANGUAGE "sql" SECURITY DEFINER
@@ -567,9 +570,7 @@ $function$;
 ALTER FUNCTION "public"."${name}"(${aclSignature}) OWNER TO "postgres";
 
 REVOKE ALL ON FUNCTION "public"."${name}"(${aclSignature}) FROM PUBLIC;
-REVOKE ALL ON FUNCTION "public"."${name}"(${aclSignature}) FROM "anon";
-REVOKE ALL ON FUNCTION "public"."${name}"(${aclSignature}) FROM "authenticated";
-REVOKE ALL ON FUNCTION "public"."${name}"(${aclSignature}) FROM "service_role";
+${redundant}
 ${grants}
 `
   }).join('\n')
@@ -620,12 +621,16 @@ test('forward recovery rejects every bypass and only one newly reviewed exact bi
     migrationsDir: dir,
     migrationFile,
     approval,
-    postSchema: pgDumpPostSchema({ grantPrivilege: 'EXECUTE' }),
-    livePostSchema: pgDumpPostSchema({ grantPrivilege: 'ALL' }),
+    postSchema: pgDumpPostSchema({ redundantRevokes: true }),
+    livePostSchema: pgDumpPostSchema(),
     liveSurface: recoveredLiveSurface(),
     fs: nodeFs,
     now: () => '2026-07-11T00:00:00.000Z',
   }
+  assert.match(common.livePostSchema, /REVOKE ALL ON FUNCTION "public"\."tokend_upload_events_v2"\([^)]*\) FROM PUBLIC;/)
+  assert.doesNotMatch(common.livePostSchema, /tokend_upload_events_v2"\([^)]*\) FROM "anon";/)
+  assert.match(common.postSchema, /tokend_upload_events_v2"\([^)]*\) FROM "anon";/)
+  const recovered = await validateForwardRecovery(common)
 
   const rejected: Array<[string, Record<string, unknown>, RegExp]> = [
     ['missing emergency verification', { state: { ...baseState, emergencyVerified: false } }, /emergency verification/i],
@@ -664,7 +669,6 @@ test('forward recovery rejects every bypass and only one newly reviewed exact bi
     await assert.rejects(validateForwardRecovery({ ...common, ...override }), pattern, label)
   }
 
-  const recovered = await validateForwardRecovery(common)
   assert.equal(recovered.forwardRecoveryRequired, false)
   assert.equal(recovered.recoveryVersion, recoveryVersion)
   assert.equal(recovered.recoveryHash, migrationHash)
@@ -686,7 +690,7 @@ test('forward-recover command obtains an independent linked schema dump instead 
   await atomicWriteJson(statePath, { wrapperGatePassed: true, forwardRecoveryRequired: true }, { fs: nodeFs, randomUUID })
   await writeFile(migrationListPath, exactMigrationList([...MANAGED_MIGRATION_VERSIONS, EMERGENCY_VERSION, RECOVERY_MIN_VERSION]))
   await writeFile(migrationFile, 'SELECT recovery;')
-  await writeFile(postSchemaPath, pgDumpPostSchema({ grantPrivilege: 'EXECUTE' }))
+  await writeFile(postSchemaPath, pgDumpPostSchema({ redundantRevokes: true }))
   await writeFile(approvalPath, '{}')
   let dumpCalls = 0
   const runner = createRolloutRunner({

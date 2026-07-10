@@ -718,13 +718,18 @@ function testEffectiveRelationHasOneAuditablePrecedenceRule(): void {
   )
   assert.match(
     definition,
-    /ELSE GREATEST\(\s*resolved\.effective_total_cost[\s\S]*?- resolved\.effective_input_cost[\s\S]*?- resolved\.effective_cache_write_cost,\s*0::NUMERIC\s*\)/i,
+    /WHEN resolved\.effective_breakdown_status\s*=\s*'unallocated'\s+THEN GREATEST\(\s*resolved\.effective_total_cost[\s\S]*?- resolved\.effective_input_cost[\s\S]*?- resolved\.effective_cache_write_cost,\s*0::NUMERIC\s*\)[\s\S]*?ELSE 0::NUMERIC/i,
   )
   assert.match(
     definition,
-    /CASE\s+WHEN costed\.effective_input_cost \+ costed\.effective_output_cost[\s\S]*?> costed\.effective_total_cost THEN 'invalid'[\s\S]*?< costed\.effective_total_cost THEN 'unallocated'[\s\S]*?ELSE 'reconciled'\s+END AS effective_breakdown_status/i,
+    /CASE\s+WHEN costed\.effective_source IN \('reported', 'legacy'\)[\s\S]*?GREATEST\(0\.000001::NUMERIC, ABS\(costed\.effective_total_cost\) \* 0\.000001::NUMERIC\)[\s\S]*?ELSE 0::NUMERIC\s+END AS comparison_epsilon/i,
+  )
+  assert.match(
+    definition,
+    /effective_component_total > effective_total_cost \+ comparison_epsilon THEN 'invalid'[\s\S]*?effective_total_cost - effective_component_total > comparison_epsilon THEN 'unallocated'[\s\S]*?ELSE 'reconciled'/i,
   )
   assert.doesNotMatch(definition, /selected_unallocated_cost\s*\+/i)
+  assert.doesNotMatch(definition, /effective_component_total\s*>\s*effective_total_cost\s+THEN/i)
   assert.doesNotMatch(definition, /effective_cache_read_cost[\s\S]{0,160}(?:total_cost\s*-|-\s*[^\n]*total_cost)/i)
   assert.match(definition, /(?:usage_event|resolved)\.total_tokens\s*>\s*0\s+AS eligible_for_cost_coverage/i)
 }
@@ -766,7 +771,7 @@ function testSummaryChildrenAndSessionsUseTheFullEnvelopeContract(): void {
     /SELECT COALESCE\(jsonb_agg\(jsonb_build_object\(([\s\S]*?)\) ORDER BY total_tokens DESC, model\), '.*?'::JSONB\)\s+INTO v_models/i,
   )
   const topConversations = summary.match(
-    /SELECT COALESCE\(jsonb_agg\(jsonb_build_object\(([\s\S]*?)\) ORDER BY total_tokens DESC, total_cost DESC\), '.*?'::JSONB\)\s+INTO v_conversations/i,
+    /SELECT COALESCE\(jsonb_agg\(jsonb_build_object\(([\s\S]*?)\) ORDER BY total_tokens DESC, total_cost DESC, session_id\), '.*?'::JSONB\)\s+INTO v_conversations/i,
   )
   assert.ok(modelDistribution, 'summary modelDistribution must be an auditable grouped envelope')
   assert.ok(topConversations, 'summary topConversations must be an auditable grouped envelope')
@@ -779,7 +784,7 @@ function testSummaryChildrenAndSessionsUseTheFullEnvelopeContract(): void {
     assert.match(topConversations[1], new RegExp(`'${key}'\\s*,`, 'i'))
   }
   assert.match(summary, /limited AS \(SELECT \* FROM envelope ORDER BY total_tokens DESC, model LIMIT 10\)[\s\S]*?INTO v_models/i)
-  assert.match(summary, /limited AS \(SELECT \* FROM envelope ORDER BY total_tokens DESC, total_cost DESC LIMIT 8\)[\s\S]*?INTO v_conversations/i)
+  assert.match(summary, /limited AS \(SELECT \* FROM envelope ORDER BY total_tokens DESC, total_cost DESC, session_id LIMIT 8\)[\s\S]*?INTO v_conversations/i)
 
   const sessions = functionDefinition(migration, 'tokend_get_sessions_v2')
   assert.match(sessions, /selected_sessions AS\s*\([\s\S]*?timestamp_ms\s*>=\s*v_from_ms/i)
@@ -788,7 +793,7 @@ function testSummaryChildrenAndSessionsUseTheFullEnvelopeContract(): void {
   for (const column of ['session_key', 'agent', 'project', 'channel', 'model']) {
     assert.match(
       sessions,
-      new RegExp(`ARRAY_AGG\\(${column} ORDER BY timestamp_ms DESC\\) FILTER \\(WHERE NULLIF\\(${column}, ''\\) IS NOT NULL\\)`, 'i'),
+      new RegExp(`ARRAY_AGG\\(${column} ORDER BY timestamp_ms DESC, id DESC\\) FILTER \\(WHERE NULLIF\\(${column}, ''\\) IS NOT NULL\\)`, 'i'),
     )
   }
 
@@ -797,9 +802,40 @@ function testSummaryChildrenAndSessionsUseTheFullEnvelopeContract(): void {
   for (const column of ['session_key', 'agent', 'project', 'channel', 'model']) {
     assert.match(
       detail,
-      new RegExp(`ARRAY_AGG\\(${column} ORDER BY timestamp_ms DESC\\) FILTER \\(WHERE NULLIF\\(${column}, ''\\) IS NOT NULL\\)`, 'i'),
+      new RegExp(`ARRAY_AGG\\(${column} ORDER BY timestamp_ms DESC, id DESC\\) FILTER \\(WHERE NULLIF\\(${column}, ''\\) IS NOT NULL\\)`, 'i'),
     )
   }
+  assert.match(sessions, /LIMIT LEAST\(GREATEST\(COALESCE\(p_limit, 50\), 0\), 200\)/i)
+  assert.match(sessions, /jsonb_agg\([\s\S]*?ORDER BY last_seen_at DESC, session_id/i)
+  assert.match(detail, /'totalTokens'\s*,\s*COALESCE\(input_tokens, 0\)::BIGINT\s*\+\s*COALESCE\(output_tokens, 0\)::BIGINT\s*\+\s*COALESCE\(reasoning_tokens, 0\)::BIGINT\s*\+\s*COALESCE\(cache_read_tokens, 0\)::BIGINT\s*\+\s*COALESCE\(cache_write_tokens, 0\)::BIGINT/i)
+  assert.match(detail, /jsonb_agg\([\s\S]*?ORDER BY timestamp_ms, id/i)
+  const latestMetadataArrays = migration.split('\n').filter(line => /ARRAY_AGG\([^)]*ORDER BY timestamp_ms DESC/i.test(line))
+  assert.ok(latestMetadataArrays.length >= 13)
+  for (const line of latestMetadataArrays) assert.match(line, /ORDER BY timestamp_ms DESC, id DESC/i)
+}
+
+function testSummaryUsesTheV14SingleScanExecutionShape(): void {
+  const summary = functionDefinition(readRpcMigration(), 'tokend_get_summary_v5')
+  assert.match(summary, /SET statement_timeout\s*=\s*'30s'/i)
+  assert.equal(
+    (summary.match(/FROM public\.tokend_effective_usage_events\b/gi) ?? []).length,
+    1,
+    'summary must scan the effective relation only for its temp materialization',
+  )
+  assert.equal(
+    (summary.match(/FROM public\.tokend_message_events\b/gi) ?? []).length,
+    1,
+    'summary must scan message events once with filtered current/previous counters',
+  )
+  assert.match(summary, /DROP TABLE IF EXISTS pg_temp\.tokend_summary_effective_events/i)
+  assert.doesNotMatch(summary, /DROP TABLE IF EXISTS\s+tokend_summary_effective_events/i)
+  assert.match(summary, /CREATE TEMP TABLE tokend_summary_effective_events ON COMMIT DROP AS/i)
+  assert.match(summary, /effective_event\.timestamp_ms\s*>=\s*v_previous_from_ms/i)
+  assert.doesNotMatch(summary, /v_to_ms|timestamp_ms\s*<=\s*(?:now|v_to)/i)
+  assert.match(summary, /timestamp_ms\s*>=\s*v_from_ms\s+AS is_current/i)
+  assert.equal((summary.match(/FROM pg_temp\.tokend_summary_effective_events\b/gi) ?? []).length, 5)
+  assert.match(summary, /COUNT\(\*\) FILTER \(WHERE message\.kind IN \('user', 'assistant'\) AND message\.timestamp_ms >= v_from_ms\)/i)
+  assert.match(summary, /COUNT\(\*\) FILTER \(WHERE message\.kind IN \('user', 'assistant'\) AND message\.timestamp_ms < v_from_ms\)/i)
 }
 
 function testSupabaseConfigAndPackageScriptsAreIsolated(): void {
@@ -892,6 +928,10 @@ function testPgTapContractIsSelfContained(): void {
     'sessions period selection and limit remain exact',
     'service_role cannot execute any vNext RPC',
     'invalid timezone falls back to Asia Shanghai across timezone-aware RPCs',
+    'REAL base costs use epsilon without inventing invalid or unallocated breakdowns',
+    'session detail event token arithmetic widens before summing five buckets',
+    'same timestamp metadata resolves by id descending in parent and detail',
+    'session limits clamp negative and oversized anonymous requests',
   ]) assert.match(pgTap, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'))
   assert.doesNotMatch(pgTap, /\/Users\/|\/home\/|SUPABASE_(?:KEY|TOKEN)|NPM_TOKEN|member[_ -]?secret/i)
 }
@@ -914,6 +954,7 @@ testRpcMigrationDefinesExactSurfaceAndPrivileges()
 testEffectiveRelationHasOneAuditablePrecedenceRule()
 testRpcAggregationContractIsConsistent()
 testSummaryChildrenAndSessionsUseTheFullEnvelopeContract()
+testSummaryUsesTheV14SingleScanExecutionShape()
 testSupabaseConfigAndPackageScriptsAreIsolated()
 testPgTapContractIsSelfContained()
 console.log('pricing SQL contract tests passed')

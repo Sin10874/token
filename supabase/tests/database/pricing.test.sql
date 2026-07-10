@@ -115,7 +115,7 @@ WHERE pronamespace = 'public'::regnamespace
 \ir ../../migrations/202607100003_pricing_rpcs.sql
 \ir ../../migrations/202607100003_pricing_rpcs.sql
 
-SELECT plan(135);
+SELECT plan(139);
 
 SELECT pass('pricing migration compiles and applies twice');
 
@@ -1566,7 +1566,9 @@ INSERT INTO public.tokend_members (member_code, token) VALUES
   ('RPC_MISMATCH', 'rpc-mismatch'),
   ('RPC_INVALID', 'rpc-invalid'),
   ('RPC_BREAKDOWN', 'rpc-breakdown'),
-  ('RPC_CROSS_SESSION', 'rpc-cross-session');
+  ('RPC_CROSS_SESSION', 'rpc-cross-session'),
+  ('RPC_FLOAT', 'rpc-float'),
+  ('RPC_OVERFLOW', 'rpc-overflow');
 
 INSERT INTO public.tokend_usage_events (
   id, member_code, timestamp_ms, session_id, session_key, agent, provider, model, channel,
@@ -1652,6 +1654,25 @@ INSERT INTO public.tokend_usage_events (
   ('rpc-cross-old-only', 'RPC_CROSS_SESSION', (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT - 691100000,
     'rpc-cross-old-only', 'stale-key', 'stale-agent', 'openai', 'gpt-5.6-luna', 'coding-stale',
     5, 0, 0, 0, 0, 5, 5, 0, 0, 0, 0, 5, 'stop', 'stale-project',
+    'reported', 'standard', 'client-report-v1', NULL, 'disjoint', 0, 'reconciled'),
+  ('rpc-tie-a', 'RPC_CROSS_SESSION', (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT - 100000,
+    'rpc-tie-main', 'tie-a-key', 'tie-a-agent', 'openai', 'gpt-5.6-luna', 'coding-tie-a',
+    1, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 'stop', 'tie-a-project',
+    'reported', 'standard', 'client-report-v1', NULL, 'disjoint', 0, 'reconciled'),
+  ('rpc-tie-b', 'RPC_CROSS_SESSION', (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT - 100000,
+    'rpc-tie-main', 'tie-b-key', 'tie-b-agent', 'openai', 'gpt-5.6-terra', 'coding-tie-b',
+    1, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 'stop', 'tie-b-project',
+    'reported', 'standard', 'client-report-v1', NULL, 'disjoint', 0, 'reconciled'),
+  ('rpc-float-reconciled', 'RPC_FLOAT', (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT - 7000,
+    'rpc-float-s', 'float-key', 'float-agent', 'openai', 'gpt-5.6-sol', 'coding',
+    1, 0, 0, 0, 0, 1,
+    0.071762::REAL, 0.054700::REAL, 0.049848::REAL, 0.076374::REAL, 0.060217::REAL,
+    0.312901::REAL, 'stop', 'float-project',
+    'reported', 'standard', 'client-report-v1', NULL, 'disjoint', 0, NULL),
+  ('rpc-overflow-event', 'RPC_OVERFLOW', (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT - 6000,
+    'rpc-overflow-s', 'overflow-key', 'overflow-agent', 'openai', 'gpt-5.6-sol', 'coding',
+    500000000, 500000000, 500000000, 500000000, 500000000, 1,
+    0, 0, 0, 0, 0, 0, 'stop', 'overflow-project',
     'reported', 'standard', 'client-report-v1', NULL, 'disjoint', 0, 'reconciled');
 
 INSERT INTO public.tokend_event_cost_revisions (
@@ -1942,6 +1963,36 @@ SELECT results_eq(
   'breakdown reconciliation propagates through every aggregate envelope'
 );
 
+SELECT results_eq(
+  $actual$
+    SELECT effective_breakdown_status, effective_unallocated_cost,
+      (public.tokend_get_summary_v5('rpc-float')::JSONB->>'breakdownInvalidCount')::BIGINT
+    FROM public.tokend_effective_usage_events
+    WHERE member_code = 'RPC_FLOAT' AND id = 'rpc-float-reconciled'
+  $actual$,
+  $expected$ VALUES ('reconciled'::TEXT, 0::NUMERIC, 0::BIGINT) $expected$,
+  'REAL base costs use epsilon without inventing invalid or unallocated breakdowns'
+);
+
+SELECT lives_ok(
+  $sql$SELECT public.tokend_get_session_detail_v2('rpc-overflow', 'rpc-overflow-s')$sql$,
+  'session detail event token arithmetic widens before summing five buckets'
+);
+
+SELECT results_eq(
+  $actual$
+    SELECT
+      (event->>'totalTokens')::BIGINT,
+      (event->>'eligibleEventCount')::BIGINT,
+      (detail->>'totalTokens')::BIGINT,
+      (detail->>'eligibleEventCount')::BIGINT
+    FROM (SELECT public.tokend_get_session_detail_v2('rpc-overflow', 'rpc-overflow-s')::JSONB AS detail) AS payload
+    CROSS JOIN LATERAL jsonb_array_elements(payload.detail->'events') AS events(event)
+  $actual$,
+  $expected$ VALUES (2500000000::BIGINT, 1::BIGINT, 2500000000::BIGINT, 1::BIGINT) $expected$,
+  'overflow-safe event totals keep coverage eligibility on deployed total_tokens'
+);
+
 SELECT is(
   pg_temp.rpc_envelope(public.tokend_get_summary_v5('rpc-token')::JSONB),
   pg_temp.rpc_aggregate_envelopes(public.tokend_get_summary_v5('rpc-token')::JSONB->'modelDistribution'),
@@ -1984,19 +2035,47 @@ SELECT results_eq(
 
 SELECT results_eq(
   $actual$
+    SELECT
+      parent.row->>'sessionKey', parent.row->>'agent', parent.row->>'title',
+      parent.row->>'channel', parent.row->>'currentModel',
+      detail->>'sessionKey', detail->>'agent', detail->>'title',
+      detail->>'channel', detail->>'currentModel'
+    FROM jsonb_array_elements(public.tokend_get_sessions_v2('rpc-cross-session')::JSONB->'sessions') AS parent(row)
+    CROSS JOIN LATERAL (
+      SELECT public.tokend_get_session_detail_v2('rpc-cross-session', 'rpc-tie-main')::JSONB AS detail
+    ) AS session_detail
+    WHERE parent.row->>'sessionId' = 'rpc-tie-main'
+  $actual$,
+  $expected$
+    VALUES (
+      'tie-b-key'::TEXT, 'tie-b-agent'::TEXT, 'tie-b-project'::TEXT,
+      'coding-tie-b'::TEXT, 'gpt-5.6-terra'::TEXT,
+      'tie-b-key'::TEXT, 'tie-b-agent'::TEXT, 'tie-b-project'::TEXT,
+      'coding-tie-b'::TEXT, 'gpt-5.6-terra'::TEXT
+    )
+  $expected$,
+  'same timestamp metadata resolves by id descending in parent and detail'
+);
+
+SELECT results_eq(
+  $actual$
     SELECT scope, session_ids
     FROM (VALUES
       ('all'::TEXT, (SELECT jsonb_agg(row->>'sessionId' ORDER BY row->>'sessionId') FROM jsonb_array_elements(public.tokend_get_sessions_v2('rpc-cross-session', '7d', 50)::JSONB->'sessions') AS row)),
-      ('limit'::TEXT, (SELECT jsonb_agg(row->>'sessionId') FROM jsonb_array_elements(public.tokend_get_sessions_v2('rpc-cross-session', '7d', 1)::JSONB->'sessions') AS row))
+      ('huge'::TEXT, (SELECT jsonb_agg(row->>'sessionId' ORDER BY row->>'sessionId') FROM jsonb_array_elements(public.tokend_get_sessions_v2('rpc-cross-session', '7d', 999999)::JSONB->'sessions') AS row)),
+      ('limit'::TEXT, (SELECT jsonb_agg(row->>'sessionId') FROM jsonb_array_elements(public.tokend_get_sessions_v2('rpc-cross-session', '7d', 1)::JSONB->'sessions') AS row)),
+      ('negative'::TEXT, public.tokend_get_sessions_v2('rpc-cross-session', '7d', -1)::JSONB->'sessions')
     ) AS actual(scope, session_ids)
     ORDER BY scope
   $actual$,
   $expected$
     VALUES
-      ('all'::TEXT, '["rpc-cross-main","rpc-cross-other"]'::JSONB),
-      ('limit'::TEXT, '["rpc-cross-main"]'::JSONB)
+      ('all'::TEXT, '["rpc-cross-main","rpc-cross-other","rpc-tie-main"]'::JSONB),
+      ('huge'::TEXT, '["rpc-cross-main","rpc-cross-other","rpc-tie-main"]'::JSONB),
+      ('limit'::TEXT, '["rpc-cross-main"]'::JSONB),
+      ('negative'::TEXT, '[]'::JSONB)
   $expected$,
-  'sessions period selection and limit remain exact'
+  'sessions period selection and limit remain exact; session limits clamp negative and oversized anonymous requests'
 );
 
 SELECT results_eq(

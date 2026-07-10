@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash, randomUUID as nodeRandomUUID } from 'node:crypto'
+import { execFile as nodeExecFile } from 'node:child_process'
 import * as nodeFs from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -340,7 +341,7 @@ export function compareWrapperDefinitions(liveSql, reviewedSql) {
   }
 }
 
-const sensitiveKey = key => /(?:secret|prompt|payload|^raw|provider.*url)|^(?:authorization|apiKey|apikey|serviceKey|anonKey|token|memberToken|memberCode|memberId|eventId|sessionId|body|id|ids|members?|events?|sessions?|fixtures?|(?:member|event|session|fixture)Ids)$/i.test(key)
+const sensitiveKey = key => /(?:secret|prompt|payload|^raw|provider.*url)|^(?:authorization|apiKey|apikey|serviceKey|anonKey|token|memberToken|memberCode|memberId|eventId|sessionId|cursorMember|cursorEvent|nextMember|nextEvent|body|id|ids|members?|events?|sessions?|fixtures?|(?:member|event|session|fixture)Ids)$/i.test(key)
 
 export function sanitizeForOutput(value) {
   if (Array.isArray(value)) return value.map(sanitizeForOutput).filter(child => child !== undefined)
@@ -469,6 +470,39 @@ async function filesByVersion(directory, fs) {
   return result
 }
 
+function exactVersionList(actual, expected) {
+  return actual.length === expected.length && actual.every((version, index) => version === expected[index])
+}
+
+function orderedBoundVersions(state) {
+  const applied = state.appliedMigrationHashes ?? {}
+  const keys = Object.keys(applied)
+  const allowed = new Set([...MANAGED_MIGRATION_VERSIONS, EMERGENCY_VERSION])
+  const recovery = keys.filter(version => version >= RECOVERY_MIN_VERSION).sort()
+  for (const version of recovery) allowed.add(version)
+  for (const version of keys) if (!allowed.has(version)) fail(`Unexpected bound migration ${version}`)
+  const managed = MANAGED_MIGRATION_VERSIONS.filter(version => Object.hasOwn(applied, version))
+  if (!exactVersionList(managed, MANAGED_MIGRATION_VERSIONS.slice(0, managed.length))) {
+    fail('Bound migrations violate production order')
+  }
+  if (Object.hasOwn(applied, EMERGENCY_VERSION) && managed.length !== MANAGED_MIGRATION_VERSIONS.length) {
+    fail('Emergency migration cannot precede managed migration 004')
+  }
+  if (recovery.length > 0 && !Object.hasOwn(applied, EMERGENCY_VERSION)) fail('Recovery migration requires bound emergency migration')
+  if (recovery.length > 1) fail('Only one reviewed recovery migration may be bound')
+  return [...managed, ...(Object.hasOwn(applied, EMERGENCY_VERSION) ? [EMERGENCY_VERSION] : []), ...recovery]
+}
+
+function expectedNextMigration(bound, candidate) {
+  if (bound.length < MANAGED_MIGRATION_VERSIONS.length) return MANAGED_MIGRATION_VERSIONS[bound.length]
+  if (!bound.includes(EMERGENCY_VERSION)) return EMERGENCY_VERSION
+  if (!bound.some(version => version >= RECOVERY_MIN_VERSION)) {
+    if (candidate >= RECOVERY_MIN_VERSION) return candidate
+    return RECOVERY_MIN_VERSION
+  }
+  return null
+}
+
 export async function validateMigrationGate({ state, migrationList, migrationsDir, phase, fs = nodeFs, now = () => new Date().toISOString() }) {
   if (!['pre', 'post'].includes(phase)) fail('Migration gate phase must be pre or post')
   const rows = parseMigrationList(migrationList)
@@ -476,35 +510,53 @@ export async function validateMigrationGate({ state, migrationList, migrationsDi
     if (!row.local || !row.remote || row.local !== row.remote) fail(`Migration local/remote mismatch at ${row.local || row.remote}`)
   }
   const listed = rows.map(row => row.local)
+  if (new Set(listed).size !== listed.length) fail('Migration list contains duplicate versions')
   const history = [...(state.migrationGateHistory ?? [])]
   if (phase === 'pre') {
-    if (listed.includes(EMERGENCY_VERSION)) fail('Emergency migration cannot be part of a normal pre baseline')
-    history.push({
-      phase: 'pre',
-      versions: listed,
-      historyHash: sha256(JSON.stringify(listed)),
-      timestamp: now(),
-    })
-    return {
-      ...state,
-      migrationBaselineVersions: listed,
-      migrationBaselineHash: sha256(JSON.stringify(listed)),
-      migrationGateHistory: history,
-      transition: 'migrations-consistent',
+    if (!Array.isArray(state.migrationBaselineVersions)) {
+      if (listed.includes(EMERGENCY_VERSION)) fail('Emergency migration cannot be part of a normal pre baseline')
+      history.push({
+        phase: 'pre',
+        versions: listed,
+        historyHash: sha256(JSON.stringify(listed)),
+        timestamp: now(),
+      })
+      return {
+        ...state,
+        migrationBaselineVersions: listed,
+        migrationBaselineHash: sha256(JSON.stringify(listed)),
+        migrationGateHistory: history,
+        transition: 'migrations-consistent',
+      }
     }
+    const bound = orderedBoundVersions(state)
+    const expected = [...state.migrationBaselineVersions, ...bound]
+    if (!exactVersionList(listed, expected)) fail('Pre migration history must equal the original baseline plus bound migrations')
+    return { ...state, transition: state.forwardRecoveryRequired ? 'forward-required' : 'migrations-consistent' }
   }
   const baseline = state.migrationBaselineVersions
   if (!Array.isArray(baseline)) fail('Post migration gate requires a recorded pre baseline')
-  for (const version of baseline) if (!listed.includes(version)) fail(`Migration history lost baseline version ${version}`)
+  const bound = orderedBoundVersions(state)
+  const prefix = [...baseline, ...bound]
+  if (!exactVersionList(listed.slice(0, prefix.length), prefix)) fail('Post migration history lost or changed the baseline plus bound migrations')
+  const additions = listed.slice(prefix.length)
+  if (additions.length > 1) fail('Post migration gate binds exactly one migration at a time')
+  if (listed.length < prefix.length) fail('Post migration history lost a baseline or bound migration')
+  if (additions.length === 1) {
+    const expected = expectedNextMigration(bound, additions[0])
+    if (expected === null || additions[0] !== expected) fail(`Migration violates production order; expected ${expected ?? 'no further migration'}`)
+  }
   const staged = await filesByVersion(migrationsDir, fs)
   const appliedMigrationHashes = { ...(state.appliedMigrationHashes ?? {}) }
-  for (const version of Object.keys(appliedMigrationHashes)) if (!listed.includes(version)) fail(`Migration history lost applied version ${version}`)
-  const rolloutVersions = listed.filter(version => !baseline.includes(version))
+  const rolloutVersions = [...bound, ...additions]
   for (const version of rolloutVersions) {
     const planned = state.plannedMigrationHashes?.[version]
     if (!planned) fail(`Migration ${version} was not preplanned in a manifest`)
     const file = staged.get(version)
     if (!file) fail(`Staged migration file missing for ${version}`)
+    if (state.plannedMigrationPaths?.[version] && path.basename(file) !== state.plannedMigrationPaths[version]) {
+      fail(`Staged migration path mismatch for ${version}`)
+    }
     const hash = sha256(await fs.readFile(file))
     if (hash !== planned) fail(`Planned hash mismatch for migration ${version}`)
     const previouslyApplied = appliedMigrationHashes[version]
@@ -522,7 +574,7 @@ export async function validateMigrationGate({ state, migrationList, migrationsDi
       })
     }
   }
-  const sticky = state.forwardRecoveryRequired === true || listed.includes(EMERGENCY_VERSION)
+  const sticky = state.forwardRecoveryRequired === true || Object.hasOwn(appliedMigrationHashes, EMERGENCY_VERSION)
   return {
     ...state,
     appliedMigrationHashes,
@@ -541,6 +593,9 @@ export function validateEmergencySurface({ state, migrationList, surface, now = 
   if (!rows.some(row => row.local === EMERGENCY_VERSION && row.remote === EMERGENCY_VERSION)) fail('999 emergency migration must be present in history')
   if (!state.appliedMigrationHashes?.[EMERGENCY_VERSION]) fail('999 emergency migration must have an applied hash')
   if (!surface.legacyWrapperPresent || !sameSet(surface.legacyRpcNames ?? [], LEGACY_RPC_NAMES)) fail('Legacy wrapper and RPC surface must remain present')
+  if (!surface.legacyWrapperAllowed || !sameSet(surface.legacyAllowedRpcNames ?? [], LEGACY_RPC_NAMES)) {
+    fail('Legacy wrapper and all legacy RPCs must remain allowed')
+  }
   if (surface.v2UploadPresent || (surface.vNextRpcNames?.length ?? 0) > 0 || (surface.adminRpcNames?.length ?? 0) > 0) {
     fail('vNext, v2, and admin RPCs must be absent after emergency rollback')
   }
@@ -563,6 +618,7 @@ function validateReviewedPostSchema(sql) {
     ...CLIENT_RPC_SIGNATURES,
   }
   const surfaceNames = Object.keys(signatures)
+  const surfaceRecords = []
   for (const name of surfaceNames) {
     const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     const definitions = statements.filter(statement => new RegExp(`^CREATE(?: OR REPLACE)? FUNCTION public\\.${escaped}\\s*\\(`, 'i').test(statement))
@@ -594,11 +650,26 @@ function validateReviewedPostSchema(sql) {
       revokedRoles.push(...match[2].split(',').map(role => role.trim()))
     }
     if (!sameSet(revokedRoles, ['PUBLIC', 'anon', 'authenticated', 'service_role'])) fail(`Post schema grant revocation is missing for ${name}`)
+    surfaceRecords.push({
+      name,
+      signature: actualTypes,
+      definition: definitions[0].replace(/^CREATE OR REPLACE FUNCTION/i, 'CREATE FUNCTION'),
+      grants: [...new Set(grants)].sort(),
+      revokes: [...new Set(revokedRoles)].sort(),
+    })
   }
   return {
     securityDefinerNames: surfaceNames,
     searchPathNames: surfaceNames,
+    surfaceHash: sha256(JSON.stringify(surfaceRecords.sort((left, right) => binaryTextCompare(left.name, right.name)))),
   }
+}
+
+function validateLinkedPostSchema(postSchema, livePostSchema) {
+  const reviewedSchema = validateReviewedPostSchema(postSchema)
+  const linkedLiveSchema = validateReviewedPostSchema(livePostSchema)
+  if (linkedLiveSchema.surfaceHash !== reviewedSchema.surfaceHash) fail('Linked live schema differs from reviewed post schema')
+  return { reviewedSchema, linkedLiveSchema }
 }
 
 function validateRecoveredLiveSurface(surface) {
@@ -612,7 +683,7 @@ function validateRecoveredLiveSurface(surface) {
 }
 
 export async function validateForwardRecovery({
-  state, migrationList, migrationsDir, migrationFile, approval, postSchema, liveSurface,
+  state, migrationList, migrationsDir, migrationFile, approval, postSchema, livePostSchema, liveSurface,
   fs = nodeFs, now = () => new Date().toISOString(),
 }) {
   if (state.forwardRecoveryRequired !== true) fail('Forward recovery is not currently required')
@@ -644,16 +715,34 @@ export async function validateForwardRecovery({
   const postGate = (state.migrationGateHistory ?? []).some(entry =>
     entry.phase === 'post' && entry.version === version && entry.hash === hash && entry.bindingHash === bindingHash)
   if (!postGate) fail('Matching post migration gate binding is required')
-  validateReviewedPostSchema(postSchema)
+  const { linkedLiveSchema } = validateLinkedPostSchema(postSchema, livePostSchema)
   validateRecoveredLiveSurface(liveSurface)
   return {
     ...state,
     forwardRecoveryRequired: false,
     recoveryVersion: version,
     recoveryHash: hash,
+    livePostSchemaHash: linkedLiveSchema.surfaceHash,
+    livePostSchemaSource: 'supabase-db-dump-linked',
+    livePostSchemaRecoveryBinding: sha256(`${version}:${hash}:${linkedLiveSchema.surfaceHash}`),
     recoveryTime: now(),
     transition: 'newly-reviewed-forward-recovered',
   }
+}
+
+async function productionDumpLinkedSchema() {
+  return new Promise((resolve, reject) => {
+    nodeExecFile('supabase', ['db', 'dump', '--linked', '--schema', 'public'], {
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    }, (error, stdout) => {
+      if (error) {
+        reject(new ExitCodeError('Linked production schema dump failed'))
+        return
+      }
+      resolve(stdout)
+    })
+  })
 }
 
 export async function fetchAllPages({ fetch: fetchImpl, url, headers = {}, pageSize = 1000 }) {
@@ -909,6 +998,25 @@ export async function probeLiveRpcAccess({ fetch: fetchImpl, url, anonKey, servi
   return proof
 }
 
+function exactNonnegativeInteger(value, label) {
+  let text
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value) || value < 0) fail(`${label} must be a non-negative safe integer or decimal string`)
+    text = String(value)
+  } else if (typeof value === 'string' && /^\d+$/.test(value)) {
+    text = BigInt(value).toString()
+  } else {
+    fail(`${label} must be a non-negative safe integer or decimal string`)
+  }
+  const integer = BigInt(text)
+  return { text, number: integer <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(integer) : null }
+}
+
+function binaryTextCompare(left, right) {
+  if (left === right) return 0
+  return left > right ? 1 : -1
+}
+
 export async function runBackfillBatches({
   state, limit, interruptAfterBatches, callBatch, saveState, sleep, cleanup,
 }) {
@@ -919,18 +1027,26 @@ export async function runBackfillBatches({
     while (current.backfill?.remaining !== 0) {
       const previousMember = String(current.backfill?.cursorMember ?? '')
       const previousEvent = String(current.backfill?.cursorEvent ?? '')
-      const previousRemaining = Number(current.backfill?.remaining ?? Number.MAX_SAFE_INTEGER)
+      const previousRemaining = exactNonnegativeInteger(
+        current.backfill?.remaining ?? Number.MAX_SAFE_INTEGER,
+        'Persisted backfill remainingCount',
+      ).number
+      if (previousRemaining === null) fail('Persisted backfill remainingCount exceeds the safe runner range')
       const result = await retryTransient(
         () => callBatch({ afterMember: previousMember, afterEvent: previousEvent, limit }),
         { maxRetries: 3, sleep },
       )
-      const processed = Number(result.processed ?? 0)
+      const processedExact = exactNonnegativeInteger(result.processed ?? 0, 'Backfill processed')
+      if (processedExact.number === null || processedExact.number > limit) fail('Backfill processed must be a safe integer no greater than the requested limit')
+      const processed = processedExact.number
       const nextMember = result.nextMember ?? previousMember
       const nextEvent = result.nextEvent ?? previousEvent
-      const nextRemaining = Number(result.remainingCount)
-      const tupleOrder = String(nextMember).localeCompare(previousMember) || String(nextEvent).localeCompare(previousEvent)
+      const nextRemainingExact = exactNonnegativeInteger(result.remainingCount, 'Backfill remainingCount')
+      if (nextRemainingExact.number === null) fail('Backfill remainingCount exceeds the safe runner range')
+      const nextRemaining = nextRemainingExact.number
+      const tupleOrder = binaryTextCompare(String(nextMember), previousMember) || binaryTextCompare(String(nextEvent), previousEvent)
       if ((processed > 0 && tupleOrder <= 0) || (processed === 0 && nextRemaining > 0)) fail('Backfill returned a nonmonotonic cursor')
-      if (!Number.isFinite(nextRemaining) || nextRemaining < 0 || nextRemaining > previousRemaining) fail('Backfill returned nonmonotonic remaining work')
+      if (nextRemaining > previousRemaining) fail('Backfill returned nonmonotonic remaining work')
       current = {
         ...current,
         backfill: {
@@ -1003,6 +1119,19 @@ export function validateReconciliation(report, expected) {
 
 function validateMonitorSnapshot(snapshot, baselineGlobal, baselineRpc) {
   if (!snapshot.legacyHealthy || !snapshot.vNextHealthy) fail('Legacy/vNext monitor health failed')
+  for (const [label, report] of [['legacy', snapshot.legacyRpc], ['vNext', snapshot.vNextRpc]]) {
+    const count = exactNonnegativeInteger(report?.count, `${label} monitor RPC count`).number
+    const httpErrors = exactNonnegativeInteger(report?.httpErrorCount, `${label} monitor HTTP errors`).number
+    const jsonErrors = exactNonnegativeInteger(report?.jsonErrorCount, `${label} monitor JSON errors`).number
+    if (count === null || count === 0 || httpErrors === null || jsonErrors === null
+      || httpErrors > count || jsonErrors > count || !Number.isFinite(Number(report?.p95Seconds))
+      || Number(report.p95Seconds) < 0) fail(`${label} monitor RPC report is invalid`)
+    compareSampleReports(baselineRpc, report, {
+      maxErrorRateDelta: 0.01,
+      maxP95Multiplier: 2,
+      maxP95Seconds: 2,
+    })
+  }
   const adjustedCount = Number(snapshot.global?.eventCount ?? 0) - Number(snapshot.global?.knownFixtureCount ?? 0)
   if (adjustedCount < Number(baselineGlobal.eventCount ?? 0)) fail('Adjusted global event count regressed')
   const coverageRank = { unpriced: 0, partial: 1, legacy: 2, zero_rate: 3, complete: 4, no_usage: 4 }
@@ -1010,6 +1139,12 @@ function validateMonitorSnapshot(snapshot, baselineGlobal, baselineRpc) {
     || coverageRank[snapshot.global.status] < coverageRank[baselineGlobal.status]) fail('Global coverage status regressed')
   if (Number(snapshot.global?.unpricedShare ?? 0) > Number(baselineGlobal.maxUnpricedShare ?? 0)) fail('Global unpriced share exceeded baseline')
   if (Number(snapshot.global?.membersOver2x ?? 0) > Number(baselineGlobal.membersOver2x ?? 0)) fail('membersOver2x exceeded baseline')
+  const postSnapshotEventCount = exactNonnegativeInteger(snapshot.global?.postSnapshotEventCount, 'Monitor postSnapshotEventCount').number
+  const knownLateCount = exactNonnegativeInteger(snapshot.global?.knownLateCount, 'Monitor known late count').number
+  if (postSnapshotEventCount === null || knownLateCount === null || postSnapshotEventCount < knownLateCount
+    || postSnapshotEventCount - knownLateCount < Number(baselineGlobal.postSnapshotEventCount ?? 0)) {
+    fail('Adjusted postSnapshotEventCount regressed')
+  }
   if (Object.values(snapshot.fixtureHealth ?? {}).some(value => value !== true)) fail('Fixture health failed')
   if (snapshot.reconciliationHash !== baselineRpc.reconciliationHash) fail('Reconciliation hash drift')
   try { equalWithin(snapshot.pointers, baselineRpc.pointers, 0, 'pricing pointers') } catch { fail('Pricing pointer drift') }
@@ -1022,9 +1157,24 @@ export async function runMonitorLoop({
   const samples = []
   let elapsed = 0
   let nextLate = lateUploadEverySeconds
+  let previousPostSnapshotEventCount = Number(baselineGlobal.postSnapshotEventCount ?? 0)
+  let previousKnownLateCount = 0
+  let previousAdjustedPostSnapshotEventCount = previousPostSnapshotEventCount
   while (true) {
     const snapshot = await collectSnapshot()
     validateMonitorSnapshot(snapshot, baselineGlobal, baselineRpc)
+    const postSnapshotEventCount = Number(snapshot.global.postSnapshotEventCount)
+    const knownLateCount = Number(snapshot.global.knownLateCount)
+    const adjustedPostSnapshotEventCount = postSnapshotEventCount - knownLateCount
+    if (postSnapshotEventCount < previousPostSnapshotEventCount
+      || knownLateCount < previousKnownLateCount
+      || postSnapshotEventCount - previousPostSnapshotEventCount < knownLateCount - previousKnownLateCount
+      || adjustedPostSnapshotEventCount < previousAdjustedPostSnapshotEventCount) {
+      fail('Monitor postSnapshotEventCount regressed relative to known late fixtures')
+    }
+    previousPostSnapshotEventCount = postSnapshotEventCount
+    previousKnownLateCount = knownLateCount
+    previousAdjustedPostSnapshotEventCount = adjustedPostSnapshotEventCount
     samples.push(sanitizeForOutput({ elapsedSeconds: elapsed, ...snapshot }))
     if (elapsed >= durationSeconds) break
     const step = Math.min(intervalSeconds, durationSeconds - elapsed)
@@ -1085,12 +1235,12 @@ function createHttpAdapter({ env, fetch: fetchImpl }) {
 async function optionalPostgrestRpc(http, name, body, role) {
   const response = await http.raw(`rpc/${name}`, { role, body })
   if (response.ok) {
-    try { return await response.json() } catch { fail('HTTP response was not valid JSON') }
+    try { return { present: true, value: await response.json() } } catch { fail('HTTP response was not valid JSON') }
   }
   if (response.status === 404) {
     try {
       const failure = await response.json()
-      if (failure?.code === 'PGRST202') return null
+      if (failure?.code === 'PGRST202') return { present: false, value: null }
     } catch {}
   }
   fail(`HTTP request failed with status ${response.status}`)
@@ -1131,6 +1281,7 @@ const BACKFILL_SNAPSHOT_SELECT = [
   'run_id', 'status', 'catalog_version', 'snapshot_at', 'target_count', 'target_hash',
   'base_catalog_version', 'base_backfill_run_id', 'input_tokens', 'output_tokens',
   'reasoning_tokens', 'cache_read_tokens', 'cache_write_tokens', 'before_total_cost',
+  'reconciliation_hash',
 ].join(',')
 
 async function fetchBackfillRunRow(http, runId) {
@@ -1142,18 +1293,19 @@ async function fetchBackfillRunRow(http, runId) {
   return rows[0]
 }
 
-function snapshotFromBackfillRow(row) {
+function snapshotFromBackfillRow(row, basePointers) {
   return {
     snapshotAt: row.snapshot_at,
-    targetCount: Number(row.target_count),
+    targetCount: exactNonnegativeInteger(row.target_count, 'Backfill targetCount').text,
     targetHash: row.target_hash,
     baseCatalogVersion: row.base_catalog_version ?? null,
     baseRunId: row.base_backfill_run_id ?? null,
-    inputTokens: Number(row.input_tokens),
-    outputTokens: Number(row.output_tokens),
-    reasoningTokens: Number(row.reasoning_tokens),
-    cacheReadTokens: Number(row.cache_read_tokens),
-    cacheWriteTokens: Number(row.cache_write_tokens),
+    inputTokens: exactNonnegativeInteger(row.input_tokens, 'Backfill inputTokens').text,
+    outputTokens: exactNonnegativeInteger(row.output_tokens, 'Backfill outputTokens').text,
+    reasoningTokens: exactNonnegativeInteger(row.reasoning_tokens, 'Backfill reasoningTokens').text,
+    cacheReadTokens: exactNonnegativeInteger(row.cache_read_tokens, 'Backfill cacheReadTokens').text,
+    cacheWriteTokens: exactNonnegativeInteger(row.cache_write_tokens, 'Backfill cacheWriteTokens').text,
+    ...(basePointers ? { basePointers } : {}),
   }
 }
 
@@ -1277,14 +1429,14 @@ async function deleteFixtureData({ state, http, includeMember, timestamp }) {
   const filter = `member_code=eq.${encodeURIComponent(memberCode)}`
   const optionalAdditive = async operation => {
     try { return await operation() } catch (error) {
-      if (error?.status === 404 && error?.sqlstate === 'PGRST202') return null
+      if (error?.status === 404 && ['PGRST205', '42P01'].includes(error?.sqlstate)) return null
       throw error
     }
   }
   const targets = await optionalAdditive(() => http.json(`tokend_pricing_backfill_targets?select=member_code&${filter}`, { role: 'service', method: 'GET' }))
   if (Array.isArray(targets) && targets.length > 0) fail('Fixture is part of an immutable backfill target; cleanup is unsafe')
   const tables = [
-    ['tokend_event_cost_revisions', true], ['tokend_pricing_shadow_sessions', true],
+    ['tokend_event_cost_revisions', true],
     ['tokend_message_events', false], ['tokend_usage_events', false],
     ['tokend_sessions', false], ['tokend_sync_state', false],
   ]
@@ -1366,6 +1518,25 @@ async function verifyLateRows(http, memberCode, events, catalogVersion) {
   return { known: true, zero: true, unpriced: true, reported: true, legacy: true }
 }
 
+async function fixtureMembersOver2xContribution(http, memberCode, activeCatalog, previousCatalog) {
+  if (!memberCode || !activeCatalog || !previousCatalog) return 0
+  const memberFilter = `member_code=eq.${encodeURIComponent(memberCode)}`
+  const versionFilter = [activeCatalog, previousCatalog].map(encodeURIComponent).join(',')
+  const [baseRows, revisionRows] = await Promise.all([
+    http.json(`tokend_usage_events?select=id,total_cost&${memberFilter}`, { role: 'service', method: 'GET' }),
+    http.json(`tokend_event_cost_revisions?select=event_id,version,total_cost&${memberFilter}&version=in.(${versionFilter})`, { role: 'service', method: 'GET' }),
+  ])
+  if (!Array.isArray(baseRows) || !Array.isArray(revisionRows)) fail('Fixture membersOver2x verification returned invalid rows')
+  const totalFor = version => baseRows.reduce((sum, row) => {
+    const revision = revisionRows.find(candidate => candidate.event_id === row.id && candidate.version === version)
+    return sum + Number(revision?.total_cost ?? row.total_cost ?? 0)
+  }, 0)
+  const activeTotal = totalFor(activeCatalog)
+  const previousTotal = totalFor(previousCatalog)
+  if (!Number.isFinite(activeTotal) || !Number.isFinite(previousTotal)) fail('Fixture membersOver2x verification returned invalid totals')
+  return activeTotal > previousTotal * 2 ? 1 : 0
+}
+
 export function createRolloutRunner(dependencies = {}) {
   const env = dependencies.env ?? process.env
   const fs = dependencies.fs ?? nodeFs
@@ -1373,6 +1544,7 @@ export function createRolloutRunner(dependencies = {}) {
   const clock = dependencies.clock ?? (() => new Date())
   const sleep = dependencies.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)))
   const randomUUID = dependencies.randomUUID ?? nodeRandomUUID
+  const dumpLinkedSchema = dependencies.dumpLinkedSchema ?? productionDumpLinkedSchema
   if (typeof fetchImpl !== 'function') fail('A fetch adapter is required')
   const adapters = {
     fs,
@@ -1436,7 +1608,7 @@ export function createRolloutRunner(dependencies = {}) {
 
     if (command === 'preflight') {
       const { SUPABASE_URL } = requireEnvironment(env, ['SUPABASE_URL', 'SUPABASE_SERVICE_KEY'])
-      const [rows, legacyPriceRows, adminBaseline] = await Promise.all([fetchAllPages({
+      const [rows, legacyPriceRows, adminProbe] = await Promise.all([fetchAllPages({
         fetch: fetchImpl,
         url: `${SUPABASE_URL.replace(/\/$/, '')}/rest/v1/tokend_usage_events?select=model,total_tokens,total_cost,member_code`,
         headers: http.headers('service'),
@@ -1447,6 +1619,8 @@ export function createRolloutRunner(dependencies = {}) {
         headers: http.headers('service'),
         pageSize: 1000,
       }), optionalPostgrestRpc(http, PREFLIGHT_RPC_NAME, {}, 'service')])
+      const adminPresent = adminProbe.present
+      const adminBaseline = adminProbe.value
       const eligibleRows = rows.filter(row => Number(row.total_tokens ?? 0) > 0)
       const zeroCostRows = eligibleRows.filter(row => Number(row.total_cost ?? 0) === 0)
       const zeroCostRollup = new Map()
@@ -1459,31 +1633,31 @@ export function createRolloutRunner(dependencies = {}) {
       }
       const zeroCostByModel = [...zeroCostRollup.values()].sort((left, right) => right.eventCount - left.eventCount || left.model.localeCompare(right.model))
       const statusCounts = { legacy: eligibleRows.length - zeroCostRows.length, unpriced: zeroCostRows.length }
-      const pointer = value => value ?? 'not_present'
-      if (adminBaseline?.eventCount !== undefined && Number(adminBaseline.eventCount) !== rows.length) fail('Paginated event count disagrees with preflight')
-      if (adminBaseline?.legacyPriceRowCount !== undefined && Number(adminBaseline.legacyPriceRowCount) !== legacyPriceRows.length) fail('Paginated legacy price count disagrees with preflight')
-      if (adminBaseline?.eligibleEventCount !== undefined && Number(adminBaseline.eligibleEventCount) !== eligibleRows.length) fail('Paginated eligible event count disagrees with preflight')
-      if (adminBaseline?.eligibleZeroCostEventCount !== undefined && Number(adminBaseline.eligibleZeroCostEventCount) !== zeroCostRows.length) fail('Paginated eligible zero-cost count disagrees with preflight')
+      const pointer = value => adminPresent ? (value ?? null) : 'not_present'
+      if (adminPresent && adminBaseline?.eventCount !== undefined && Number(adminBaseline.eventCount) !== rows.length) fail('Paginated event count disagrees with preflight')
+      if (adminPresent && adminBaseline?.legacyPriceRowCount !== undefined && Number(adminBaseline.legacyPriceRowCount) !== legacyPriceRows.length) fail('Paginated legacy price count disagrees with preflight')
+      if (adminPresent && adminBaseline?.eligibleEventCount !== undefined && Number(adminBaseline.eligibleEventCount) !== eligibleRows.length) fail('Paginated eligible event count disagrees with preflight')
       const effectiveStatusCounts = adminBaseline?.statusCounts ?? statusCounts
+      const effectiveEligibleZeroCount = Number(adminBaseline?.eligibleZeroCostEventCount ?? zeroCostRows.length)
       const effectiveUnpricedCount = Number(adminBaseline?.unpricedEventCount ?? zeroCostRows.length)
       const output = {
         eventCount: rows.length,
         eligibleEventCount: eligibleRows.length,
-        eligibleZeroCostEventCount: zeroCostRows.length,
+        eligibleZeroCostEventCount: effectiveEligibleZeroCount,
         totalCost: rows.reduce((sum, row) => sum + Number(row.total_cost ?? 0), 0),
         unpricedEventCount: effectiveUnpricedCount,
         unpricedShare: eligibleRows.length > 0 ? effectiveUnpricedCount / eligibleRows.length : 0,
         maxUnpricedShare: eligibleRows.length > 0 ? effectiveUnpricedCount / eligibleRows.length : 0,
         status: coverageFromCounts(eligibleRows.length, effectiveStatusCounts),
         statusCounts: effectiveStatusCounts,
-        zeroCostByModel: adminBaseline?.zeroCostByModel ?? zeroCostByModel,
+        zeroCostByModel: adminPresent ? (adminBaseline?.zeroCostByModel ?? []) : zeroCostByModel,
         legacyPriceRowCount: legacyPriceRows.length,
         activeCatalogVersion: pointer(adminBaseline?.activeCatalogVersion),
         activeRunId: pointer(adminBaseline?.activeRunId),
         previousCatalogVersion: pointer(adminBaseline?.previousCatalogVersion),
         previousRunId: pointer(adminBaseline?.previousRunId),
         membersOver2x: Number(adminBaseline?.membersOver2xCount ?? 0),
-        reconciliationHash: adminBaseline?.activeReconciliationHash ?? 'not_present',
+        reconciliationHash: adminPresent ? (adminBaseline?.activeReconciliationHash ?? null) : 'not_present',
         timestamp: clock().toISOString(),
       }
       return writeSanitized(options.out, output, adapters)
@@ -1613,19 +1787,31 @@ export function createRolloutRunner(dependencies = {}) {
       const created = await http.rpc('tokend_pricing_create_backfill', { p_catalog_version: options.catalog }, 'service')
       const runId = created?.runId ?? created?.run_id
       if (!runId) fail('Backfill create returned no run id')
-      const [catalogs, runRow] = await Promise.all([
+      const [catalogs, runRow, preflight] = await Promise.all([
         http.json(`tokend_pricing_catalogs?select=hash&version=eq.${encodeURIComponent(options.catalog)}`, { role: 'service', method: 'GET' }),
         fetchBackfillRunRow(http, runId),
+        http.rpc(PREFLIGHT_RPC_NAME, {}, 'service'),
       ])
       if (!Array.isArray(catalogs) || catalogs.length !== 1 || !catalogs[0].hash) fail('Backfill catalog hash lookup failed')
-      const backfillSnapshot = snapshotFromBackfillRow(runRow)
+      const basePointers = {
+        activeCatalog: preflight?.activeCatalogVersion ?? null,
+        activeRun: preflight?.activeRunId ?? null,
+        previousCatalog: preflight?.previousCatalogVersion ?? null,
+        previousRun: preflight?.previousRunId ?? null,
+      }
+      const backfillSnapshot = snapshotFromBackfillRow(runRow, basePointers)
+      const createdTargetCount = exactNonnegativeInteger(created.targetCount, 'Backfill create targetCount').text
       if (runRow.status !== 'staging' || runRow.catalog_version !== options.catalog
         || created.status !== 'staging' || created.catalogVersion !== options.catalog
         || created.snapshotAt !== backfillSnapshot.snapshotAt
-        || Number(created.targetCount) !== backfillSnapshot.targetCount
+        || createdTargetCount !== backfillSnapshot.targetCount
         || created.targetHash !== backfillSnapshot.targetHash
         || (created.baseCatalogVersion ?? null) !== backfillSnapshot.baseCatalogVersion
-        || (created.baseRunId ?? null) !== backfillSnapshot.baseRunId) fail('Backfill create response disagrees with authoritative frozen run')
+        || (created.baseRunId ?? null) !== backfillSnapshot.baseRunId
+        || basePointers.activeCatalog !== backfillSnapshot.baseCatalogVersion
+        || basePointers.activeRun !== backfillSnapshot.baseRunId) fail('Backfill create response disagrees with authoritative frozen run')
+      const remaining = exactNonnegativeInteger(backfillSnapshot.targetCount, 'Backfill targetCount').number
+      if (remaining === null) fail('Backfill targetCount exceeds the safe runner range')
       const next = {
         ...state,
         catalogVersion: options.catalog,
@@ -1634,12 +1820,21 @@ export function createRolloutRunner(dependencies = {}) {
         backfillSnapshot,
         backfill: {
           runId, cursorMember: '', cursorEvent: '',
-          remaining: backfillSnapshot.targetCount, batches: 0,
+          remaining, batches: 0,
         },
         transition: 'rollout-active',
       }
       await saveState(options.state, next)
-      return sanitizeForOutput({ created: true, targetCount: next.backfill.remaining })
+      return sanitizeForOutput({
+        status: runRow.status,
+        targetHash: backfillSnapshot.targetHash,
+        targetCount: backfillSnapshot.targetCount,
+        inputTokens: backfillSnapshot.inputTokens,
+        outputTokens: backfillSnapshot.outputTokens,
+        reasoningTokens: backfillSnapshot.reasoningTokens,
+        cacheReadTokens: backfillSnapshot.cacheReadTokens,
+        cacheWriteTokens: backfillSnapshot.cacheWriteTokens,
+      })
     }
 
     if (command === 'backfill-run') {
@@ -1695,20 +1890,24 @@ export function createRolloutRunner(dependencies = {}) {
       ])
       if (!Array.isArray(catalogs) || catalogs.length !== 1 || catalogs[0].hash !== state.catalogHash) fail('Reconciliation catalog hash changed after backfill creation')
       if (backfill?.status !== 'reconciled' || runRow.status !== 'reconciled') fail('Backfill did not persist reconciled status')
-      assertSameBackfillSnapshot(snapshotFromBackfillRow(runRow), state.backfillSnapshot)
+      assertSameBackfillSnapshot(snapshotFromBackfillRow(runRow, state.backfillSnapshot.basePointers), state.backfillSnapshot)
+      if (runRow.reconciliation_hash !== report.reconciliationHash
+        || runRow.reconciliation_hash !== repeated.reconciliationHash) fail('Reconciliation hash disagrees with the persisted backfill run')
       if (backfill.catalogVersion !== state.catalogVersion
         || backfill.snapshotAt !== state.backfillSnapshot.snapshotAt
-        || Number(backfill.targetCount) !== state.backfillSnapshot.targetCount
-        || Number(backfill.revisionCount) !== state.backfillSnapshot.targetCount
-        || Number(backfill.remainingCount) !== 0) fail('Backfill status disagrees with frozen snapshot')
+        || exactNonnegativeInteger(backfill.targetCount, 'Backfill status targetCount').text !== state.backfillSnapshot.targetCount
+        || exactNonnegativeInteger(backfill.revisionCount, 'Backfill status revisionCount').text !== state.backfillSnapshot.targetCount
+        || exactNonnegativeInteger(backfill.remainingCount, 'Backfill status remainingCount').text !== '0') fail('Backfill status disagrees with frozen snapshot')
       const pointers = {
         activeCatalog: preflight.activeCatalogVersion,
         previousCatalog: preflight.previousCatalogVersion,
         activeRun: preflight.activeRunId,
         previousRun: preflight.previousRunId,
       }
-      if ((pointers.activeCatalog ?? null) !== state.backfillSnapshot.baseCatalogVersion
-        || (pointers.activeRun ?? null) !== state.backfillSnapshot.baseRunId) fail('Base pricing pointers changed before activation')
+      if (['activeCatalog', 'activeRun', 'previousCatalog', 'previousRun']
+        .some(key => (pointers[key] ?? null) !== (state.backfillSnapshot.basePointers?.[key] ?? null))) {
+        fail('Base pricing pointers changed before activation')
+      }
       const authoritative = { ...report, catalogHash: catalogs[0].hash, pointers }
       validateReconciliation(authoritative, { catalogHash: state.catalogHash, pointers })
       const next = {
@@ -1786,7 +1985,9 @@ export function createRolloutRunner(dependencies = {}) {
         migrationList,
         surface: {
           legacyWrapperPresent: wrapper.present,
+          legacyWrapperAllowed: wrapper.allowed,
           legacyRpcNames: LEGACY_RPC_NAMES.filter((_name, index) => legacyProbes[index].present),
+          legacyAllowedRpcNames: LEGACY_RPC_NAMES.filter((_name, index) => legacyProbes[index].allowed),
           v2UploadPresent: v2.present,
           vNextRpcNames: client.filter(item => item.present).map(item => item.name),
           adminRpcNames: admin.filter(item => item.present).map(item => item.name),
@@ -1798,9 +1999,11 @@ export function createRolloutRunner(dependencies = {}) {
     }
 
     if (command === 'forward-recover') {
-      const [migrationList, approval, postSchema] = await Promise.all([
+      const [migrationList, approval, postSchema, livePostSchema] = await Promise.all([
         fs.readFile(options.migrationList, 'utf8'), readJson(options.approval, fs), fs.readFile(options.postSchema, 'utf8'),
+        Promise.resolve().then(() => dumpLinkedSchema()).catch(() => fail('Linked production schema dump failed')),
       ])
+      const { reviewedSchema: reviewedSurface } = validateLinkedPostSchema(postSchema, livePostSchema)
       if (!state.fixture?.memberToken) fail('Forward recovery requires the isolated verification fixture')
       const liveAccess = await probeLiveRpcAccess({
         fetch: fetchImpl,
@@ -1817,7 +2020,6 @@ export function createRolloutRunner(dependencies = {}) {
         callLegacy: (name, body) => http.rpc(name, body, 'anon'),
       })
       validateRpcVerification(rpcReport, 1e-9)
-      const reviewedSurface = validateReviewedPostSchema(postSchema)
       const liveSurface = {
         legacyWrapperPresent: liveAccess.anonAllowed.includes('tokend_upload_events'),
         v2UploadPresent: liveAccess.anonAllowed.includes('tokend_upload_events_v2'),
@@ -1830,7 +2032,7 @@ export function createRolloutRunner(dependencies = {}) {
       }
       const next = await validateForwardRecovery({
         state, migrationList, migrationsDir: options.migrationsDir, migrationFile: options.migrationFile,
-        approval, postSchema, liveSurface, fs, now: () => clock().toISOString(),
+        approval, postSchema, livePostSchema, liveSurface, fs, now: () => clock().toISOString(),
       })
       await saveState(options.state, next)
       return writeSanitized(options.out, {
@@ -1863,6 +2065,41 @@ export function createRolloutRunner(dependencies = {}) {
         pointers: state.pointers,
       }
       if (!monitorRpcBaseline.reconciliationHash || !monitorRpcBaseline.pointers) fail('Monitor requires the current reconciled hash and pricing pointers in private state')
+      const baselineCount = exactNonnegativeInteger(monitorRpcBaseline.count, 'Monitor RPC baseline count').number
+      const baselineHttpErrors = exactNonnegativeInteger(monitorRpcBaseline.httpErrorCount, 'Monitor RPC baseline HTTP errors').number
+      const baselineJsonErrors = exactNonnegativeInteger(monitorRpcBaseline.jsonErrorCount, 'Monitor RPC baseline JSON errors').number
+      if (baselineCount === null || baselineCount === 0 || baselineHttpErrors === null || baselineJsonErrors === null
+        || baselineHttpErrors > baselineCount || baselineJsonErrors > baselineCount
+        || !Number.isFinite(Number(monitorRpcBaseline.p95Seconds)) || Number(monitorRpcBaseline.p95Seconds) < 0) {
+        fail('Monitor RPC baseline is invalid')
+      }
+      const rpcSamples = {
+        legacy: { count: 0, httpErrorCount: 0, jsonErrorCount: 0, latencies: [] },
+        vNext: { count: 0, httpErrorCount: 0, jsonErrorCount: 0, latencies: [] },
+      }
+      const sampleMonitorRpc = async (generation, name) => {
+        const report = rpcSamples[generation]
+        const started = clock().getTime()
+        const response = await http.raw(`rpc/${name}`, { role: 'anon', body: { p_token: token } })
+        report.latencies.push(Math.max(0, clock().getTime() - started) / 1000)
+        report.count += 1
+        if (!response.ok) report.httpErrorCount += 1
+        else {
+          try {
+            const payload = await response.json()
+            if (payload?.ok !== true) report.jsonErrorCount += 1
+          } catch {
+            report.jsonErrorCount += 1
+          }
+        }
+        return {
+          count: report.count,
+          httpErrorCount: report.httpErrorCount,
+          jsonErrorCount: report.jsonErrorCount,
+          p95Seconds: percentile95(report.latencies),
+        }
+      }
+      let knownLateCount = monitoredBatches.reduce((sum, batch) => sum + batch.events.length, 0)
       const result = await runMonitorLoop({
         durationSeconds: options.duration,
         intervalSeconds: options.interval,
@@ -1870,9 +2107,9 @@ export function createRolloutRunner(dependencies = {}) {
         baselineGlobal,
         baselineRpc: monitorRpcBaseline,
         collectSnapshot: async () => {
-          const [legacy, vNext, global] = await Promise.all([
-            http.rpc('tokend_get_summary_v4', { p_token: token }, 'anon'),
-            http.rpc('tokend_get_summary_v5', { p_token: token }, 'anon'),
+          const [legacyRpc, vNextRpc, global] = await Promise.all([
+            sampleMonitorRpc('legacy', 'tokend_get_summary_v4'),
+            sampleMonitorRpc('vNext', 'tokend_get_summary_v5'),
             http.rpc(PREFLIGHT_RPC_NAME, {}, 'service'),
           ])
           let fixtureHealth = { known: true, zero: true, unpriced: true, reported: true, legacy: true }
@@ -1882,25 +2119,33 @@ export function createRolloutRunner(dependencies = {}) {
           }
           const adjustedCount = Math.max(0, Number(global.eventCount ?? 0) - fixtureEventCount)
           const adjustedCounts = subtractCounts(global.statusCounts, fixtureStatusCounts)
-          const pointer = value => value ?? 'not_present'
+          const pointers = {
+            activeCatalog: global.activeCatalogVersion ?? null,
+            activeRun: global.activeRunId ?? null,
+            previousCatalog: global.previousCatalogVersion ?? null,
+            previousRun: global.previousRunId ?? null,
+          }
+          const fixtureMembersOver2x = await fixtureMembersOver2xContribution(
+            http, state.fixture.memberCode, pointers.activeCatalog, pointers.previousCatalog,
+          )
+          if (Number(global.membersOver2xCount ?? 0) < fixtureMembersOver2x) fail('Fixture membersOver2x contribution exceeds the global count')
           return {
-            legacyHealthy: Boolean(legacy),
-            vNextHealthy: Boolean(vNext),
+            legacyHealthy: true,
+            vNextHealthy: true,
+            legacyRpc,
+            vNextRpc,
             global: {
               eventCount: Number(global.eventCount ?? 0),
               knownFixtureCount: fixtureEventCount,
               status: coverageFromCounts(adjustedCount, adjustedCounts),
               unpricedShare: adjustedCount > 0 ? Number(adjustedCounts.unpriced ?? 0) / adjustedCount : 0,
-              membersOver2x: Number(global.membersOver2xCount ?? 0),
+              membersOver2x: Number(global.membersOver2xCount ?? 0) - fixtureMembersOver2x,
+              postSnapshotEventCount: Number(global.postSnapshotEventCount ?? 0),
+              knownLateCount,
             },
             fixtureHealth,
             reconciliationHash: global.activeReconciliationHash ?? 'not_present',
-            pointers: {
-              activeCatalog: pointer(global.activeCatalogVersion),
-              activeRun: pointer(global.activeRunId),
-              previousCatalog: pointer(global.previousCatalogVersion),
-              previousRun: pointer(global.previousRunId),
-            },
+            pointers,
           }
         },
         uploadLateFixture: async () => {
@@ -1913,6 +2158,7 @@ export function createRolloutRunner(dependencies = {}) {
             estimated: 1, zero_rate: 1, unpriced: 1, reported: 1, legacy: 1,
           })
           fixtureEventCount += 5
+          knownLateCount += 5
           await saveState(options.state, {
             ...state,
             fixtureStatusCounts,

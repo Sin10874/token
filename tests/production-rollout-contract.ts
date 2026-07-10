@@ -209,6 +209,10 @@ test('sanitized output recursively drops identifiers, payloads, URLs, prompts, a
     roleNames: ['anon'],
     fixtureIds: ['fixture-a'],
     eventIds: ['event-a'],
+    cursorMember: 'cursor-member-sentinel',
+    cursorEvent: 'cursor-event-sentinel',
+    nextMember: 'next-member-sentinel',
+    nextEvent: 'next-event-sentinel',
     sessions: [{ id: 'generic-session-id', healthy: true }],
     fixture: {
       memberCode: 'ROLL_private', memberToken: 'roll-token', eventId: 'evt', sessionId: 'session',
@@ -222,7 +226,7 @@ test('sanitized output recursively drops identifiers, payloads, URLs, prompts, a
     fixtureHealth: { ok: true },
   })
   const encoded = JSON.stringify(sanitized)
-  for (const forbidden of [secret, 'nested-secret-value', 'ROLL_private', 'roll-token', 'evt', 'session', 'fixture-a', 'event-a', 'generic-session-id', 'private prompt', 'provider.invalid']) {
+  for (const forbidden of [secret, 'nested-secret-value', 'ROLL_private', 'roll-token', 'evt', 'session', 'fixture-a', 'event-a', 'generic-session-id', 'private prompt', 'provider.invalid', 'cursor-member-sentinel', 'cursor-event-sentinel', 'next-member-sentinel', 'next-event-sentinel']) {
     assert.doesNotMatch(encoded, new RegExp(forbidden))
   }
   assert.deepEqual(sanitized, {
@@ -232,6 +236,38 @@ test('sanitized output recursively drops identifiers, payloads, URLs, prompts, a
     membersOver2x: 2,
     fixtureHealth: { ok: true },
   })
+})
+
+test('CLI stdout never exposes real backfill cursor sentinels', async () => {
+  const dir = await tempDir()
+  const statePath = path.join(dir, 'cursor-state.json')
+  const cursorMember = 'REAL-CURSOR-MEMBER-SENTINEL'
+  const cursorEvent = 'REAL-CURSOR-EVENT-SENTINEL'
+  await atomicWriteJson(statePath, {
+    wrapperGatePassed: true,
+    backfill: { runId: '00000000-0000-0000-0000-000000000111', cursorMember: '', cursorEvent: '', remaining: 1, batches: 0 },
+  }, { fs: nodeFs, randomUUID })
+  const modulePath = path.resolve(process.cwd(), 'scripts/tokend-production-rollout.mjs')
+  const script = `
+    import * as fs from 'node:fs/promises';
+    const { main } = await import(${JSON.stringify(`file://${modulePath}`)});
+    await main(['backfill-run', '--state', ${JSON.stringify(statePath)}, '--limit', '1'], {
+      env: { SUPABASE_URL: 'https://project.supabase.co', SUPABASE_SERVICE_KEY: 'svc', SUPABASE_ANON_KEY: 'anon' },
+      fs,
+      fetch: async () => new Response(JSON.stringify({
+        processed: 1,
+        remainingCount: 0,
+        nextMember: ${JSON.stringify(cursorMember)},
+        nextEvent: ${JSON.stringify(cursorEvent)},
+      }), { status: 200, headers: { 'content-type': 'application/json' } }),
+      sleep: async () => {},
+      randomUUID: () => 'cursor-child',
+    });
+  `
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8' })
+  assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`)
+  assert.doesNotMatch(`${child.stdout}\n${child.stderr}`, new RegExp(`${cursorMember}|${cursorEvent}`))
+  assert.equal(JSON.parse(child.stdout).backfill.remaining, 0)
 })
 
 const mutatingCommands = [
@@ -324,6 +360,26 @@ test('migration gate records a clean baseline then binds planned migrations incr
   assert.deepEqual(gated.appliedMigrationHashes ?? {}, {})
   assert.equal(gated.migrationGateHistory[0].phase, 'pre')
   assert.deepEqual(gated.migrationBaselineVersions, [oldVersion])
+  const repeatedPre = await validateMigrationGate({
+    state: gated, migrationList: exactMigrationList([oldVersion]), migrationsDir: stagedDir, phase: 'pre', fs: nodeFs,
+  })
+  assert.deepEqual(repeatedPre.migrationBaselineVersions, [oldVersion])
+  assert.equal(repeatedPre.migrationGateHistory.length, gated.migrationGateHistory.length)
+  await assert.rejects(validateMigrationGate({
+    state: gated, migrationList: exactMigrationList([oldVersion, '202606010002']), migrationsDir: stagedDir, phase: 'pre', fs: nodeFs,
+  }), /baseline.*bound|unexpected.*migration|rogue/i)
+
+  await writeFile(path.join(stagedDir, path.basename(files[MANAGED_MIGRATION_VERSIONS[0]])), await readFile(files[MANAGED_MIGRATION_VERSIONS[0]]))
+  await writeFile(path.join(stagedDir, path.basename(files[MANAGED_MIGRATION_VERSIONS[1]])), await readFile(files[MANAGED_MIGRATION_VERSIONS[1]]))
+  await assert.rejects(validateMigrationGate({
+    state: gated,
+    migrationList: exactMigrationList([oldVersion, MANAGED_MIGRATION_VERSIONS[0], MANAGED_MIGRATION_VERSIONS[1]]),
+    migrationsDir: stagedDir, phase: 'post', fs: nodeFs,
+  }), /one migration|single.*binding|batch/i)
+  await assert.rejects(validateMigrationGate({
+    state: gated, migrationList: exactMigrationList([oldVersion, MANAGED_MIGRATION_VERSIONS[1]]),
+    migrationsDir: stagedDir, phase: 'post', fs: nodeFs,
+  }), /production order|expected.*001/i)
 
   let post = gated
   const deployed = [oldVersion]
@@ -335,6 +391,10 @@ test('migration gate records a clean baseline then binds planned migrations incr
       now: () => `2026-07-10T00:0${deployed.length}:00.000Z`,
     })
     assert.equal(post.appliedMigrationHashes[version], manifest.migrationHashes[version])
+    const precheck = await validateMigrationGate({
+      state: post, migrationList: exactMigrationList(deployed), migrationsDir: stagedDir, phase: 'pre', fs: nodeFs,
+    })
+    assert.deepEqual(precheck.migrationBaselineVersions, [oldVersion])
   }
   assert.deepEqual(post.appliedMigrationHashes, manifest.migrationHashes)
   assert.equal(post.migrationGateHistory.filter(entry => entry.phase === 'post').length, MANAGED_MIGRATION_VERSIONS.length)
@@ -386,9 +446,14 @@ test('emergency migration is sticky and later versions cannot clear forward reco
   const baseline = await validateMigrationGate({
     state, migrationList: exactMigrationList(['202606010001']), migrationsDir: dir, phase: 'pre', fs: nodeFs,
   })
-  const gated = await validateMigrationGate({
-    state: baseline, migrationList: exactMigrationList(['202606010001', ...versions]), migrationsDir: dir, phase: 'post', fs: nodeFs,
-  })
+  let gated = baseline
+  const deployed = ['202606010001']
+  for (const version of versions) {
+    deployed.push(version)
+    gated = await validateMigrationGate({
+      state: gated, migrationList: exactMigrationList(deployed), migrationsDir: dir, phase: 'post', fs: nodeFs,
+    })
+  }
   assert.equal(gated.forwardRecoveryRequired, true)
   const recoveryFile = path.join(dir, `${RECOVERY_MIN_VERSION}_forward.sql`)
   await writeFile(recoveryFile, 'SELECT forward;')
@@ -410,7 +475,9 @@ test('emergency verification requires 999 history and only the legacy surface', 
   }
   const emergencySurface = {
     legacyWrapperPresent: true,
+    legacyWrapperAllowed: true,
     legacyRpcNames: [...LEGACY_RPC_NAMES],
+    legacyAllowedRpcNames: [...LEGACY_RPC_NAMES],
     v2UploadPresent: false,
     vNextRpcNames: [],
     adminRpcNames: [],
@@ -432,6 +499,16 @@ test('emergency verification requires 999 history and only the legacy surface', 
     migrationList: exactMigrationList([...MANAGED_MIGRATION_VERSIONS, EMERGENCY_VERSION]),
     surface: { ...emergencySurface, vNextRpcNames: [CLIENT_RPC_NAMES[0]] },
   }), /vNext.*absent/i)
+  assert.throws(() => validateEmergencySurface({
+    state: baseState,
+    migrationList: exactMigrationList([...MANAGED_MIGRATION_VERSIONS, EMERGENCY_VERSION]),
+    surface: { ...emergencySurface, legacyWrapperAllowed: false },
+  }), /legacy.*allowed/i)
+  assert.throws(() => validateEmergencySurface({
+    state: baseState,
+    migrationList: exactMigrationList([...MANAGED_MIGRATION_VERSIONS, EMERGENCY_VERSION]),
+    surface: { ...emergencySurface, legacyAllowedRpcNames: LEGACY_RPC_NAMES.slice(1) },
+  }), /legacy.*allowed/i)
 })
 
 function reviewedPostSchema(): string {
@@ -498,6 +575,7 @@ test('forward recovery rejects every bypass and only one newly reviewed exact bi
     migrationFile,
     approval,
     postSchema: reviewedPostSchema(),
+    livePostSchema: reviewedPostSchema(),
     liveSurface: recoveredLiveSurface(),
     fs: nodeFs,
     now: () => '2026-07-11T00:00:00.000Z',
@@ -525,6 +603,9 @@ test('forward recovery rejects every bypass and only one newly reviewed exact bi
         `GRANT EXECUTE ON FUNCTION public.tokend_get_summary_v5(${CLIENT_RPC_SIGNATURES.tokend_get_summary_v5}) TO service_role;`,
       ),
     }, /post schema.*grant/i],
+    ['linked live schema differs from reviewed schema', {
+      livePostSchema: reviewedPostSchema().replace("SELECT '{}'::JSON", "SELECT '{\"live\":true}'::JSON"),
+    }, /linked live schema.*reviewed/i],
     ['RPC only incomplete', { liveSurface: { ...recoveredLiveSurface(), anonExecuteNames: [] } }, /live.*grants/i],
   ]
   for (const [label, override, pattern] of rejected) {
@@ -535,8 +616,47 @@ test('forward recovery rejects every bypass and only one newly reviewed exact bi
   assert.equal(recovered.forwardRecoveryRequired, false)
   assert.equal(recovered.recoveryVersion, recoveryVersion)
   assert.equal(recovered.recoveryHash, migrationHash)
+  assert.match(recovered.livePostSchemaHash, /^[a-f0-9]{64}$/)
+  assert.equal(recovered.livePostSchemaSource, 'supabase-db-dump-linked')
+  assert.equal(recovered.livePostSchemaRecoveryBinding, digest(`${recoveryVersion}:${migrationHash}:${recovered.livePostSchemaHash}`))
   assert.equal(recovered.transition, 'newly-reviewed-forward-recovered')
   assert.doesNotThrow(() => assertCommandAllowed(recovered, 'fixture-create'))
+})
+
+test('forward-recover command obtains an independent linked schema dump instead of trusting argv post-schema', async () => {
+  const dir = await tempDir()
+  const statePath = path.join(dir, 'state.json')
+  const migrationListPath = path.join(dir, 'migration-list.txt')
+  const migrationFile = path.join(dir, `${RECOVERY_MIN_VERSION}_forward.sql`)
+  const postSchemaPath = path.join(dir, 'post.sql')
+  const approvalPath = path.join(dir, 'approval.json')
+  const outPath = path.join(dir, 'recover.json')
+  await atomicWriteJson(statePath, { wrapperGatePassed: true, forwardRecoveryRequired: true }, { fs: nodeFs, randomUUID })
+  await writeFile(migrationListPath, exactMigrationList([...MANAGED_MIGRATION_VERSIONS, EMERGENCY_VERSION, RECOVERY_MIN_VERSION]))
+  await writeFile(migrationFile, 'SELECT recovery;')
+  await writeFile(postSchemaPath, reviewedPostSchema())
+  await writeFile(approvalPath, '{}')
+  let dumpCalls = 0
+  const runner = createRolloutRunner({
+    env: {},
+    fetch: async () => { throw new Error('network must not be reached before linked schema equality') },
+    fs: nodeFs,
+    dumpLinkedSchema: async () => {
+      dumpCalls += 1
+      return reviewedPostSchema().replace("SELECT '{}'::JSON", "SELECT '{\"linked\":true}'::JSON")
+    },
+    clock: () => new Date(), sleep: async () => {}, randomUUID,
+  })
+  await assert.rejects(runner.execute('forward-recover', {
+    state: statePath,
+    migrationList: migrationListPath,
+    migrationsDir: dir,
+    migrationFile,
+    postSchema: postSchemaPath,
+    approval: approvalPath,
+    out: outPath,
+  }), /linked live schema.*reviewed/i)
+  assert.equal(dumpCalls, 1)
 })
 
 test('REST pagination follows Content-Range until the full baseline is aggregated', async () => {
@@ -799,6 +919,23 @@ test('backfill persists monotonic cursor before intentional exit 75, resumes, an
     callBatch: async () => ({ nextMember: 'member-a', nextEvent: 'event-99', remainingCount: 6, processed: 1 }),
     saveState: async () => {}, sleep: async () => {},
   }), /nonmonotonic/i)
+
+  const binaryOrdered = await runBackfillBatches({
+    state: { wrapperGatePassed: true, backfill: { cursorMember: 'z', cursorEvent: '', remaining: 1, batches: 0 } },
+    limit: 1,
+    callBatch: async () => ({ nextMember: 'ä', nextEvent: '', remainingCount: 0, processed: 1 }),
+    saveState: async () => {}, sleep: async () => {},
+  })
+  assert.equal(binaryOrdered.backfill.cursorMember, 'ä')
+
+  for (const processed of [-1, 1.5, 2, Number.MAX_SAFE_INTEGER + 1]) {
+    await assert.rejects(runBackfillBatches({
+      state: { wrapperGatePassed: true, backfill: { cursorMember: '', cursorEvent: '', remaining: 1, batches: 0 } },
+      limit: 1,
+      callBatch: async () => ({ nextMember: 'member', nextEvent: 'event', remainingCount: 0, processed }),
+      saveState: async () => {}, sleep: async () => {},
+    }), /processed.*safe|processed.*limit/i)
+  }
 })
 
 test('activation rehearsal is activate, paired rollback, same-run activate with exact pointers and totals', async () => {
@@ -940,15 +1077,15 @@ test('backfill creation freezes authoritative snapshot metadata and reconcile pr
     catalog_version: '2026-07-10',
     status: 'reconciled',
     snapshot_at: '2026-07-10T00:00:00Z',
-    target_count: 4,
+    target_count: '4',
     target_hash: 'target-hash',
     base_catalog_version: 'old-catalog',
     base_backfill_run_id: '00000000-0000-0000-0000-000000000122',
-    input_tokens: 10,
-    output_tokens: 20,
-    reasoning_tokens: 30,
-    cache_read_tokens: 40,
-    cache_write_tokens: 50,
+    input_tokens: '10',
+    output_tokens: '20',
+    reasoning_tokens: '30',
+    cache_read_tokens: '40',
+    cache_write_tokens: '50',
     before_total_cost: 12,
   }
   const reconciliation = {
@@ -965,20 +1102,27 @@ test('backfill creation freezes authoritative snapshot metadata and reconcile pr
       status: 'staging',
       catalogVersion: '2026-07-10',
       snapshotAt: runRow.snapshot_at,
-      targetCount: 4,
+      targetCount: '4',
       targetHash: runRow.target_hash,
       baseCatalogVersion: runRow.base_catalog_version,
       baseRunId: runRow.base_backfill_run_id,
     })
     if (url.includes('/tokend_pricing_catalogs?')) { catalogQueries += 1; return jsonResponse([{ hash: 'catalog-hash' }]) }
-    if (url.includes('/tokend_pricing_backfill_runs?')) return jsonResponse([{ ...runRow, status: reconcileCalls > 0 ? 'reconciled' : 'staging' }])
+    if (url.includes('/tokend_pricing_backfill_runs?')) {
+      assert.match(url, /reconciliation_hash/)
+      return jsonResponse([{
+        ...runRow,
+        status: reconcileCalls > 0 ? 'reconciled' : 'staging',
+        reconciliation_hash: reconcileCalls > 0 ? 'stable-reconciliation-hash' : null,
+      }])
+    }
     if (url.endsWith('/rpc/tokend_pricing_reconcile')) {
       reconcileCalls += 1
       return jsonResponse(reconciliation)
     }
     if (url.endsWith('/rpc/tokend_pricing_get_backfill')) return jsonResponse({
       runId, status: 'reconciled', catalogVersion: '2026-07-10', snapshotAt: runRow.snapshot_at,
-      targetCount: 4, revisionCount: 4, remainingCount: 0,
+      targetCount: '4', revisionCount: '4', remainingCount: '0',
     })
     if (url.endsWith(`/rpc/${PREFLIGHT_RPC_NAME}`)) return jsonResponse({
       activeCatalogVersion: runRow.base_catalog_version,
@@ -992,19 +1136,28 @@ test('backfill creation freezes authoritative snapshot metadata and reconcile pr
     env: { SUPABASE_URL: 'https://project.supabase.co', SUPABASE_SERVICE_KEY: 'svc', SUPABASE_ANON_KEY: 'anon' },
     fetch: fakeFetch, fs: nodeFs, clock: () => new Date('2026-07-10T00:00:00Z'), sleep: async () => {}, randomUUID: () => 'uuid',
   })
-  await runner.execute('backfill-create', { catalog: '2026-07-10', state: statePath })
+  const createdOutput = await runner.execute('backfill-create', { catalog: '2026-07-10', state: statePath })
+  assert.deepEqual(createdOutput, {
+    status: 'staging', targetHash: 'target-hash', targetCount: '4',
+    inputTokens: '10', outputTokens: '20', reasoningTokens: '30',
+    cacheReadTokens: '40', cacheWriteTokens: '50',
+  })
   const createdState = JSON.parse(await readFile(statePath, 'utf8'))
   assert.deepEqual(createdState.backfillSnapshot, {
     snapshotAt: runRow.snapshot_at,
-    targetCount: 4,
+    targetCount: '4',
     targetHash: runRow.target_hash,
     baseCatalogVersion: runRow.base_catalog_version,
     baseRunId: runRow.base_backfill_run_id,
-    inputTokens: 10,
-    outputTokens: 20,
-    reasoningTokens: 30,
-    cacheReadTokens: 40,
-    cacheWriteTokens: 50,
+    inputTokens: '10',
+    outputTokens: '20',
+    reasoningTokens: '30',
+    cacheReadTokens: '40',
+    cacheWriteTokens: '50',
+    basePointers: {
+      activeCatalog: 'old-catalog', activeRun: '00000000-0000-0000-0000-000000000122',
+      previousCatalog: null, previousRun: null,
+    },
   })
   await runner.execute('reconcile', { state: statePath, out: outPath })
   assert.equal(reconcileCalls, 2)
@@ -1012,6 +1165,31 @@ test('backfill creation freezes authoritative snapshot metadata and reconcile pr
   const reconciledState = JSON.parse(await readFile(statePath, 'utf8'))
   assert.equal(reconciledState.reconciliationHash, 'stable-reconciliation-hash')
   assert.deepEqual(reconciledState.backfillSnapshot, createdState.backfillSnapshot)
+
+  const unsafeRunner = createRolloutRunner({
+    env: { SUPABASE_URL: 'https://project.supabase.co', SUPABASE_SERVICE_KEY: 'svc', SUPABASE_ANON_KEY: 'anon' },
+    fetch: async input => {
+      const url = String(input)
+      if (url.endsWith('/rpc/tokend_pricing_create_backfill')) return jsonResponse({
+        runId, status: 'staging', catalogVersion: '2026-07-10', snapshotAt: runRow.snapshot_at,
+        targetCount: 4, targetHash: 'target-hash', baseCatalogVersion: 'old-catalog', baseRunId: runRow.base_backfill_run_id,
+      })
+      if (url.includes('/tokend_pricing_catalogs?')) return jsonResponse([{ hash: 'catalog-hash' }])
+      if (url.includes('/tokend_pricing_backfill_runs?')) return jsonResponse([{ ...runRow, input_tokens: Number.MAX_SAFE_INTEGER + 1, status: 'staging' }])
+      if (url.endsWith(`/rpc/${PREFLIGHT_RPC_NAME}`)) return jsonResponse({
+        activeCatalogVersion: 'old-catalog', activeRunId: runRow.base_backfill_run_id,
+        previousCatalogVersion: null, previousRunId: null,
+      })
+      return jsonResponse({ code: 'unexpected' }, 500)
+    },
+    fs: nodeFs, clock: () => new Date(), sleep: async () => {}, randomUUID: () => 'unsafe',
+  })
+  const unsafeStatePath = path.join(dir, 'unsafe.json')
+  await atomicWriteJson(unsafeStatePath, { wrapperGatePassed: true }, { fs: nodeFs, randomUUID })
+  await assert.rejects(
+    unsafeRunner.execute('backfill-create', { catalog: '2026-07-10', state: unsafeStatePath }),
+    /inputTokens.*safe integer|inputTokens.*decimal/i,
+  )
 })
 
 test('monitor checks both RPC generations, adjusted global health, late cadence, and pointer/hash drift', async () => {
@@ -1020,7 +1198,12 @@ test('monitor checks both RPC generations, adjusted global health, late cadence,
   const snapshot = {
     legacyHealthy: true,
     vNextHealthy: true,
-    global: { eventCount: 105, knownFixtureCount: 5, status: 'complete', unpricedShare: 0.01, membersOver2x: 0 },
+    legacyRpc: { count: 1, httpErrorCount: 0, jsonErrorCount: 0, p95Seconds: 0.05 },
+    vNextRpc: { count: 1, httpErrorCount: 0, jsonErrorCount: 0, p95Seconds: 0.05 },
+    global: {
+      eventCount: 105, knownFixtureCount: 5, status: 'complete', unpricedShare: 0.01, membersOver2x: 0,
+      postSnapshotEventCount: 5, knownLateCount: 5,
+    },
     fixtureHealth: { known: true, zero: true, unpriced: true, reported: true, legacy: true },
     reconciliationHash: 'recon-hash',
     pointers: { activeCatalog: 'new', previousCatalog: 'old', activeRun: 'run', previousRun: 'old-run' },
@@ -1029,8 +1212,8 @@ test('monitor checks both RPC generations, adjusted global health, late cadence,
     durationSeconds: 240,
     intervalSeconds: 30,
     lateUploadEverySeconds: 120,
-    baselineGlobal: { eventCount: 100, status: 'complete', maxUnpricedShare: 0.02, membersOver2x: 0 },
-    baselineRpc: { reconciliationHash: 'recon-hash', pointers: snapshot.pointers },
+    baselineGlobal: { eventCount: 100, status: 'complete', maxUnpricedShare: 0.02, membersOver2x: 0, postSnapshotEventCount: 0 },
+    baselineRpc: { count: 100, httpErrorCount: 0, jsonErrorCount: 0, p95Seconds: 0.05, reconciliationHash: 'recon-hash', pointers: snapshot.pointers },
     collectSnapshot: async () => structuredClone(snapshot),
     uploadLateFixture: async () => { uploads.push(elapsed) },
     sleep: async ms => { elapsed += ms / 1000 },
@@ -1041,8 +1224,8 @@ test('monitor checks both RPC generations, adjusted global health, late cadence,
 
   const improved = await runMonitorLoop({
     durationSeconds: 0, intervalSeconds: 30, lateUploadEverySeconds: 120,
-    baselineGlobal: { eventCount: 100, status: 'legacy', maxUnpricedShare: 0.02, membersOver2x: 0 },
-    baselineRpc: { reconciliationHash: 'recon-hash', pointers: snapshot.pointers },
+    baselineGlobal: { eventCount: 100, status: 'legacy', maxUnpricedShare: 0.02, membersOver2x: 0, postSnapshotEventCount: 0 },
+    baselineRpc: { count: 100, httpErrorCount: 0, jsonErrorCount: 0, p95Seconds: 0.05, reconciliationHash: 'recon-hash', pointers: snapshot.pointers },
     collectSnapshot: async () => ({ ...snapshot, global: { ...snapshot.global, status: 'complete' } }),
     uploadLateFixture: async () => {}, sleep: async () => {},
   })
@@ -1050,11 +1233,23 @@ test('monitor checks both RPC generations, adjusted global health, late cadence,
 
   await assert.rejects(runMonitorLoop({
     durationSeconds: 30, intervalSeconds: 30, lateUploadEverySeconds: 120,
-    baselineGlobal: { eventCount: 100, status: 'complete', maxUnpricedShare: 0.02, membersOver2x: 0 },
-    baselineRpc: { reconciliationHash: 'recon-hash', pointers: snapshot.pointers },
+    baselineGlobal: { eventCount: 100, status: 'complete', maxUnpricedShare: 0.02, membersOver2x: 0, postSnapshotEventCount: 0 },
+    baselineRpc: { count: 100, httpErrorCount: 0, jsonErrorCount: 0, p95Seconds: 0.05, reconciliationHash: 'recon-hash', pointers: snapshot.pointers },
     collectSnapshot: async () => ({ ...snapshot, reconciliationHash: 'drifted' }),
     uploadLateFixture: async () => {}, sleep: async () => {},
   }), /reconciliation hash drift/i)
+
+  let sampleIndex = 0
+  await assert.rejects(runMonitorLoop({
+    durationSeconds: 30, intervalSeconds: 30, lateUploadEverySeconds: 120,
+    baselineGlobal: { eventCount: 100, status: 'complete', maxUnpricedShare: 0.02, membersOver2x: 0, postSnapshotEventCount: 0 },
+    baselineRpc: { count: 100, httpErrorCount: 0, jsonErrorCount: 0, p95Seconds: 0.05, reconciliationHash: 'recon-hash', pointers: snapshot.pointers },
+    collectSnapshot: async () => ({
+      ...snapshot,
+      global: { ...snapshot.global, postSnapshotEventCount: sampleIndex++ === 0 ? 5 : 4 },
+    }),
+    uploadLateFixture: async () => {}, sleep: async () => {},
+  }), /postSnapshotEventCount.*regressed|post-snapshot.*regressed/i)
 })
 
 test('monitor keeps every late fixture batch, verifies its active catalog, and trusts state pointers/hash', async () => {
@@ -1070,13 +1265,13 @@ test('monitor keeps every late fixture batch, verifies its active catalog, and t
     wrapperGatePassed: true,
     fixture: { memberCode: 'ROLL_monitor', memberToken: 'fixture-token' },
     catalogVersion: 'active-catalog',
-    pointers: { activeCatalog: 'active-catalog', previousCatalog: 'old-catalog', activeRun: 'active-run', previousRun: 'old-run' },
+    pointers: { activeCatalog: 'active-catalog', previousCatalog: 'old-catalog', activeRun: 'active-run', previousRun: null },
     reconciliationHash: 'state-reconciliation-hash',
     fixtureStatusCounts: { estimated: 1, zero_rate: 1, unpriced: 1, reported: 1, legacy: 1 },
     lateFixtureBatches: [{ catalogVersion: 'active-catalog', events: existingEvents }],
   }, { fs: nodeFs, randomUUID })
-  await writeFile(globalPath, JSON.stringify({ eventCount: 100, status: 'complete', maxUnpricedShare: 0.02, membersOver2x: 0, reconciliationHash: 'wrong-file-hash', pointers: { wrong: true } }))
-  await writeFile(rpcPath, JSON.stringify({ reconciliationHash: 'wrong-rpc-hash', pointers: { wrong: true } }))
+  await writeFile(globalPath, JSON.stringify({ eventCount: 100, status: 'complete', maxUnpricedShare: 0.02, membersOver2x: 0, postSnapshotEventCount: 0, reconciliationHash: 'wrong-file-hash', pointers: { wrong: true } }))
+  await writeFile(rpcPath, JSON.stringify({ count: 100, httpErrorCount: 0, jsonErrorCount: 0, p95Seconds: 0.05, reconciliationHash: 'wrong-rpc-hash', pointers: { wrong: true } }))
   const revisionQueries: string[] = []
   const uploadedEventIds: string[] = []
   let preflightCalls = 0
@@ -1094,13 +1289,21 @@ test('monitor keeps every late fixture batch, verifies its active catalog, and t
       preflightCalls += 1
       return jsonResponse({
         eventCount: 100 + fixtureCount,
+        postSnapshotEventCount: fixtureCount,
         statusCounts: { reported: 100 + (fixtureCount / 5), estimated: fixtureCount / 5, zero_rate: fixtureCount / 5, unpriced: fixtureCount / 5, legacy: fixtureCount / 5 },
-        membersOver2xCount: 0,
+        membersOver2xCount: 1,
         activeReconciliationHash: 'state-reconciliation-hash',
         activeCatalogVersion: 'active-catalog', activeRunId: 'active-run',
-        previousCatalogVersion: 'old-catalog', previousRunId: 'old-run',
+        previousCatalogVersion: 'old-catalog', previousRunId: null,
       })
     }
+    if (url.includes('/tokend_usage_events?select=id,total_cost&')) return jsonResponse([
+      { id: 'fixture-over-2x', total_cost: 1 },
+    ])
+    if (url.includes('/tokend_event_cost_revisions?select=event_id,version,total_cost&')) return jsonResponse([
+      { event_id: 'fixture-over-2x', version: 'old-catalog', total_cost: 1 },
+      { event_id: 'fixture-over-2x', version: 'active-catalog', total_cost: 3 },
+    ])
     const encodedIds = /(?:id|event_id)=in\.\(([^)]+)\)/.exec(url)?.[1] ?? ''
     const ids = encodedIds.split(',').filter(Boolean).map(decodeURIComponent)
     if (url.includes('/tokend_usage_events?')) return jsonResponse(ids.map(id => ({
@@ -1132,6 +1335,18 @@ test('monitor keeps every late fixture batch, verifies its active catalog, and t
   assert.ok(uploadedEventIds.every(id => revisionQueries.some(url => url.includes(id))))
   assert.equal(JSON.parse(await readFile(statePath, 'utf8')).lateFixtureBatches.length, 3)
   assert.doesNotMatch(await readFile(outPath, 'utf8'), /late-|monitor-\d|ROLL_monitor|fixture-token/)
+
+  const unhealthyRunner = createRolloutRunner({
+    env: { SUPABASE_URL: 'https://project.supabase.co', SUPABASE_SERVICE_KEY: 'svc', SUPABASE_ANON_KEY: 'anon' },
+    fetch: async (input, init) => String(input).endsWith('/rpc/tokend_get_summary_v5')
+      ? jsonResponse({ ok: false })
+      : fakeFetch(input, init),
+    fs: nodeFs, clock: () => new Date('2026-07-10T00:00:00Z'), sleep: async () => {}, randomUUID: () => 'unhealthy',
+  })
+  await assert.rejects(unhealthyRunner.execute('monitor', {
+    state: statePath, duration: 0, interval: 120, lateUploadEvery: 120,
+    globalBaseline: globalPath, rpcBaseline: rpcPath, out: path.join(dir, 'unhealthy.json'),
+  }), /JSON error rate delta exceeded/i)
 })
 
 test('runner wrapper gate writes only hashes, roles, timestamp, and a preserved private gate state', async () => {
@@ -1385,7 +1600,7 @@ test('cleanup is allowed during sticky recovery and uses exact member-scoped fil
   const deletes = calls.filter(call => call.method === 'DELETE')
   const tables = deletes.map(call => /\/rest\/v1\/([^?]+)/.exec(call.url)?.[1])
   assert.deepEqual(tables, [
-    'tokend_event_cost_revisions', 'tokend_pricing_shadow_sessions', 'tokend_message_events', 'tokend_usage_events',
+    'tokend_event_cost_revisions', 'tokend_message_events', 'tokend_usage_events',
     'tokend_sessions', 'tokend_sync_state', 'tokend_members',
   ])
   assert.ok(deletes.every(call => call.url.includes('member_code=eq.ROLL_exact')))
@@ -1413,9 +1628,8 @@ test('pre-001 fixture reset tolerates only absent additive relations and clears 
   const fakeFetch: typeof fetch = async (input, init = {}) => {
     const url = String(input)
     calls.push({ url, method: init.method ?? 'GET' })
-    if (url.includes('/tokend_pricing_backfill_targets?')
-      || url.includes('/tokend_event_cost_revisions?')
-      || url.includes('/tokend_pricing_shadow_sessions?')) return jsonResponse({ code: 'PGRST202' }, 404)
+    if (url.includes('/tokend_pricing_backfill_targets?')) return jsonResponse({ code: 'PGRST205' }, 404)
+    if (url.includes('/tokend_event_cost_revisions?')) return jsonResponse({ code: '42P01' }, 404)
     return jsonResponse([])
   }
   const runner = createRolloutRunner({
@@ -1429,6 +1643,57 @@ test('pre-001 fixture reset tolerates only absent additive relations and clears 
   assert.equal(reset.lateFixtures, undefined)
   assert.equal(reset.lateFixtureBatches, undefined)
   assert.ok(calls.some(call => call.url.includes('/tokend_usage_events?') && call.method === 'DELETE'))
+  assert.ok(calls.every(call => !call.url.includes('/tokend_pricing_shadow_sessions?')))
+
+  const rejected = createRolloutRunner({
+    env: { SUPABASE_URL: 'https://project.supabase.co', SUPABASE_SERVICE_KEY: 'svc', SUPABASE_ANON_KEY: 'anon' },
+    fetch: async input => String(input).includes('/tokend_pricing_backfill_targets?')
+      ? jsonResponse({ code: 'PGRST202' }, 404)
+      : jsonResponse([]),
+    fs: nodeFs, clock: () => new Date(), sleep: async () => {}, randomUUID: () => 'reject',
+  })
+  await assert.rejects(rejected.execute('fixture-reset', { state: statePath }), /status 404/i)
+})
+
+test('preflight distinguishes an absent admin RPC from present null pointers and trusts active effective zero-cost metrics', async () => {
+  const dir = await tempDir()
+  const out = path.join(dir, 'preflight-present.json')
+  const fakeFetch: typeof fetch = async (input, init = {}) => {
+    const url = String(input)
+    if (url.includes('/tokend_usage_events?')) return jsonResponse([
+      { model: 'raw-zero', total_tokens: 10, total_cost: 0, member_code: 'A' },
+      { model: 'raw-priced', total_tokens: 10, total_cost: 1, member_code: 'B' },
+    ], 200, { 'content-range': '0-1/2' })
+    if (url.includes('/tokend_model_prices?')) return jsonResponse([{ model_id: 'legacy' }], 200, { 'content-range': '0-0/1' })
+    if (url.endsWith(`/rpc/${PREFLIGHT_RPC_NAME}`)) return jsonResponse({
+      eventCount: 2,
+      eligibleEventCount: 2,
+      eligibleZeroCostEventCount: 0,
+      legacyPriceRowCount: 1,
+      unpricedEventCount: 0,
+      statusCounts: { estimated: 2 },
+      zeroCostByModel: [],
+      activeCatalogVersion: null,
+      activeRunId: null,
+      previousCatalogVersion: null,
+      previousRunId: null,
+      membersOver2xCount: 0,
+      activeReconciliationHash: null,
+    })
+    return jsonResponse({ code: 'unexpected' }, 500)
+  }
+  const runner = createRolloutRunner({
+    env: { SUPABASE_URL: 'https://project.supabase.co', SUPABASE_SERVICE_KEY: 'svc', SUPABASE_ANON_KEY: 'anon' },
+    fetch: fakeFetch, fs: nodeFs, clock: () => new Date('2026-07-10T00:00:00Z'), sleep: async () => {}, randomUUID,
+  })
+  const result = await runner.execute('preflight', { out })
+  assert.equal(result.eligibleZeroCostEventCount, 0)
+  assert.deepEqual(result.zeroCostByModel, [])
+  assert.equal(result.activeCatalogVersion, null)
+  assert.equal(result.activeRunId, null)
+  assert.equal(result.previousCatalogVersion, null)
+  assert.equal(result.previousRunId, null)
+  assert.equal(result.reconciliationHash, null)
 })
 
 test('HTTP failures never echo response bodies, state secrets, provider URLs, or authorization', async () => {

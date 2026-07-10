@@ -222,6 +222,13 @@ function readUploadMigration(): string {
   )
 }
 
+function readRpcMigration(): string {
+  return fs.readFileSync(
+    path.resolve(process.cwd(), 'supabase/migrations/202607100003_pricing_rpcs.sql'),
+    'utf8',
+  )
+}
+
 function functionDefinition(sql: string, name: string): string {
   const match = sql.match(new RegExp(
     `CREATE OR REPLACE FUNCTION public\\.${name}\\s*\\([\\s\\S]*?\\n\\$function\\$;`,
@@ -609,6 +616,144 @@ function testUploadFunctionAclsAreExplicitAndMinimal(): void {
   assert.doesNotMatch(migration, /GRANT EXECUTE[^;]*tokend_upload_events[^;]*service_role/i)
 }
 
+const RPC_SIGNATURES = [
+  ['tokend_get_summary_v5', "p_token TEXT, p_period TEXT DEFAULT '7d', p_timezone TEXT DEFAULT 'Asia/Shanghai'", 'TEXT, TEXT, TEXT'],
+  ['tokend_get_daily_trend_v5', "p_token TEXT, p_period TEXT DEFAULT '7d', p_timezone TEXT DEFAULT 'Asia/Shanghai'", 'TEXT, TEXT, TEXT'],
+  ['tokend_get_model_breakdown_v3', "p_token TEXT, p_period TEXT DEFAULT '7d'", 'TEXT, TEXT'],
+  ['tokend_get_model_detail_v2', "p_token TEXT, p_model TEXT, p_period TEXT DEFAULT '7d'", 'TEXT, TEXT, TEXT'],
+  ['tokend_get_channel_breakdown_v4', "p_token TEXT, p_period TEXT DEFAULT '7d'", 'TEXT, TEXT'],
+  ['tokend_get_channel_detail_v3', "p_token TEXT, p_channel TEXT, p_period TEXT DEFAULT '7d', p_timezone TEXT DEFAULT 'Asia/Shanghai'", 'TEXT, TEXT, TEXT, TEXT'],
+  ['tokend_get_sessions_v2', "p_token TEXT, p_period TEXT DEFAULT '7d', p_limit INTEGER DEFAULT 50", 'TEXT, TEXT, INTEGER'],
+  ['tokend_get_session_detail_v2', 'p_token TEXT, p_session_id TEXT', 'TEXT, TEXT'],
+  ['tokend_get_top_projects_v3', "p_token TEXT, p_period TEXT DEFAULT '7d'", 'TEXT, TEXT'],
+] as const
+
+const AGGREGATE_ENVELOPE_KEYS = [
+  'inputTokens', 'outputTokens', 'reasoningTokens', 'cacheReadTokens',
+  'cacheWriteTokens', 'totalTokens', 'inputCost', 'outputCost', 'reasoningCost',
+  'cacheReadCost', 'cacheWriteCost', 'unallocatedCost', 'totalCost',
+  'eligibleEventCount', 'reportedEventCount', 'estimatedEventCount',
+  'zeroRateEventCount', 'legacyEventCount', 'unpricedEventCount',
+  'breakdownInvalidCount', 'costAvailability', 'verifiedCostCoverage',
+  'coverageStatus', 'costDetailsAvailable',
+] as const
+
+function normalizeSqlSignature(value: string): string {
+  return value.replace(/\s+/g, ' ').replace(/\s*,\s*/g, ', ').trim()
+}
+
+function testRpcMigrationDefinesExactSurfaceAndPrivileges(): void {
+  const migration = readRpcMigration()
+  const definitions = [...migration.matchAll(
+    /CREATE OR REPLACE FUNCTION public\.([a-z0-9_]+)\s*\(([^)]*)\)\s*RETURNS\s+JSON\b/gi,
+  )]
+  assert.equal(definitions.length, RPC_SIGNATURES.length, '003 must define only the nine vNext RPCs')
+
+  for (const [name, args, aclArgs] of RPC_SIGNATURES) {
+    const matches = definitions.filter(match => match[1] === name)
+    assert.equal(matches.length, 1, `${name} must have exactly one definition`)
+    assert.equal(normalizeSqlSignature(matches[0][2]), normalizeSqlSignature(args), `${name} signature`)
+
+    const body = functionDefinition(migration, name)
+    assert.match(body, /RETURNS\s+JSON\b/i)
+    assert.match(body, /SECURITY DEFINER/i)
+    assert.match(body, /SET search_path\s*=\s*public\s*,\s*pg_temp/i)
+    assert.match(body, /public\.tokend_effective_usage_events/i)
+    assert.doesNotMatch(body, /(?:FROM|JOIN)\s+public\.tokend_usage_events\b/i)
+    for (const key of AGGREGATE_ENVELOPE_KEYS) {
+      assert.match(body, new RegExp(`'${key}'\\s*,`, 'i'), `${name} must publish ${key}`)
+    }
+    assert.match(body, /'costDetailsAvailable'\s*,\s*true/i)
+    assert.match(
+      migration,
+      new RegExp(`REVOKE ALL ON FUNCTION public\\.${name}\\(${aclArgs.replace(/[()]/g, value => `\\${value}`)}\\) FROM PUBLIC, anon, authenticated, service_role`, 'i'),
+    )
+    assert.match(
+      migration,
+      new RegExp(`GRANT EXECUTE ON FUNCTION public\\.${name}\\(${aclArgs.replace(/[()]/g, value => `\\${value}`)}\\) TO anon, authenticated`, 'i'),
+    )
+  }
+
+  assert.doesNotMatch(migration, /DROP\s+FUNCTION/i)
+  assert.equal((migration.match(/CREATE OR REPLACE VIEW public\.tokend_effective_usage_events\b/gi) ?? []).length, 1)
+  assert.match(
+    migration,
+    /REVOKE ALL PRIVILEGES ON TABLE public\.tokend_effective_usage_events FROM PUBLIC, anon, authenticated, service_role/i,
+  )
+  assert.match(migration.trimEnd(), /NOTIFY pgrst, 'reload schema';$/i)
+}
+
+function testEffectiveRelationHasOneAuditablePrecedenceRule(): void {
+  const migration = readRpcMigration()
+  const view = migration.match(
+    /CREATE OR REPLACE VIEW public\.tokend_effective_usage_events[\s\S]*?\nAS\n([\s\S]*?);\n\nREVOKE/i,
+  )
+  assert.ok(view, 'missing complete effective-cost view')
+  const definition = view[1]
+
+  for (const column of [
+    'id', 'member_code', 'timestamp_ms', 'session_id', 'session_key', 'agent', 'provider',
+    'model', 'channel', 'input_tokens', 'output_tokens', 'reasoning_tokens',
+    'cache_read_tokens', 'cache_write_tokens', 'total_tokens', 'stop_reason', 'project',
+    'effective_input_cost', 'effective_output_cost', 'effective_reasoning_cost',
+    'effective_cache_read_cost', 'effective_cache_write_cost', 'effective_unallocated_cost',
+    'effective_total_cost', 'effective_pricing_status', 'effective_pricing_tier',
+    'effective_catalog_version', 'effective_breakdown_status', 'effective_backfill_run_id',
+    'eligible_for_cost_coverage',
+  ]) assert.match(definition, new RegExp(`\\b${column}\\b`, 'i'), column)
+
+  assert.match(definition, /revision\.version\s*=\s*pricing_state\.active_catalog_version/i)
+  assert.doesNotMatch(definition, /revision\.backfill_run_id\s*=|backfill_run_id\s*=\s*pricing_state\.active_backfill_run_id/i)
+
+  const precedence = definition.match(/CASE\s+WHEN usage_event\.pricing_status\s*=\s*'reported'[\s\S]*?END\s+AS effective_source/i)
+  assert.ok(precedence, 'effective relation must select one source through an explicit precedence CASE')
+  const legacyAt = precedence[0].search(/legacy/i)
+  const revisionAt = precedence[0].search(/revision\.event_id/i)
+  const unpricedAt = precedence[0].lastIndexOf("'unpriced'")
+  assert.ok(legacyAt > 0 && revisionAt > legacyAt && unpricedAt > revisionAt)
+  assert.match(precedence[0], /usage_event\.(?:total_cost|input_cost|output_cost)/i)
+  assert.match(
+    definition,
+    /WHEN resolved\.effective_breakdown_status\s*=\s*'invalid'\s+THEN resolved\.selected_unallocated_cost/i,
+  )
+  assert.match(
+    definition,
+    /WHEN resolved\.effective_breakdown_status\s*=\s*'unallocated'[\s\S]*?GREATEST\([\s\S]*?resolved\.effective_total_cost[\s\S]*?0::NUMERIC/i,
+  )
+  assert.doesNotMatch(definition, /effective_cache_read_cost[\s\S]{0,160}(?:total_cost\s*-|-\s*[^\n]*total_cost)/i)
+  assert.match(definition, /(?:usage_event|resolved)\.total_tokens\s*>\s*0\s+AS eligible_for_cost_coverage/i)
+}
+
+function testRpcAggregationContractIsConsistent(): void {
+  const migration = readRpcMigration()
+  for (const [name] of RPC_SIGNATURES) {
+    const body = functionDefinition(migration, name)
+    assert.match(body, /COUNT\(\*\) FILTER \(WHERE eligible_for_cost_coverage\)/i)
+    for (const status of ['reported', 'estimated', 'zero_rate', 'legacy', 'unpriced']) {
+      assert.match(
+        body,
+        new RegExp(`COUNT\\(\\*\\) FILTER \\(WHERE eligible_for_cost_coverage AND effective_pricing_status = '${status}'\\)`, 'i'),
+      )
+    }
+    assert.match(body, /SUM\(input_tokens\)[\s\S]*SUM\(output_tokens\)[\s\S]*SUM\(reasoning_tokens\)[\s\S]*SUM\(cache_read_tokens\)[\s\S]*SUM\(cache_write_tokens\)/i)
+    assert.match(body, /reported_event_count \+ estimated_event_count \+ zero_rate_event_count \+ legacy_event_count/i)
+    assert.match(body, /reported_event_count \+ estimated_event_count \+ zero_rate_event_count/i)
+    assert.match(body, /eligible_event_count\s*=\s*0\s+THEN\s+0/i)
+    assert.match(body, /LEAST\(1::NUMERIC,\s*GREATEST\(0::NUMERIC/i)
+    const statuses = body.match(/CASE\s+WHEN eligible_event_count\s*=\s*0 THEN 'no_usage'[\s\S]*?ELSE 'complete'\s+END/i)
+    assert.ok(statuses, `${name} must implement the shared six-state ordering`)
+    assert.ok(statuses[0].indexOf("'unpriced'") < statuses[0].indexOf("'zero_rate'"))
+    assert.ok(statuses[0].indexOf("'zero_rate'") < statuses[0].indexOf("'partial'"))
+    assert.ok(statuses[0].indexOf("'partial'") < statuses[0].indexOf("'legacy'"))
+  }
+  assert.match(migration, /RETURN json_build_object\('ok', true, 'granularity', v_granularity, 'days',/i)
+  assert.match(migration, /RETURN json_build_object\('ok', true, 'models',/i)
+  assert.match(migration, /RETURN json_build_object\('ok', true, 'channels',/i)
+  assert.match(migration, /RETURN json_build_object\('ok', true, 'sessions',/i)
+  assert.match(migration, /RETURN json_build_object\('ok', true, 'projects',/i)
+  assert.ok((migration.match(/json_build_object\('ok', false, 'error', 'invalid_token'\)/g) ?? []).length === RPC_SIGNATURES.length)
+}
+
 function testSupabaseConfigAndPackageScriptsAreIsolated(): void {
   const packageJson = JSON.parse(
     fs.readFileSync(path.resolve(process.cwd(), 'package.json'), 'utf8'),
@@ -639,7 +784,9 @@ function testPgTapContractIsSelfContained(): void {
   )
   assert.match(pgTap, /^BEGIN;/m)
   assert.match(pgTap, /^ROLLBACK;/m)
-  assert.match(pgTap, /SELECT plan\(102\);/)
+  const planned = Number(pgTap.match(/SELECT plan\((\d+)\);/)?.[1])
+  const assertions = (pgTap.match(/^SELECT (?:fk_ok|is|lives_ok|ok|pass|results_eq|throws_ok)\(/gm) ?? []).length
+  assert.equal(planned, assertions, 'pgTAP plan must exactly match its assertions')
   assert.equal(
     (pgTap.match(/^\\ir \.\.\/\.\.\/migrations\/202607100001_pricing_core\.sql$/gm) ?? []).length,
     2,
@@ -648,12 +795,17 @@ function testPgTapContractIsSelfContained(): void {
     (pgTap.match(/^\\ir \.\.\/\.\.\/migrations\/202607100002_pricing_upload\.sql$/gm) ?? []).length,
     2,
   )
+  assert.equal(
+    (pgTap.match(/^\\ir \.\.\/\.\.\/migrations\/202607100003_pricing_rpcs\.sql$/gm) ?? []).length,
+    2,
+  )
   for (const fixture of [
     'tokend_members',
     'tokend_usage_events',
     'tokend_sessions',
     'tokend_sync_state',
     'tokend_model_prices',
+    'tokend_message_events',
   ]) assert.match(pgTap, new RegExp(`CREATE TABLE public\\.${fixture}\\b`, 'i'))
   assert.match(pgTap, new RegExp(CATALOG_HASH))
   assert.match(
@@ -672,6 +824,21 @@ function testPgTapContractIsSelfContained(): void {
     )
   }
   assert.match(pgTap, /has_function_privilege\(\s*'service_role'[\s\S]*'EXECUTE'\s*\)/i)
+  for (const marker of [
+    'effective relation ignores stale catalog revisions',
+    'backfill run id remains audit metadata',
+    'reported and legacy base costs beat active revisions',
+    'zero-token telemetry remains in raw calls and sessions',
+    'six coverage statuses follow the exact priority order',
+    'mixed coverage is exactly 0.8 available and 0.6 verified',
+    'deployed total_tokens alone controls coverage eligibility',
+    'summary equals the sum of daily, model, channel, session, and project aggregates',
+    'detail aggregates equal their parent rows',
+    'all vNext RPCs preserve the invalid-token shape',
+    'legacy function OIDs survive the additive RPC migration',
+    'vNext signatures, return types, security, search_path, and ACLs are exact',
+    'summary v5 preserves v14 visible-session message counts and no-message fallback',
+  ]) assert.match(pgTap, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'))
   assert.doesNotMatch(pgTap, /\/Users\/|\/home\/|SUPABASE_(?:KEY|TOKEN)|NPM_TOKEN|member[_ -]?secret/i)
 }
 
@@ -689,6 +856,9 @@ testUploadMigrationValidatesBeforeMutatingAndPreservesBaseRows()
 testServerEstimatorAndRevisionContractAreComplete()
 testPreflightIsAggregateOnlyWithExactKeys()
 testUploadFunctionAclsAreExplicitAndMinimal()
+testRpcMigrationDefinesExactSurfaceAndPrivileges()
+testEffectiveRelationHasOneAuditablePrecedenceRule()
+testRpcAggregationContractIsConsistent()
 testSupabaseConfigAndPackageScriptsAreIsolated()
 testPgTapContractIsSelfContained()
 console.log('pricing SQL contract tests passed')

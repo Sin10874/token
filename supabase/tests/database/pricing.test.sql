@@ -63,12 +63,59 @@ CREATE TABLE public.tokend_model_prices (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
+CREATE TABLE public.tokend_message_events (
+  id TEXT NOT NULL,
+  member_code TEXT NOT NULL REFERENCES public.tokend_members(member_code),
+  timestamp_ms BIGINT NOT NULL,
+  session_id TEXT NOT NULL,
+  agent TEXT,
+  channel TEXT DEFAULT 'unknown',
+  kind TEXT NOT NULL,
+  uploaded_at TIMESTAMPTZ DEFAULT now(),
+  PRIMARY KEY (id, member_code)
+);
+
 \ir ../../migrations/202607100001_pricing_core.sql
 \ir ../../migrations/202607100001_pricing_core.sql
 \ir ../../migrations/202607100002_pricing_upload.sql
 \ir ../../migrations/202607100002_pricing_upload.sql
 
-SELECT plan(102);
+-- Production already has these legacy RPCs. Minimal fixtures let this isolated
+-- database prove that the additive vNext migration preserves their identities.
+CREATE FUNCTION public.tokend_get_summary_v4(TEXT, TEXT, TEXT) RETURNS JSON
+LANGUAGE SQL AS $$ SELECT '{"ok":true}'::JSON $$;
+CREATE FUNCTION public.tokend_get_daily_trend_v4(TEXT, TEXT, TEXT) RETURNS JSON
+LANGUAGE SQL AS $$ SELECT '{"ok":true}'::JSON $$;
+CREATE FUNCTION public.tokend_get_model_breakdown_v2(TEXT, TEXT) RETURNS JSON
+LANGUAGE SQL AS $$ SELECT '{"ok":true}'::JSON $$;
+CREATE FUNCTION public.tokend_get_model_detail(TEXT, TEXT, TEXT) RETURNS JSON
+LANGUAGE SQL AS $$ SELECT '{"ok":true}'::JSON $$;
+CREATE FUNCTION public.tokend_get_channel_breakdown_v3(TEXT, TEXT) RETURNS JSON
+LANGUAGE SQL AS $$ SELECT '{"ok":true}'::JSON $$;
+CREATE FUNCTION public.tokend_get_channel_detail_v2(TEXT, TEXT, TEXT, TEXT) RETURNS JSON
+LANGUAGE SQL AS $$ SELECT '{"ok":true}'::JSON $$;
+CREATE FUNCTION public.tokend_get_sessions(TEXT, TEXT, INTEGER) RETURNS JSON
+LANGUAGE SQL AS $$ SELECT '{"ok":true}'::JSON $$;
+CREATE FUNCTION public.tokend_get_session_detail(TEXT, TEXT) RETURNS JSON
+LANGUAGE SQL AS $$ SELECT '{"ok":true}'::JSON $$;
+CREATE FUNCTION public.tokend_get_top_projects_v2(TEXT, TEXT) RETURNS JSON
+LANGUAGE SQL AS $$ SELECT '{"ok":true}'::JSON $$;
+
+CREATE TEMP TABLE legacy_function_oids AS
+SELECT oid, proname, oidvectortypes(proargtypes) AS argument_types
+FROM pg_proc
+WHERE pronamespace = 'public'::regnamespace
+  AND proname = ANY (ARRAY[
+    'tokend_get_summary_v4', 'tokend_get_daily_trend_v4',
+    'tokend_get_model_breakdown_v2', 'tokend_get_model_detail',
+    'tokend_get_channel_breakdown_v3', 'tokend_get_channel_detail_v2',
+    'tokend_get_sessions', 'tokend_get_session_detail', 'tokend_get_top_projects_v2'
+  ]);
+
+\ir ../../migrations/202607100003_pricing_rpcs.sql
+\ir ../../migrations/202607100003_pricing_rpcs.sql
+
+SELECT plan(127);
 
 SELECT pass('pricing migration compiles and applies twice');
 
@@ -1504,6 +1551,551 @@ SELECT is(
   ),
   2,
   'schema reload surface has exactly one legacy and one v2 upload signature'
+);
+
+-- -------------------------------------------------------------------------
+-- Effective-cost RPC fixtures. Every timestamp remains inside a 1d/7d window.
+-- -------------------------------------------------------------------------
+INSERT INTO public.tokend_members (member_code, token) VALUES
+  ('RPC_FIX', 'rpc-token'),
+  ('RPC_NO_USAGE', 'rpc-no-usage'),
+  ('RPC_UNPRICED', 'rpc-unpriced'),
+  ('RPC_ZERO', 'rpc-zero'),
+  ('RPC_LEGACY', 'rpc-legacy'),
+  ('RPC_COMPLETE', 'rpc-complete'),
+  ('RPC_MISMATCH', 'rpc-mismatch'),
+  ('RPC_INVALID', 'rpc-invalid');
+
+INSERT INTO public.tokend_usage_events (
+  id, member_code, timestamp_ms, session_id, session_key, agent, provider, model, channel,
+  input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens,
+  total_tokens, input_cost, output_cost, reasoning_cost, cache_read_cost, cache_write_cost,
+  total_cost, stop_reason, project, pricing_status, pricing_tier, price_version,
+  matched_model_id, token_semantics, unallocated_cost, breakdown_status
+)
+SELECT
+  fixture.id, fixture.member_code,
+  (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT - fixture.age_ms,
+  fixture.session_id, 'visible', 'rpc-agent', 'openai', fixture.model, 'coding',
+  fixture.input_tokens, fixture.output_tokens, fixture.reasoning_tokens,
+  fixture.cache_read_tokens, fixture.cache_write_tokens, fixture.total_tokens,
+  fixture.input_cost, fixture.output_cost, fixture.reasoning_cost,
+  fixture.cache_read_cost, fixture.cache_write_cost, fixture.total_cost,
+  'stop', 'rpc-project', fixture.pricing_status, 'standard', fixture.price_version,
+  NULL, 'disjoint', fixture.unallocated_cost, fixture.breakdown_status
+FROM (VALUES
+  ('rpc-reported', 'RPC_FIX', 60000::BIGINT, 'rpc-s-reported', 'gpt-5.6-sol', 10, 5, 3, 2, 1, 21, 1::REAL, 2::REAL, 0.6::REAL, 0.2::REAL, 0.2::REAL, 4::REAL, 'reported'::TEXT, 'client-report-v1'::TEXT, 0::NUMERIC, 'reconciled'::TEXT),
+  ('rpc-legacy', 'RPC_FIX', 120000::BIGINT, 'rpc-s-legacy', 'gpt-5.6-sol', 10, 5, 2, 2, 1, 20, 1::REAL, 1::REAL, 1::REAL, 1::REAL, 1::REAL, 5::REAL, NULL::TEXT, NULL::TEXT, 0::NUMERIC, 'reconciled'::TEXT),
+  ('rpc-estimated', 'RPC_FIX', 180000::BIGINT, 'rpc-s-estimated', 'gpt-5.6-sol', 10, 5, 5, 5, 5, 30, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 'unpriced'::TEXT, NULL::TEXT, 0::NUMERIC, 'reconciled'::TEXT),
+  ('rpc-zero-rate', 'RPC_FIX', 240000::BIGINT, 'rpc-s-zero', 'gpt-5.6-sol', 10, 10, 10, 5, 5, 40, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 'unpriced'::TEXT, NULL::TEXT, 0::NUMERIC, 'reconciled'::TEXT),
+  ('rpc-unpriced', 'RPC_FIX', 300000::BIGINT, 'rpc-s-unpriced', 'gpt-5.6-sol', 20, 10, 10, 5, 5, 50, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 'unpriced'::TEXT, NULL::TEXT, 0::NUMERIC, 'reconciled'::TEXT),
+  ('rpc-telemetry', 'RPC_FIX', 360000::BIGINT, 'rpc-s-telemetry', 'gpt-5.6-sol', 0, 0, 0, 0, 0, 0, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 'unpriced'::TEXT, NULL::TEXT, 0::NUMERIC, 'reconciled'::TEXT),
+  ('rpc-previous-reported', 'RPC_FIX', 691200000::BIGINT, 'rpc-s-previous', 'gpt-5.6-sol', 2, 1, 1, 1, 1, 6, 1::REAL, 1::REAL, 1::REAL, 1::REAL, 1::REAL, 5::REAL, 'reported'::TEXT, 'client-report-v1'::TEXT, 0::NUMERIC, 'reconciled'::TEXT),
+  ('rpc-no-usage-event', 'RPC_NO_USAGE', 60000::BIGINT, 'rpc-no-usage-s', 'gpt-5.6-sol', 0, 0, 0, 0, 0, 0, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 'unpriced'::TEXT, NULL::TEXT, 0::NUMERIC, 'reconciled'::TEXT),
+  ('rpc-unpriced-event', 'RPC_UNPRICED', 60000::BIGINT, 'rpc-unpriced-s', 'not-priced', 1, 0, 0, 0, 0, 1, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 'unpriced'::TEXT, NULL::TEXT, 0::NUMERIC, 'reconciled'::TEXT),
+  ('rpc-zero-event', 'RPC_ZERO', 60000::BIGINT, 'rpc-zero-s', 'gpt-5.6-sol', 1, 0, 0, 0, 0, 1, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 'unpriced'::TEXT, NULL::TEXT, 0::NUMERIC, 'reconciled'::TEXT),
+  ('rpc-legacy-event', 'RPC_LEGACY', 60000::BIGINT, 'rpc-legacy-s', 'gpt-5.6-sol', 1, 0, 0, 0, 0, 1, 1::REAL, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 1::REAL, NULL::TEXT, NULL::TEXT, 0::NUMERIC, 'reconciled'::TEXT),
+  ('rpc-complete-event', 'RPC_COMPLETE', 60000::BIGINT, 'rpc-complete-s', 'gpt-5.6-sol', 1, 0, 0, 0, 0, 1, 1::REAL, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 1::REAL, 'reported'::TEXT, 'client-report-v1'::TEXT, 0::NUMERIC, 'reconciled'::TEXT),
+  ('rpc-mismatch-event', 'RPC_MISMATCH', 60000::BIGINT, 'rpc-mismatch-s', 'not-priced', 0, 0, 0, 0, 0, 1, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 'unpriced'::TEXT, NULL::TEXT, 0::NUMERIC, 'reconciled'::TEXT),
+  ('rpc-invalid-event', 'RPC_INVALID', 60000::BIGINT, 'rpc-invalid-s', 'gpt-5.6-sol', 1, 0, 0, 0, 0, 1, 5::REAL, 0::REAL, 0::REAL, 0::REAL, 0::REAL, 1::REAL, 'reported'::TEXT, 'client-report-v1'::TEXT, 0::NUMERIC, 'invalid'::TEXT)
+) AS fixture(
+  id, member_code, age_ms, session_id, model,
+  input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens,
+  total_tokens, input_cost, output_cost, reasoning_cost, cache_read_cost, cache_write_cost,
+  total_cost, pricing_status, price_version, unallocated_cost, breakdown_status
+);
+
+INSERT INTO public.tokend_message_events (
+  id, member_code, timestamp_ms, session_id, agent, channel, kind
+) VALUES
+  ('rpc-msg-current-user-1', 'RPC_FIX', (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT - 50000, 'rpc-s-reported', 'rpc-agent', 'coding', 'user'),
+  ('rpc-msg-current-user-2', 'RPC_FIX', (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT - 49000, 'rpc-s-reported', 'rpc-agent', 'coding', 'user'),
+  ('rpc-msg-current-assistant', 'RPC_FIX', (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT - 48000, 'rpc-s-reported', 'rpc-agent', 'coding', 'assistant'),
+  ('rpc-msg-current-tool', 'RPC_FIX', (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT - 47000, 'rpc-s-reported', 'rpc-agent', 'coding', 'tool_call'),
+  ('rpc-msg-hidden-session', 'RPC_FIX', (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT - 46000, 'not-visible', 'rpc-agent', 'coding', 'user'),
+  ('rpc-msg-previous-user', 'RPC_FIX', (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT - 691100000, 'rpc-s-previous', 'rpc-agent', 'coding', 'user'),
+  ('rpc-msg-previous-assistant', 'RPC_FIX', (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT - 691000000, 'rpc-s-previous', 'rpc-agent', 'coding', 'assistant');
+
+INSERT INTO public.tokend_event_cost_revisions (
+  version, member_code, event_id, backfill_run_id,
+  input_cost, output_cost, reasoning_cost, cache_read_cost, cache_write_cost,
+  unallocated_cost, total_cost, pricing_status, pricing_tier, matched_model_id,
+  price_version, breakdown_status
+) VALUES
+  ('2026-07-10', 'RPC_FIX', 'rpc-reported', '00000000-0000-0000-0000-000000000003', 20, 20, 20, 20, 19, 0, 99, 'estimated', 'standard', 'gpt-5.6-sol', '2026-07-10', 'reconciled'),
+  ('2026-07-10', 'RPC_FIX', 'rpc-legacy', '00000000-0000-0000-0000-000000000003', 20, 20, 20, 20, 19, 0, 99, 'estimated', 'standard', 'gpt-5.6-sol', '2026-07-10', 'reconciled'),
+  ('2026-07-10', 'RPC_FIX', 'rpc-estimated', '00000000-0000-0000-0000-000000000003', 1, 2, 1, 1, 1, 0, 6, 'estimated', 'standard', 'gpt-5.6-sol', '2026-07-10', 'reconciled'),
+  ('2026-07-09', 'RPC_FIX', 'rpc-estimated', '00000000-0000-0000-0000-000000000002', 10, 20, 10, 10, 10, 0, 60, 'estimated', 'standard', 'gpt-5.6-sol', '2026-07-09', 'reconciled'),
+  ('2026-07-10', 'RPC_FIX', 'rpc-zero-rate', NULL, 0, 0, 0, 0, 0, 0, 0, 'zero_rate', 'standard', 'gpt-5.6-sol', '2026-07-10', 'reconciled'),
+  ('2026-07-10', 'RPC_FIX', 'rpc-unpriced', NULL, 0, 0, 0, 0, 0, 0, 0, 'unpriced', 'standard', NULL, NULL, 'reconciled'),
+  ('2026-07-10', 'RPC_ZERO', 'rpc-zero-event', NULL, 0, 0, 0, 0, 0, 0, 0, 'zero_rate', 'standard', 'gpt-5.6-sol', '2026-07-10', 'reconciled');
+
+CREATE FUNCTION pg_temp.rpc_envelope(p_payload JSONB)
+RETURNS JSONB
+LANGUAGE SQL
+IMMUTABLE
+AS $test$
+  SELECT jsonb_build_object(
+    'inputTokens', COALESCE((p_payload->>'inputTokens')::BIGINT, 0),
+    'outputTokens', COALESCE((p_payload->>'outputTokens')::BIGINT, 0),
+    'reasoningTokens', COALESCE((p_payload->>'reasoningTokens')::BIGINT, 0),
+    'cacheReadTokens', COALESCE((p_payload->>'cacheReadTokens')::BIGINT, 0),
+    'cacheWriteTokens', COALESCE((p_payload->>'cacheWriteTokens')::BIGINT, 0),
+    'totalTokens', COALESCE((p_payload->>'totalTokens')::BIGINT, 0),
+    'inputCost', COALESCE((p_payload->>'inputCost')::NUMERIC, 0),
+    'outputCost', COALESCE((p_payload->>'outputCost')::NUMERIC, 0),
+    'reasoningCost', COALESCE((p_payload->>'reasoningCost')::NUMERIC, 0),
+    'cacheReadCost', COALESCE((p_payload->>'cacheReadCost')::NUMERIC, 0),
+    'cacheWriteCost', COALESCE((p_payload->>'cacheWriteCost')::NUMERIC, 0),
+    'unallocatedCost', COALESCE((p_payload->>'unallocatedCost')::NUMERIC, 0),
+    'totalCost', COALESCE((p_payload->>'totalCost')::NUMERIC, 0),
+    'eligibleEventCount', COALESCE((p_payload->>'eligibleEventCount')::BIGINT, 0),
+    'reportedEventCount', COALESCE((p_payload->>'reportedEventCount')::BIGINT, 0),
+    'estimatedEventCount', COALESCE((p_payload->>'estimatedEventCount')::BIGINT, 0),
+    'zeroRateEventCount', COALESCE((p_payload->>'zeroRateEventCount')::BIGINT, 0),
+    'legacyEventCount', COALESCE((p_payload->>'legacyEventCount')::BIGINT, 0),
+    'unpricedEventCount', COALESCE((p_payload->>'unpricedEventCount')::BIGINT, 0),
+    'breakdownInvalidCount', COALESCE((p_payload->>'breakdownInvalidCount')::BIGINT, 0),
+    'costAvailability', COALESCE((p_payload->>'costAvailability')::NUMERIC, 0),
+    'verifiedCostCoverage', COALESCE((p_payload->>'verifiedCostCoverage')::NUMERIC, 0),
+    'coverageStatus', p_payload->>'coverageStatus',
+    'costDetailsAvailable', p_payload->'costDetailsAvailable'
+  )
+$test$;
+
+CREATE FUNCTION pg_temp.rpc_aggregate_envelopes(p_rows JSONB)
+RETURNS JSONB
+LANGUAGE SQL
+IMMUTABLE
+AS $test$
+  WITH aggregate AS (
+    SELECT
+      COALESCE(SUM((row->>'inputTokens')::BIGINT), 0)::BIGINT AS input_tokens,
+      COALESCE(SUM((row->>'outputTokens')::BIGINT), 0)::BIGINT AS output_tokens,
+      COALESCE(SUM((row->>'reasoningTokens')::BIGINT), 0)::BIGINT AS reasoning_tokens,
+      COALESCE(SUM((row->>'cacheReadTokens')::BIGINT), 0)::BIGINT AS cache_read_tokens,
+      COALESCE(SUM((row->>'cacheWriteTokens')::BIGINT), 0)::BIGINT AS cache_write_tokens,
+      COALESCE(SUM((row->>'totalTokens')::BIGINT), 0)::BIGINT AS total_tokens,
+      COALESCE(SUM((row->>'inputCost')::NUMERIC), 0)::NUMERIC AS input_cost,
+      COALESCE(SUM((row->>'outputCost')::NUMERIC), 0)::NUMERIC AS output_cost,
+      COALESCE(SUM((row->>'reasoningCost')::NUMERIC), 0)::NUMERIC AS reasoning_cost,
+      COALESCE(SUM((row->>'cacheReadCost')::NUMERIC), 0)::NUMERIC AS cache_read_cost,
+      COALESCE(SUM((row->>'cacheWriteCost')::NUMERIC), 0)::NUMERIC AS cache_write_cost,
+      COALESCE(SUM((row->>'unallocatedCost')::NUMERIC), 0)::NUMERIC AS unallocated_cost,
+      COALESCE(SUM((row->>'totalCost')::NUMERIC), 0)::NUMERIC AS total_cost,
+      COALESCE(SUM((row->>'eligibleEventCount')::BIGINT), 0)::BIGINT AS eligible_event_count,
+      COALESCE(SUM((row->>'reportedEventCount')::BIGINT), 0)::BIGINT AS reported_event_count,
+      COALESCE(SUM((row->>'estimatedEventCount')::BIGINT), 0)::BIGINT AS estimated_event_count,
+      COALESCE(SUM((row->>'zeroRateEventCount')::BIGINT), 0)::BIGINT AS zero_rate_event_count,
+      COALESCE(SUM((row->>'legacyEventCount')::BIGINT), 0)::BIGINT AS legacy_event_count,
+      COALESCE(SUM((row->>'unpricedEventCount')::BIGINT), 0)::BIGINT AS unpriced_event_count,
+      COALESCE(SUM((row->>'breakdownInvalidCount')::BIGINT), 0)::BIGINT AS breakdown_invalid_count
+    FROM jsonb_array_elements(COALESCE(p_rows, '[]'::JSONB)) AS row
+  ), envelope AS (
+    SELECT aggregate.*,
+      CASE WHEN eligible_event_count = 0 THEN 0::NUMERIC ELSE LEAST(1::NUMERIC, GREATEST(0::NUMERIC,
+        (reported_event_count + estimated_event_count + zero_rate_event_count + legacy_event_count)::NUMERIC / eligible_event_count::NUMERIC)) END AS cost_availability,
+      CASE WHEN eligible_event_count = 0 THEN 0::NUMERIC ELSE LEAST(1::NUMERIC, GREATEST(0::NUMERIC,
+        (reported_event_count + estimated_event_count + zero_rate_event_count)::NUMERIC / eligible_event_count::NUMERIC)) END AS verified_cost_coverage,
+      CASE WHEN eligible_event_count = 0 THEN 'no_usage'
+        WHEN unpriced_event_count = eligible_event_count THEN 'unpriced'
+        WHEN zero_rate_event_count = eligible_event_count THEN 'zero_rate'
+        WHEN unpriced_event_count > 0 AND unpriced_event_count < eligible_event_count THEN 'partial'
+        WHEN unpriced_event_count = 0 AND legacy_event_count > 0 THEN 'legacy'
+        ELSE 'complete' END AS coverage_status
+    FROM aggregate
+  )
+  SELECT jsonb_build_object(
+    'inputTokens', input_tokens, 'outputTokens', output_tokens,
+    'reasoningTokens', reasoning_tokens, 'cacheReadTokens', cache_read_tokens,
+    'cacheWriteTokens', cache_write_tokens, 'totalTokens', total_tokens,
+    'inputCost', input_cost, 'outputCost', output_cost, 'reasoningCost', reasoning_cost,
+    'cacheReadCost', cache_read_cost, 'cacheWriteCost', cache_write_cost,
+    'unallocatedCost', unallocated_cost, 'totalCost', total_cost,
+    'eligibleEventCount', eligible_event_count, 'reportedEventCount', reported_event_count,
+    'estimatedEventCount', estimated_event_count, 'zeroRateEventCount', zero_rate_event_count,
+    'legacyEventCount', legacy_event_count, 'unpricedEventCount', unpriced_event_count,
+    'breakdownInvalidCount', breakdown_invalid_count, 'costAvailability', cost_availability,
+    'verifiedCostCoverage', verified_cost_coverage, 'coverageStatus', coverage_status,
+    'costDetailsAvailable', TRUE
+  ) FROM envelope
+$test$;
+
+SELECT results_eq(
+  $actual$
+    SELECT id, effective_pricing_status, effective_total_cost
+    FROM public.tokend_effective_usage_events
+    WHERE member_code = 'RPC_FIX'
+      AND id IN ('rpc-reported', 'rpc-legacy', 'rpc-estimated', 'rpc-zero-rate', 'rpc-unpriced')
+    ORDER BY id
+  $actual$,
+  $expected$
+    VALUES
+      ('rpc-estimated'::TEXT, 'estimated'::TEXT, 6::NUMERIC),
+      ('rpc-legacy'::TEXT, 'legacy'::TEXT, 5::NUMERIC),
+      ('rpc-reported'::TEXT, 'reported'::TEXT, 4::NUMERIC),
+      ('rpc-unpriced'::TEXT, 'unpriced'::TEXT, 0::NUMERIC),
+      ('rpc-zero-rate'::TEXT, 'zero_rate'::TEXT, 0::NUMERIC)
+  $expected$,
+  'effective relation applies the one documented precedence chain'
+);
+
+SELECT is(
+  (SELECT effective_total_cost FROM public.tokend_effective_usage_events WHERE member_code = 'RPC_FIX' AND id = 'rpc-estimated'),
+  6::NUMERIC,
+  'effective relation ignores stale catalog revisions'
+);
+
+SELECT is(
+  (SELECT effective_backfill_run_id::TEXT FROM public.tokend_effective_usage_events WHERE member_code = 'RPC_FIX' AND id = 'rpc-estimated'),
+  '00000000-0000-0000-0000-000000000003',
+  'backfill run id remains audit metadata'
+);
+
+SELECT results_eq(
+  $actual$
+    SELECT id, effective_pricing_status, effective_total_cost
+    FROM public.tokend_effective_usage_events
+    WHERE member_code = 'RPC_FIX' AND id IN ('rpc-reported', 'rpc-legacy')
+    ORDER BY id
+  $actual$,
+  $expected$
+    VALUES
+      ('rpc-legacy'::TEXT, 'legacy'::TEXT, 5::NUMERIC),
+      ('rpc-reported'::TEXT, 'reported'::TEXT, 4::NUMERIC)
+  $expected$,
+  'reported and legacy base costs beat active revisions'
+);
+
+SELECT results_eq(
+  $actual$
+    SELECT
+      (payload->>'callCount')::BIGINT,
+      (payload->>'sessionCount')::BIGINT,
+      (payload->>'eligibleEventCount')::BIGINT
+    FROM (SELECT public.tokend_get_summary_v5('rpc-token')::JSONB AS payload) AS summary
+  $actual$,
+  $expected$ VALUES (6::BIGINT, 6::BIGINT, 5::BIGINT) $expected$,
+  'zero-token telemetry remains in raw calls and sessions but not the coverage denominator'
+);
+
+SELECT results_eq(
+  $actual$
+    SELECT scope, message_count, user_message_count
+    FROM (
+      SELECT 'current'::TEXT AS scope,
+        (payload->'current'->>'messageCount')::BIGINT AS message_count,
+        (payload->'current'->>'userMessageCount')::BIGINT AS user_message_count
+      FROM (SELECT public.tokend_get_summary_v5('rpc-token')::JSONB AS payload) AS summary
+      UNION ALL
+      SELECT 'previous',
+        (payload->'previous'->>'messageCount')::BIGINT,
+        (payload->'previous'->>'userMessageCount')::BIGINT
+      FROM (SELECT public.tokend_get_summary_v5('rpc-token')::JSONB AS payload) AS summary
+      UNION ALL
+      SELECT 'fallback',
+        (payload->'current'->>'messageCount')::BIGINT,
+        NULLIF(payload->'current'->>'userMessageCount', '')::BIGINT
+      FROM (SELECT public.tokend_get_summary_v5('rpc-complete')::JSONB AS payload) AS summary
+      UNION ALL
+      SELECT 'channel',
+        (row->>'messageCount')::BIGINT,
+        (row->>'userMessageCount')::BIGINT
+      FROM jsonb_array_elements(public.tokend_get_channel_breakdown_v4('rpc-token')::JSONB->'channels') AS row
+      WHERE row->>'channel' = 'coding'
+    ) AS message_totals
+    ORDER BY scope
+  $actual$,
+  $expected$
+    VALUES
+      ('channel'::TEXT, 4::BIGINT, 2::BIGINT),
+      ('current'::TEXT, 3::BIGINT, 2::BIGINT),
+      ('fallback'::TEXT, 1::BIGINT, NULL::BIGINT),
+      ('previous'::TEXT, 2::BIGINT, 1::BIGINT)
+  $expected$,
+  'summary v5 preserves v14 visible-session message counts and no-message fallback'
+);
+
+SELECT results_eq(
+  $actual$
+    SELECT token, public.tokend_get_summary_v5(token)::JSONB->>'coverageStatus'
+    FROM (VALUES
+      ('rpc-no-usage'::TEXT), ('rpc-unpriced'::TEXT), ('rpc-zero'::TEXT),
+      ('rpc-token'::TEXT), ('rpc-legacy'::TEXT), ('rpc-complete'::TEXT)
+    ) AS cases(token)
+    ORDER BY token
+  $actual$,
+  $expected$
+    VALUES
+      ('rpc-complete'::TEXT, 'complete'::TEXT),
+      ('rpc-legacy'::TEXT, 'legacy'::TEXT),
+      ('rpc-no-usage'::TEXT, 'no_usage'::TEXT),
+      ('rpc-token'::TEXT, 'partial'::TEXT),
+      ('rpc-unpriced'::TEXT, 'unpriced'::TEXT),
+      ('rpc-zero'::TEXT, 'zero_rate'::TEXT)
+  $expected$,
+  'six coverage statuses follow the exact priority order'
+);
+
+SELECT results_eq(
+  $actual$
+    SELECT
+      (payload->>'costAvailability')::NUMERIC,
+      (payload->>'verifiedCostCoverage')::NUMERIC
+    FROM (SELECT public.tokend_get_summary_v5('rpc-token')::JSONB AS payload) AS summary
+  $actual$,
+  $expected$ VALUES (0.8::NUMERIC, 0.6::NUMERIC) $expected$,
+  'mixed coverage is exactly 0.8 available and 0.6 verified'
+);
+
+SELECT results_eq(
+  $actual$
+    SELECT
+      (payload->>'eligibleEventCount')::BIGINT,
+      (payload->>'totalTokens')::BIGINT,
+      payload->>'coverageStatus'
+    FROM (SELECT public.tokend_get_summary_v5('rpc-mismatch')::JSONB AS payload) AS summary
+  $actual$,
+  $expected$ VALUES (1::BIGINT, 0::BIGINT, 'unpriced'::TEXT) $expected$,
+  'deployed total_tokens alone controls coverage eligibility while explicit buckets control token arithmetic'
+);
+
+SELECT results_eq(
+  $actual$
+    SELECT
+      (payload->>'breakdownInvalidCount')::BIGINT,
+      (payload->>'unallocatedCost')::NUMERIC,
+      (payload->>'cacheReadCost')::NUMERIC,
+      (payload->>'totalCost')::NUMERIC
+    FROM (SELECT public.tokend_get_summary_v5('rpc-invalid')::JSONB AS payload) AS summary
+  $actual$,
+  $expected$ VALUES (1::BIGINT, 0::NUMERIC, 0::NUMERIC, 1::NUMERIC) $expected$,
+  'invalid component breakdown never becomes unallocated or residual cache cost'
+);
+
+SELECT is(
+  pg_temp.rpc_envelope(public.tokend_get_summary_v5('rpc-token')::JSONB),
+  pg_temp.rpc_aggregate_envelopes(public.tokend_get_daily_trend_v5('rpc-token')::JSONB->'days'),
+  'summary aggregate equals daily aggregate'
+);
+
+SELECT is(
+  pg_temp.rpc_envelope(public.tokend_get_summary_v5('rpc-token')::JSONB),
+  pg_temp.rpc_aggregate_envelopes(public.tokend_get_model_breakdown_v3('rpc-token')::JSONB->'models'),
+  'summary aggregate equals model rows'
+);
+
+SELECT is(
+  pg_temp.rpc_envelope(public.tokend_get_summary_v5('rpc-token')::JSONB),
+  pg_temp.rpc_aggregate_envelopes(public.tokend_get_channel_breakdown_v4('rpc-token')::JSONB->'channels'),
+  'summary aggregate equals channel rows'
+);
+
+SELECT is(
+  pg_temp.rpc_envelope(public.tokend_get_summary_v5('rpc-token')::JSONB),
+  pg_temp.rpc_aggregate_envelopes(public.tokend_get_sessions_v2('rpc-token')::JSONB->'sessions'),
+  'summary aggregate equals controlled session rows'
+);
+
+SELECT is(
+  pg_temp.rpc_envelope(public.tokend_get_summary_v5('rpc-token')::JSONB),
+  pg_temp.rpc_aggregate_envelopes(public.tokend_get_top_projects_v3('rpc-token')::JSONB->'projects'),
+  'summary equals the sum of daily, model, channel, session, and project aggregates for the all-coding fixture'
+);
+
+SELECT is(
+  pg_temp.rpc_envelope(public.tokend_get_model_detail_v2('rpc-token', 'gpt-5.6-sol')::JSONB),
+  (
+    SELECT pg_temp.rpc_envelope(row)
+    FROM jsonb_array_elements(public.tokend_get_model_breakdown_v3('rpc-token')::JSONB->'models') AS row
+    WHERE row->>'model' = 'gpt-5.6-sol'
+  ),
+  'model detail aggregate equals its parent row'
+);
+
+SELECT is(
+  pg_temp.rpc_envelope(public.tokend_get_channel_detail_v3('rpc-token', 'coding')::JSONB),
+  (
+    SELECT pg_temp.rpc_envelope(row)
+    FROM jsonb_array_elements(public.tokend_get_channel_breakdown_v4('rpc-token')::JSONB->'channels') AS row
+    WHERE row->>'channel' = 'coding'
+  ),
+  'channel detail aggregate equals its parent row'
+);
+
+SELECT is(
+  pg_temp.rpc_envelope(public.tokend_get_session_detail_v2('rpc-token', 'rpc-s-estimated')::JSONB),
+  (
+    SELECT pg_temp.rpc_envelope(row)
+    FROM jsonb_array_elements(public.tokend_get_sessions_v2('rpc-token')::JSONB->'sessions') AS row
+    WHERE row->>'sessionId' = 'rpc-s-estimated'
+  ),
+  'detail aggregates equal their parent rows including session detail'
+);
+
+SELECT results_eq(
+  $actual$
+    SELECT name, payload
+    FROM (VALUES
+      ('channel_breakdown', public.tokend_get_channel_breakdown_v4('invalid')::JSONB),
+      ('channel_detail', public.tokend_get_channel_detail_v3('invalid', 'coding')::JSONB),
+      ('daily', public.tokend_get_daily_trend_v5('invalid')::JSONB),
+      ('model_breakdown', public.tokend_get_model_breakdown_v3('invalid')::JSONB),
+      ('model_detail', public.tokend_get_model_detail_v2('invalid', 'x')::JSONB),
+      ('projects', public.tokend_get_top_projects_v3('invalid')::JSONB),
+      ('session_detail', public.tokend_get_session_detail_v2('invalid', 'x')::JSONB),
+      ('sessions', public.tokend_get_sessions_v2('invalid')::JSONB),
+      ('summary', public.tokend_get_summary_v5('invalid')::JSONB)
+    ) AS responses(name, payload)
+    ORDER BY name
+  $actual$,
+  $expected$
+    SELECT name, '{"ok":false,"error":"invalid_token"}'::JSONB
+    FROM (VALUES
+      ('channel_breakdown'::TEXT), ('channel_detail'::TEXT), ('daily'::TEXT),
+      ('model_breakdown'::TEXT), ('model_detail'::TEXT), ('projects'::TEXT),
+      ('session_detail'::TEXT), ('sessions'::TEXT), ('summary'::TEXT)
+    ) AS names(name)
+    ORDER BY name
+  $expected$,
+  'all vNext RPCs preserve the invalid-token shape'
+);
+
+SELECT results_eq(
+  $actual$
+    SELECT old.proname, old.argument_types, old.oid
+    FROM legacy_function_oids AS old
+    ORDER BY old.proname, old.argument_types
+  $actual$,
+  $expected$
+    SELECT current.proname, oidvectortypes(current.proargtypes), current.oid
+    FROM pg_proc AS current
+    WHERE current.pronamespace = 'public'::regnamespace
+      AND current.proname = ANY (ARRAY[
+        'tokend_get_summary_v4', 'tokend_get_daily_trend_v4',
+        'tokend_get_model_breakdown_v2', 'tokend_get_model_detail',
+        'tokend_get_channel_breakdown_v3', 'tokend_get_channel_detail_v2',
+        'tokend_get_sessions', 'tokend_get_session_detail', 'tokend_get_top_projects_v2'
+      ])
+    ORDER BY current.proname, oidvectortypes(current.proargtypes)
+  $expected$,
+  'legacy function OIDs survive the additive RPC migration'
+);
+
+SELECT results_eq(
+  $actual$
+    SELECT expected.name,
+      count(proc.oid)::INTEGER,
+      bool_and(proc.prorettype = 'json'::regtype),
+      bool_and(proc.prosecdef),
+      bool_and(proc.proconfig @> ARRAY['search_path=public, pg_temp'])
+    FROM (VALUES
+      ('tokend_get_summary_v5'::TEXT, 'text, text, text'::TEXT),
+      ('tokend_get_daily_trend_v5', 'text, text, text'),
+      ('tokend_get_model_breakdown_v3', 'text, text'),
+      ('tokend_get_model_detail_v2', 'text, text, text'),
+      ('tokend_get_channel_breakdown_v4', 'text, text'),
+      ('tokend_get_channel_detail_v3', 'text, text, text, text'),
+      ('tokend_get_sessions_v2', 'text, text, integer'),
+      ('tokend_get_session_detail_v2', 'text, text'),
+      ('tokend_get_top_projects_v3', 'text, text')
+    ) AS expected(name, argument_types)
+    LEFT JOIN pg_proc AS proc
+      ON proc.pronamespace = 'public'::regnamespace
+     AND proc.proname = expected.name
+     AND oidvectortypes(proc.proargtypes) = expected.argument_types
+    GROUP BY expected.name
+    ORDER BY expected.name
+  $actual$,
+  $expected$
+    SELECT name, 1::INTEGER, TRUE, TRUE, TRUE
+    FROM (VALUES
+      ('tokend_get_channel_breakdown_v4'::TEXT), ('tokend_get_channel_detail_v3'::TEXT),
+      ('tokend_get_daily_trend_v5'::TEXT), ('tokend_get_model_breakdown_v3'::TEXT),
+      ('tokend_get_model_detail_v2'::TEXT), ('tokend_get_session_detail_v2'::TEXT),
+      ('tokend_get_sessions_v2'::TEXT), ('tokend_get_summary_v5'::TEXT),
+      ('tokend_get_top_projects_v3'::TEXT)
+    ) AS names(name)
+    ORDER BY name
+  $expected$,
+  'vNext signatures, return types, security, search_path, and ACLs are exact'
+);
+
+SELECT is(
+  (
+    SELECT count(*)::INTEGER
+    FROM pg_proc AS proc
+    CROSS JOIN LATERAL aclexplode(COALESCE(proc.proacl, acldefault('f', proc.proowner))) AS acl
+    WHERE proc.pronamespace = 'public'::regnamespace
+      AND proc.proname = ANY (ARRAY[
+        'tokend_get_summary_v5', 'tokend_get_daily_trend_v5',
+        'tokend_get_model_breakdown_v3', 'tokend_get_model_detail_v2',
+        'tokend_get_channel_breakdown_v4', 'tokend_get_channel_detail_v3',
+        'tokend_get_sessions_v2', 'tokend_get_session_detail_v2', 'tokend_get_top_projects_v3'
+      ])
+      AND acl.grantee = 0
+      AND acl.privilege_type = 'EXECUTE'
+  ),
+  0,
+  'PUBLIC cannot execute any vNext RPC'
+);
+
+SELECT is(
+  (
+    SELECT count(*)::INTEGER
+    FROM pg_proc
+    CROSS JOIN (VALUES ('anon'::TEXT), ('authenticated'::TEXT)) AS role_name(name)
+    WHERE pronamespace = 'public'::regnamespace
+      AND proname = ANY (ARRAY[
+        'tokend_get_summary_v5', 'tokend_get_daily_trend_v5',
+        'tokend_get_model_breakdown_v3', 'tokend_get_model_detail_v2',
+        'tokend_get_channel_breakdown_v4', 'tokend_get_channel_detail_v3',
+        'tokend_get_sessions_v2', 'tokend_get_session_detail_v2', 'tokend_get_top_projects_v3'
+      ])
+      AND has_function_privilege(role_name.name, oid, 'EXECUTE')
+  ),
+  18,
+  'anon and authenticated can execute every vNext RPC'
+);
+
+SELECT is(
+  (
+    SELECT count(*)::INTEGER
+    FROM (VALUES ('anon'::TEXT), ('authenticated'::TEXT), ('service_role'::TEXT)) AS role_name(name)
+    WHERE has_table_privilege(role_name.name, 'public.tokend_effective_usage_events', 'SELECT')
+  ),
+  0,
+  'effective view has no direct anon authenticated or service-role access'
+);
+
+SELECT is(
+  (
+    WITH payloads AS (
+      SELECT public.tokend_get_summary_v5('rpc-token')::JSONB AS payload
+      UNION ALL SELECT public.tokend_get_daily_trend_v5('rpc-token')::JSONB->'days'->0
+      UNION ALL SELECT public.tokend_get_model_breakdown_v3('rpc-token')::JSONB->'models'->0
+      UNION ALL SELECT public.tokend_get_model_detail_v2('rpc-token', 'gpt-5.6-sol')::JSONB
+      UNION ALL SELECT public.tokend_get_channel_breakdown_v4('rpc-token')::JSONB->'channels'->0
+      UNION ALL SELECT public.tokend_get_channel_detail_v3('rpc-token', 'coding')::JSONB
+      UNION ALL SELECT public.tokend_get_sessions_v2('rpc-token')::JSONB->'sessions'->0
+      UNION ALL SELECT public.tokend_get_session_detail_v2('rpc-token', 'rpc-s-estimated')::JSONB
+      UNION ALL SELECT public.tokend_get_top_projects_v3('rpc-token')::JSONB->'projects'->0
+    ), required(key) AS (VALUES
+      ('inputTokens'), ('outputTokens'), ('reasoningTokens'), ('cacheReadTokens'),
+      ('cacheWriteTokens'), ('totalTokens'), ('inputCost'), ('outputCost'),
+      ('reasoningCost'), ('cacheReadCost'), ('cacheWriteCost'), ('unallocatedCost'),
+      ('totalCost'), ('eligibleEventCount'), ('reportedEventCount'),
+      ('estimatedEventCount'), ('zeroRateEventCount'), ('legacyEventCount'),
+      ('unpricedEventCount'), ('breakdownInvalidCount'), ('costAvailability'),
+      ('verifiedCostCoverage'), ('coverageStatus'), ('costDetailsAvailable')
+    )
+    SELECT count(*)::INTEGER
+    FROM payloads CROSS JOIN required
+    WHERE NOT payloads.payload ? required.key
+       OR payloads.payload->>'costDetailsAvailable' <> 'true'
+  ),
+  0,
+  'every aggregate surface publishes the complete cost envelope'
 );
 
 SELECT * FROM finish();

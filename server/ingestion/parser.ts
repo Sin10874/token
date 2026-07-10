@@ -59,6 +59,22 @@ export interface ParseResult {
   projectName?: string
 }
 
+export function splitCompleteJsonl(content: string): { lines: string[]; linesRead: number } {
+  const lines = content.split('\n')
+  if (content.endsWith('\n')) return { lines, linesRead: lines.length - 1 }
+
+  const lastLineIndex = lines.length - 1
+  const lastLine = lines[lastLineIndex].trim()
+  if (!lastLine) return { lines, linesRead: lastLineIndex }
+
+  try {
+    JSON.parse(lastLine)
+    return { lines, linesRead: lines.length }
+  } catch {
+    return { lines, linesRead: lastLineIndex }
+  }
+}
+
 // Normalize model names (merge aliases into canonical name)
 const MODEL_ALIASES: Record<string, string> = {
   'M-2.7': 'MiniMax-M2.7',
@@ -99,10 +115,9 @@ export function parseSessionFile(
     return { events, messages, warnings: [`Cannot read ${filePath}`], linesRead: 0 }
   }
 
-  const lines = content.split('\n')
-  let linesRead = lines.length
+  const { lines, linesRead } = splitCompleteJsonl(content)
 
-  for (let i = startLine; i < lines.length; i++) {
+  for (let i = startLine; i < linesRead; i++) {
     const line = lines[i].trim()
     if (!line) continue
 

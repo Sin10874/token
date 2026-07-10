@@ -1,7 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
-import { MessageKind, ParseResult, RawMessageEvent, RawUsageEvent } from './parser.js'
+import { MessageKind, ParseResult, RawMessageEvent, RawUsageEvent, splitCompleteJsonl } from './parser.js'
 import { validateUsageBuckets } from './token-normalization.js'
 
 /**
@@ -41,13 +41,13 @@ export function parseCodexFile(
     return { events, messages: [], warnings: [`Cannot read ${filePath}`], linesRead: 0 }
   }
 
-  const lines = content.split('\n')
-  const linesRead = lines.length
+  const { lines, linesRead } = splitCompleteJsonl(content)
 
   let prevTotal = { input: 0, output: 0, cached: 0, total: 0 }
   let turnCounter = 0
 
-  for (let i = startLine; i < lines.length; i++) {
+  for (let i = 0; i < linesRead; i++) {
+    const shouldEmit = i >= startLine
     const line = lines[i].trim()
     if (!line) continue
 
@@ -61,8 +61,8 @@ export function parseCodexFile(
     const type = parsed.type as string
     const ts = resolveTimestamp(parsed.timestamp)
 
-    if (ts && (!firstSeenAt || ts < firstSeenAt)) firstSeenAt = ts
-    if (ts && (!lastSeenAt || ts > lastSeenAt)) lastSeenAt = ts
+    if (shouldEmit && ts && (!firstSeenAt || ts < firstSeenAt)) firstSeenAt = ts
+    if (shouldEmit && ts && (!lastSeenAt || ts > lastSeenAt)) lastSeenAt = ts
 
     // Extract cwd from session_meta as fallback
     if (type === 'session_meta' && !detectedProjectName) {
@@ -75,6 +75,7 @@ export function parseCodexFile(
     }
 
     if (type === 'response_item') {
+      if (!shouldEmit) continue
       const payload = parsed.payload as Record<string, unknown> | undefined
       if (!payload) continue
 
@@ -188,7 +189,9 @@ export function parseCodexFile(
       }
       const validation = validateUsageBuckets(usage)
       if (!validation.ok) {
-        warnings.push(`Codex token_count event at line ${i + 1}: ${validation.warning}`)
+        if (shouldEmit) {
+          warnings.push(`Codex token_count event at line ${i + 1}: ${validation.warning}`)
+        }
         continue
       }
       const {
@@ -203,6 +206,7 @@ export function parseCodexFile(
       if (totalTokens === 0) continue
 
       turnCounter++
+      if (!shouldEmit) continue
 
       events.push({
         id: `codex::${sessionId}::${turnCounter}`,

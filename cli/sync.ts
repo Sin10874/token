@@ -25,7 +25,7 @@ import { HermesImportedTotals, parseHermesSession } from '../server/ingestion/he
 const BATCH_SIZE = 2000
 
 const PARSER_VERSIONS: Record<string, number> = {
-  openclaw: 1, claudeCode: 1, codex: 2,
+  openclaw: 2, claudeCode: 2, codex: 3,
   geminiCli: 1, copilotCli: 1, opencode: 1,
   kimiCode: 1, qwenCode: 1,
 }
@@ -54,6 +54,22 @@ interface CollectedSyncPayload {
   sessionIds: string[]
   warnings: string[]
   hadActivity: boolean
+}
+
+interface SyncRpcResult {
+  data?: { inserted?: number; [key: string]: unknown } | null
+  error?: { message: string } | null
+}
+
+type SyncRpc = (name: string, args: Record<string, unknown>) => PromiseLike<SyncRpcResult>
+
+interface UploadSyncPayloadOptions {
+  token: string
+  events: Record<string, unknown>[]
+  messages: Record<string, unknown>[]
+  syncStates: SyncState[]
+  rpc: SyncRpc
+  batchSize?: number
 }
 
 interface HermesRemoteTotalsRow extends HermesImportedTotals {
@@ -150,6 +166,67 @@ export function collectSyncPayload(
     warnings,
     hadActivity: result.events.length > 0 || result.messages.length > 0,
   }
+}
+
+export async function uploadSyncPayload({
+  token,
+  events,
+  messages,
+  syncStates,
+  rpc,
+  batchSize = BATCH_SIZE,
+}: UploadSyncPayloadOptions): Promise<number> {
+  let eventsInserted = 0
+
+  async function uploadEventBatch(
+    eventBatch: Record<string, unknown>[],
+    stateBatch: SyncState[],
+  ): Promise<void> {
+    const { data, error } = await rpc('tokend_upload_events', {
+      p_token: token,
+      p_events: eventBatch,
+      p_sync_states: stateBatch,
+    })
+    if (error) throw new Error(`Upload failed: ${error.message}`)
+    eventsInserted += data?.inserted || 0
+  }
+
+  if (messages.length > 0) {
+    if (events.length === 0) {
+      await uploadEventBatch([], [])
+    } else {
+      for (let i = 0; i < events.length; i += batchSize) {
+        await uploadEventBatch(events.slice(i, i + batchSize), [])
+      }
+    }
+
+    for (let i = 0; i < messages.length; i += batchSize) {
+      const { data, error } = await rpc('tokend_upload_messages', {
+        p_token: token,
+        p_messages: messages.slice(i, i + batchSize),
+      })
+      if (error) throw new Error(`Message upload failed: ${error.message}`)
+      if (data?.ok === false) {
+        throw new Error(`Message upload failed: ${String(data.error || 'unknown_error')}`)
+      }
+    }
+
+    if (syncStates.length > 0) {
+      await uploadEventBatch([], syncStates)
+    }
+    return eventsInserted
+  }
+
+  if (events.length > 0) {
+    for (let i = 0; i < events.length; i += batchSize) {
+      const isLast = i + batchSize >= events.length
+      await uploadEventBatch(events.slice(i, i + batchSize), isLast ? syncStates : [])
+    }
+  } else if (syncStates.length > 0) {
+    await uploadEventBatch([], syncStates)
+  }
+
+  return eventsInserted
 }
 
 async function getRemoteHermesTotals(token: string, sessionIds: string[]): Promise<Map<string, HermesImportedTotals>> {
@@ -336,42 +413,14 @@ export async function runCloudSync(token: string): Promise<SyncStats> {
     }
   }
 
-  // 3. Upload in batches
-  if (allEvents.length > 0) {
-    for (let i = 0; i < allEvents.length; i += BATCH_SIZE) {
-      const batch = allEvents.slice(i, i + BATCH_SIZE)
-      const isLast = i + BATCH_SIZE >= allEvents.length
-      const { data, error } = await supabase.rpc('tokend_upload_events', {
-        p_token: token,
-        p_events: batch,
-        p_sync_states: isLast ? allSyncStates : [],
-      })
-      if (error) throw new Error(`Upload failed: ${error.message}`)
-      stats.eventsInserted += data?.inserted || 0
-    }
-  } else if (allSyncStates.length > 0) {
-    // No new events but still update sync states
-    await supabase.rpc('tokend_upload_events', {
-      p_token: token,
-      p_events: [],
-      p_sync_states: allSyncStates,
-    })
-  }
-
-  // 3b. Upload message events in batches
-  if (allMessages.length > 0) {
-    for (let i = 0; i < allMessages.length; i += BATCH_SIZE) {
-      const batch = allMessages.slice(i, i + BATCH_SIZE)
-      try {
-        await supabase.rpc('tokend_upload_messages', {
-          p_token: token,
-          p_messages: batch,
-        })
-      } catch {
-        // Silently skip if RPC doesn't exist yet
-      }
-    }
-  }
+  // 3. Upload payloads before committing sync cursors.
+  stats.eventsInserted += await uploadSyncPayload({
+    token,
+    events: allEvents,
+    messages: allMessages,
+    syncStates: allSyncStates,
+    rpc: (name, args) => supabase.rpc(name, args),
+  })
 
   // 4. Rebuild sessions
   if (sessionIds.size > 0) {

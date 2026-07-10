@@ -1,7 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
-import { ParseResult, RawMessageEvent, RawUsageEvent } from './parser.js'
+import { ParseResult, RawMessageEvent, RawUsageEvent, splitCompleteJsonl } from './parser.js'
 import { validateUsageBuckets } from './token-normalization.js'
 
 /**
@@ -39,10 +39,9 @@ export function parseClaudeCodeFile(
     return { events, messages: [], warnings: [`Cannot read ${filePath}`], linesRead: 0 }
   }
 
-  const lines = content.split('\n')
-  const linesRead = lines.length
+  const { lines, linesRead } = splitCompleteJsonl(content)
 
-  for (let i = startLine; i < lines.length; i++) {
+  for (let i = startLine; i < linesRead; i++) {
     const line = lines[i].trim()
     if (!line) continue
 

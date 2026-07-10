@@ -13,7 +13,7 @@ import { parseOpencodeFile } from '../server/ingestion/opencode-parser.ts'
 import { parseSessionFile } from '../server/ingestion/parser.ts'
 import { parseQwenCodeFile } from '../server/ingestion/qwen-code-parser.ts'
 import { validateUsageBuckets } from '../server/ingestion/token-normalization.ts'
-import { collectSyncPayload } from '../cli/sync.ts'
+import { collectSyncPayload, uploadSyncPayload } from '../cli/sync.ts'
 import type { ParseResult, RawUsageEvent } from '../server/ingestion/parser.ts'
 
 // Kept separate because ingestion-regression.ts statically imports legacy API modules
@@ -399,12 +399,476 @@ function testCollectRejectsInfinityButRetainsProgress() {
   assert.match(collected.warnings[0], /\binputTokens\b/)
 }
 
-testValidUsageBucketsAreReturnedUnchanged()
-testInvalidUsageBucketsAreRejectedByExactName()
-testCodexConvertsInclusiveCountersExactlyOnce()
-testCodexRejectsCachedTokensAboveRawInputOnce()
-testClaudeKeepsIndependentCacheColumns()
-testClaudeRejectsNegativeCacheWriteOnce()
-testUnprovenParsersUseUnknownTokenSemantics()
-testCollectRejectsInfinityButRetainsProgress()
-console.log('token semantics regression tests passed')
+interface IncrementalFixture {
+  name: string
+  messageLine: string
+  usageLine: string
+  parse: (filePath: string, startLine: number) => ParseResult
+}
+
+function incrementalFixtures(): IncrementalFixture[] {
+  const genericMessage = JSON.stringify({
+    id: 'generic-user',
+    timestamp: '2026-07-10T00:00:00.000Z',
+    type: 'message',
+    message: { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+  })
+  const genericUsage = JSON.stringify({
+    id: 'generic-assistant',
+    timestamp: '2026-07-10T00:00:01.000Z',
+    type: 'message',
+    message: {
+      role: 'assistant',
+      model: 'gpt-5.4',
+      provider: 'openai',
+      usage: { input: 10, output: 5, totalTokens: 15 },
+    },
+  })
+  const claudeMessage = JSON.stringify({
+    sessionId: 'claude-incremental',
+    timestamp: '2026-07-10T00:00:00.000Z',
+    type: 'user',
+    uuid: 'claude-user',
+    message: { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+  })
+  const claudeUsage = JSON.stringify({
+    sessionId: 'claude-incremental',
+    timestamp: '2026-07-10T00:00:01.000Z',
+    type: 'assistant',
+    uuid: 'claude-assistant',
+    message: {
+      role: 'assistant',
+      model: 'claude-opus-4-6',
+      usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 1, cache_read_input_tokens: 2 },
+    },
+  })
+  const codexMessage = JSON.stringify({
+    timestamp: '2026-07-10T00:00:00.000Z',
+    type: 'response_item',
+    payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
+  })
+  const codexUsageRecord = {
+    input_tokens: 10,
+    cached_input_tokens: 2,
+    output_tokens: 5,
+    reasoning_output_tokens: 1,
+    total_tokens: 15,
+  }
+  const codexUsage = JSON.stringify({
+    timestamp: '2026-07-10T00:00:01.000Z',
+    type: 'event_msg',
+    payload: {
+      type: 'token_count',
+      info: { total_token_usage: codexUsageRecord, last_token_usage: codexUsageRecord },
+    },
+  })
+
+  return [
+    {
+      name: 'OpenClaw',
+      messageLine: genericMessage,
+      usageLine: genericUsage,
+      parse: (filePath, startLine) => parseSessionFile(
+        filePath,
+        'generic-incremental',
+        undefined,
+        'agent',
+        'webchat',
+        startLine,
+      ),
+    },
+    {
+      name: 'Claude Code',
+      messageLine: claudeMessage,
+      usageLine: claudeUsage,
+      parse: (filePath, startLine) => parseClaudeCodeFile(
+        filePath,
+        'claude-incremental',
+        '-Users-xinzechao-project',
+        startLine,
+      ),
+    },
+    {
+      name: 'Codex',
+      messageLine: codexMessage,
+      usageLine: codexUsage,
+      parse: (filePath, startLine) => parseCodexFile(
+        filePath,
+        'codex-incremental',
+        null,
+        '/Users/xinzechao/project',
+        startLine,
+      ),
+    },
+  ]
+}
+
+function testTrailingNewlineCursorAllowsNextCompleteUsageLine() {
+  for (const fixture of incrementalFixtures()) {
+    const filePath = tempFile(
+      `tokend-${fixture.name.toLowerCase().replace(/ /g, '-')}-cursor-`,
+      'session.jsonl',
+      `${fixture.messageLine}\n`,
+    )
+    const first = fixture.parse(filePath, 0)
+    assert.equal(first.linesRead, 1, `${fixture.name} should not count the trailing empty segment`)
+
+    fs.appendFileSync(filePath, `${fixture.usageLine}\n`, 'utf8')
+    const second = fixture.parse(filePath, first.linesRead)
+    assert.equal(second.events.length, 1, `${fixture.name} should collect the appended usage line`)
+  }
+}
+
+function testCompleteInvalidUsageAdvancesCursorOnce() {
+  const invalidLine = JSON.stringify({
+    id: 'invalid-assistant',
+    timestamp: '2026-07-10T00:00:01.000Z',
+    type: 'message',
+    message: {
+      role: 'assistant',
+      model: 'gpt-5.4',
+      provider: 'openai',
+      usage: { input: -1, output: 5, totalTokens: 4 },
+    },
+  })
+  const filePath = tempFile('tokend-complete-invalid-cursor-', 'session.jsonl', `${invalidLine}\n`)
+  const first = parseSessionFile(filePath, 'invalid-session', undefined, 'agent', 'webchat')
+  const firstCollected = collectSyncPayload(first, filePath, 'openclaw')
+
+  assert.equal(first.linesRead, 1)
+  assert.equal(firstCollected.uploadEvents.length, 0)
+  assert.equal(firstCollected.warnings.length, 1)
+
+  const second = parseSessionFile(
+    filePath,
+    'invalid-session',
+    undefined,
+    'agent',
+    'webchat',
+    first.linesRead,
+  )
+  const secondCollected = collectSyncPayload(second, filePath, 'openclaw')
+  assert.equal(second.events.length, 0)
+  assert.equal(secondCollected.warnings.length, 0)
+}
+
+function testPartialJsonCursorWaitsForCompletion() {
+  for (const fixture of incrementalFixtures()) {
+    const splitAt = Math.floor(fixture.usageLine.length / 2)
+    const filePath = tempFile(
+      `tokend-${fixture.name.toLowerCase().replace(/ /g, '-')}-partial-`,
+      'session.jsonl',
+      `${fixture.messageLine}\n${fixture.usageLine.slice(0, splitAt)}`,
+    )
+    const first = fixture.parse(filePath, 0)
+    assert.equal(first.messages.length, 1, `${fixture.name} should retain the complete message`)
+    assert.equal(first.events.length, 0, `${fixture.name} should not emit the partial usage`)
+    assert.equal(first.linesRead, 1, `${fixture.name} should leave the partial line uncommitted`)
+
+    fs.appendFileSync(filePath, `${fixture.usageLine.slice(splitAt)}\n`, 'utf8')
+    const second = fixture.parse(filePath, first.linesRead)
+    assert.equal(second.events.length, 1, `${fixture.name} should collect usage after completion`)
+  }
+}
+
+function codexTokenLine(
+  timestamp: string,
+  totalUsage: Record<string, number>,
+  lastUsage: Record<string, number>,
+): string {
+  return JSON.stringify({
+    timestamp,
+    type: 'event_msg',
+    payload: {
+      type: 'token_count',
+      info: { total_token_usage: totalUsage, last_token_usage: lastUsage },
+    },
+  })
+}
+
+function testCodexIncrementalIdsMatchFullParse() {
+  const firstUsage = {
+    input_tokens: 10,
+    cached_input_tokens: 2,
+    output_tokens: 5,
+    reasoning_output_tokens: 1,
+    total_tokens: 15,
+  }
+  const secondLastUsage = {
+    input_tokens: 10,
+    cached_input_tokens: 2,
+    output_tokens: 5,
+    reasoning_output_tokens: 1,
+    total_tokens: 15,
+  }
+  const secondTotalUsage = {
+    input_tokens: 20,
+    cached_input_tokens: 4,
+    output_tokens: 10,
+    reasoning_output_tokens: 2,
+    total_tokens: 30,
+  }
+  const firstLine = codexTokenLine('2026-07-10T00:00:01.000Z', firstUsage, firstUsage)
+  const secondLine = codexTokenLine('2026-07-10T00:00:02.000Z', secondTotalUsage, secondLastUsage)
+  const filePath = tempFile('tokend-codex-id-cursor-', 'session.jsonl', `${firstLine}\n`)
+
+  const first = parseCodexFile(filePath, 'codex-id-session', null, '/Users/xinzechao/project')
+  assert.equal(first.events.length, 1)
+
+  fs.appendFileSync(filePath, `${secondLine}\n`, 'utf8')
+  const second = parseCodexFile(
+    filePath,
+    'codex-id-session',
+    null,
+    '/Users/xinzechao/project',
+    first.linesRead,
+  )
+  assert.equal(second.events.length, 1)
+  assert.notEqual(second.events[0].id, first.events[0].id)
+
+  const full = parseCodexFile(filePath, 'codex-id-session', null, '/Users/xinzechao/project')
+  assert.deepEqual(
+    [first.events[0].id, second.events[0].id],
+    full.events.map(event => event.id),
+  )
+}
+
+function testIncrementalParserVersionsInvalidateLegacyCursors() {
+  const emptyResult: ParseResult = {
+    events: [],
+    messages: [],
+    warnings: [],
+    linesRead: 0,
+  }
+  const expectedVersions = [
+    ['openclaw', 2],
+    ['claudeCode', 2],
+    ['codex', 3],
+  ] as const
+
+  for (const [parserKey, expectedVersion] of expectedVersions) {
+    const collected = collectSyncPayload(emptyResult, `/tmp/${parserKey}.jsonl`, parserKey)
+    assert.equal(collected.syncStates[0].parserVersion, expectedVersion)
+  }
+}
+
+async function testMessageUploadsCompleteBeforeCursorCommit() {
+  const calls: Array<{ name: string; args: Record<string, unknown> }> = []
+  const events = [{ id: 'event-1' }]
+  const messages = [{ id: 'message-1' }]
+  const syncStates = [{ sourcePathHash: 'hash-1', lastProcessedLines: 7, parserVersion: 2 }]
+
+  const eventsInserted = await uploadSyncPayload({
+    token: 'token-1',
+    events,
+    messages,
+    syncStates,
+    rpc: async (name: string, args: Record<string, unknown>) => {
+      calls.push({ name, args })
+      return name === 'tokend_upload_events'
+        ? { data: { inserted: calls.length === 1 ? 1 : 0 }, error: null }
+        : { data: { ok: true }, error: null }
+    },
+  })
+
+  assert.equal(eventsInserted, 1)
+  assert.deepEqual(calls.map(call => call.name), [
+    'tokend_upload_events',
+    'tokend_upload_messages',
+    'tokend_upload_events',
+  ])
+  assert.deepEqual(calls[0].args, {
+    p_token: 'token-1',
+    p_events: events,
+    p_sync_states: [],
+  })
+  assert.deepEqual(calls[1].args, {
+    p_token: 'token-1',
+    p_messages: messages,
+  })
+  assert.deepEqual(calls[2].args, {
+    p_token: 'token-1',
+    p_events: [],
+    p_sync_states: syncStates,
+  })
+}
+
+async function testMessageRpcErrorLeavesCursorUncommittedAndRetryable() {
+  const events = [{ id: 'event-retry' }]
+  const messages = [{ id: 'message-retry' }]
+  const syncStates = [{ sourcePathHash: 'hash-retry', lastProcessedLines: 8, parserVersion: 2 }]
+  const failedCalls: Array<{ name: string; args: Record<string, unknown> }> = []
+
+  await assert.rejects(
+    uploadSyncPayload({
+      token: 'token-retry',
+      events,
+      messages,
+      syncStates,
+      rpc: async (name: string, args: Record<string, unknown>) => {
+        failedCalls.push({ name, args })
+        if (name === 'tokend_upload_messages') {
+          return { data: null, error: { message: 'message write failed' } }
+        }
+        return { data: { inserted: 1 }, error: null }
+      },
+    }),
+    /message.*write failed/i,
+  )
+
+  assert.deepEqual(failedCalls.map(call => call.name), [
+    'tokend_upload_events',
+    'tokend_upload_messages',
+  ])
+  assert.equal(
+    failedCalls.some(call => Array.isArray(call.args.p_sync_states) && call.args.p_sync_states.length > 0),
+    false,
+  )
+
+  const retryCalls: Array<{ name: string; args: Record<string, unknown> }> = []
+  await uploadSyncPayload({
+    token: 'token-retry',
+    events,
+    messages,
+    syncStates,
+    rpc: async (name: string, args: Record<string, unknown>) => {
+      retryCalls.push({ name, args })
+      return { data: { inserted: name === 'tokend_upload_events' ? 1 : 0 }, error: null }
+    },
+  })
+  assert.deepEqual(retryCalls.map(call => call.name), [
+    'tokend_upload_events',
+    'tokend_upload_messages',
+    'tokend_upload_events',
+  ])
+  assert.deepEqual(retryCalls[2].args.p_sync_states, syncStates)
+}
+
+async function testMessageDataErrorLeavesCursorUncommitted() {
+  const calls: Array<{ name: string; args: Record<string, unknown> }> = []
+
+  await assert.rejects(
+    uploadSyncPayload({
+      token: 'data-error-token',
+      events: [{ id: 'data-error-event' }],
+      messages: [{ id: 'data-error-message' }],
+      syncStates: [{ sourcePathHash: 'data-error', lastProcessedLines: 9, parserVersion: 2 }],
+      rpc: async (name: string, args: Record<string, unknown>) => {
+        calls.push({ name, args })
+        if (name === 'tokend_upload_messages') {
+          return { data: { ok: false, error: 'invalid_token' }, error: null }
+        }
+        return { data: { ok: true, inserted: 1 }, error: null }
+      },
+    }),
+    /message.*invalid_token/i,
+  )
+
+  assert.deepEqual(calls.map(call => call.name), [
+    'tokend_upload_events',
+    'tokend_upload_messages',
+  ])
+}
+
+async function testMessageOnlyPayloadStillCommitsCursorLast() {
+  const calls: Array<{ name: string; args: Record<string, unknown> }> = []
+  const syncStates = [{ sourcePathHash: 'message-only', lastProcessedLines: 3, parserVersion: 2 }]
+
+  await uploadSyncPayload({
+    token: 'message-only-token',
+    events: [],
+    messages: [{ id: 'message-only' }],
+    syncStates,
+    rpc: async (name: string, args: Record<string, unknown>) => {
+      calls.push({ name, args })
+      return { data: { inserted: 0 }, error: null }
+    },
+  })
+
+  assert.deepEqual(calls.map(call => call.name), [
+    'tokend_upload_events',
+    'tokend_upload_messages',
+    'tokend_upload_events',
+  ])
+  assert.deepEqual(calls[0].args.p_events, [])
+  assert.deepEqual(calls[0].args.p_sync_states, [])
+  assert.deepEqual(calls[2].args.p_sync_states, syncStates)
+}
+
+async function testMessageNetworkThrowLeavesCursorUncommitted() {
+  const calls: Array<{ name: string; args: Record<string, unknown> }> = []
+
+  await assert.rejects(
+    uploadSyncPayload({
+      token: 'network-token',
+      events: [{ id: 'network-event' }],
+      messages: [{ id: 'network-message' }],
+      syncStates: [{ sourcePathHash: 'network', lastProcessedLines: 4, parserVersion: 2 }],
+      rpc: async (name: string, args: Record<string, unknown>) => {
+        calls.push({ name, args })
+        if (name === 'tokend_upload_messages') throw new Error('network down')
+        return { data: { inserted: 1 }, error: null }
+      },
+    }),
+    /network down/i,
+  )
+
+  assert.deepEqual(calls.map(call => call.name), [
+    'tokend_upload_events',
+    'tokend_upload_messages',
+  ])
+  assert.equal(
+    calls.some(call => Array.isArray(call.args.p_sync_states) && call.args.p_sync_states.length > 0),
+    false,
+  )
+}
+
+async function testNoMessagePayloadKeepsEventsAndCursorAtomic() {
+  const calls: Array<{ name: string; args: Record<string, unknown> }> = []
+  const events = [{ id: 'atomic-event' }]
+  const syncStates = [{ sourcePathHash: 'atomic', lastProcessedLines: 5, parserVersion: 2 }]
+
+  await uploadSyncPayload({
+    token: 'atomic-token',
+    events,
+    messages: [],
+    syncStates,
+    rpc: async (name: string, args: Record<string, unknown>) => {
+      calls.push({ name, args })
+      return { data: { inserted: 1 }, error: null }
+    },
+  })
+
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].name, 'tokend_upload_events')
+  assert.deepEqual(calls[0].args.p_events, events)
+  assert.deepEqual(calls[0].args.p_sync_states, syncStates)
+}
+
+async function main() {
+  testValidUsageBucketsAreReturnedUnchanged()
+  testInvalidUsageBucketsAreRejectedByExactName()
+  testCodexConvertsInclusiveCountersExactlyOnce()
+  testCodexRejectsCachedTokensAboveRawInputOnce()
+  testClaudeKeepsIndependentCacheColumns()
+  testClaudeRejectsNegativeCacheWriteOnce()
+  testUnprovenParsersUseUnknownTokenSemantics()
+  testCollectRejectsInfinityButRetainsProgress()
+  testTrailingNewlineCursorAllowsNextCompleteUsageLine()
+  testCompleteInvalidUsageAdvancesCursorOnce()
+  testPartialJsonCursorWaitsForCompletion()
+  testCodexIncrementalIdsMatchFullParse()
+  testIncrementalParserVersionsInvalidateLegacyCursors()
+  await testMessageUploadsCompleteBeforeCursorCommit()
+  await testMessageRpcErrorLeavesCursorUncommittedAndRetryable()
+  await testMessageDataErrorLeavesCursorUncommitted()
+  await testMessageOnlyPayloadStillCommitsCursorLast()
+  await testMessageNetworkThrowLeavesCursorUncommitted()
+  await testNoMessagePayloadKeepsEventsAndCursorAtomic()
+  console.log('token semantics regression tests passed')
+}
+
+void main().catch(error => {
+  console.error(error)
+  process.exitCode = 1
+})

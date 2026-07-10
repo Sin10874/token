@@ -1667,9 +1667,15 @@ INSERT INTO public.tokend_usage_events (
     'reported', 'standard', 'client-report-v1', NULL, 'disjoint', 0, 'reconciled'),
   ('rpc-float-reconciled', 'RPC_FLOAT', (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT - 7000,
     'rpc-float-s', 'float-key', 'float-agent', 'openai', 'gpt-5.6-sol', 'coding',
-    1, 0, 0, 0, 0, 1,
+    75009, 15208, 9826, 19405, 65473, 184921,
     0.375045::REAL, 0.45624::REAL, 0.29478::REAL, 0.0097025::REAL, 0.409206::REAL,
     1.54497::REAL, 'stop', 'float-project',
+    'reported', 'standard', 'client-report-v1', NULL, 'disjoint', 0, NULL),
+  ('rpc-float-bound-reconciled', 'RPC_FLOAT', (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT - 6750,
+    'rpc-float-bound-s', 'float-bound-key', 'float-agent', 'openai', 'gpt-5.6-sol', 'coding',
+    67569, 12815, 11452, 35374, 2074, 129284,
+    0.337845::REAL, 0.38445::REAL, 0.34356::REAL, 0.017687::REAL, 0.0129625::REAL,
+    1.0965::REAL, 'stop', 'float-bound-project',
     'reported', 'standard', 'client-report-v1', NULL, 'disjoint', 0, NULL),
   ('rpc-tiny-base-invalid', 'RPC_TINY_BASE', (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT - 6500,
     'rpc-tiny-base-s', 'tiny-key', 'tiny-agent', 'openai', 'gpt-5.6-sol', 'coding',
@@ -1990,10 +1996,15 @@ SELECT results_eq(
         OR effective_cache_write_cost IS DISTINCT FROM cache_write_cost::NUMERIC,
       (public.tokend_get_summary_v5('rpc-float')::JSONB->>'breakdownInvalidCount')::BIGINT
     FROM public.tokend_effective_usage_events
-    WHERE member_code = 'RPC_FLOAT' AND id = 'rpc-float-reconciled'
+    WHERE member_code = 'RPC_FLOAT'
+    ORDER BY id
   $actual$,
-  $expected$ VALUES ('reconciled'::TEXT, 0::NUMERIC, true, true, 0::BIGINT) $expected$,
-  'REAL base costs use epsilon without inventing invalid or unallocated breakdowns'
+  $expected$
+    VALUES
+      ('reconciled'::TEXT, 0::NUMERIC, true, true, 0::BIGINT),
+      ('reconciled'::TEXT, 0::NUMERIC, true, true, 0::BIGINT)
+  $expected$,
+  'REAL base costs use the aggregate float4 rounding bound and normalize exactly'
 );
 
 SELECT results_eq(

@@ -722,7 +722,7 @@ function testEffectiveRelationHasOneAuditablePrecedenceRule(): void {
   )
   assert.match(
     definition,
-    /CASE\s+WHEN costed\.effective_source IN \('reported', 'legacy'\)\s+THEN \(\s*ABS\(costed\.selected_total_cost\)\s*\+ ABS\(costed\.selected_input_cost\)\s*\+ ABS\(costed\.selected_output_cost\)\s*\+ ABS\(costed\.selected_reasoning_cost\)\s*\+ ABS\(costed\.selected_cache_read_cost\)\s*\+ ABS\(costed\.selected_cache_write_cost\)\s*\) \* 0\.000002::NUMERIC\s+ELSE 0::NUMERIC\s+END AS comparison_epsilon/i,
+    /CASE\s+WHEN costed\.effective_source IN \('reported', 'legacy'\)\s+THEN \(\s*ABS\(costed\.selected_total_cost\)\s*\+ ABS\(costed\.selected_input_cost\)\s*\+ ABS\(costed\.selected_output_cost\)\s*\+ ABS\(costed\.selected_reasoning_cost\)\s*\+ ABS\(costed\.selected_cache_read_cost\)\s*\+ ABS\(costed\.selected_cache_write_cost\)\s*\) \* 0\.000005::NUMERIC\s+ELSE 0::NUMERIC\s+END AS comparison_epsilon/i,
   )
   assert.doesNotMatch(definition, /GREATEST\(\s*0\.000001::NUMERIC/i)
   assert.match(
@@ -947,7 +947,7 @@ function testPgTapContractIsSelfContained(): void {
     'sessions period selection and limit remain exact',
     'service_role cannot execute any vNext RPC',
     'invalid timezone falls back to Asia Shanghai across timezone-aware RPCs',
-    'REAL base costs use epsilon without inventing invalid or unallocated breakdowns',
+    'REAL base costs use the aggregate float4 rounding bound and normalize exactly',
     'small significant base mismatch is not hidden by a fixed epsilon floor',
     'NUMERIC revision discrepancies use zero epsilon',
     'session detail event token arithmetic widens before summing five buckets',

@@ -160,6 +160,7 @@ WITH selected AS (
       - costed.selected_input_cost - costed.selected_output_cost
       - costed.selected_reasoning_cost - costed.selected_cache_read_cost
       - costed.selected_cache_write_cost AS comparison_delta,
+    -- Six independently rounded float4 values need an aggregate 5 ppm bound.
     CASE
       WHEN costed.effective_source IN ('reported', 'legacy')
         THEN (
@@ -169,7 +170,7 @@ WITH selected AS (
           + ABS(costed.selected_reasoning_cost)
           + ABS(costed.selected_cache_read_cost)
           + ABS(costed.selected_cache_write_cost)
-        ) * 0.000002::NUMERIC
+        ) * 0.000005::NUMERIC
       ELSE 0::NUMERIC
     END AS comparison_epsilon,
     CASE

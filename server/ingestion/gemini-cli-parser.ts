@@ -131,6 +131,7 @@ export function parseGeminiCliFile(
       reasoningTokens,
       cacheReadTokens,
       cacheWriteTokens: 0,
+      tokenSemantics: 'unknown',
       totalTokens,
       inputCost: 0,
       outputCost: 0,

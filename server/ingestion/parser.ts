@@ -1,4 +1,5 @@
 import fs from 'fs'
+import type { BreakdownStatus, PricingStatus, PricingTier, TokenSemantics } from '../../cli/pricing/types.js'
 
 export interface RawUsageEvent {
   id: string
@@ -14,6 +15,7 @@ export interface RawUsageEvent {
   reasoningTokens: number
   cacheReadTokens: number
   cacheWriteTokens: number
+  tokenSemantics: TokenSemantics
   totalTokens: number
   inputCost: number
   outputCost: number
@@ -21,6 +23,12 @@ export interface RawUsageEvent {
   cacheReadCost: number
   cacheWriteCost: number
   totalCost: number
+  pricingStatus?: PricingStatus
+  pricingTier?: PricingTier
+  priceVersion?: string | null
+  matchedModelId?: string | null
+  unallocatedCost?: number
+  breakdownStatus?: BreakdownStatus
   sourcePath: string
   stopReason: string
 }
@@ -228,6 +236,7 @@ export function parseSessionFile(
       reasoningTokens: 0,
       cacheReadTokens,
       cacheWriteTokens,
+      tokenSemantics: 'unknown',
       totalTokens,
       inputCost,
       outputCost,

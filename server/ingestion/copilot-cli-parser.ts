@@ -87,6 +87,7 @@ export function parseCopilotCliFile(filePath: string, sessionId: string): ParseR
         reasoningTokens: 0,
         cacheReadTokens: cachedRead,
         cacheWriteTokens,
+        tokenSemantics: 'unknown',
         totalTokens,
         inputCost: 0,
         outputCost: 0,

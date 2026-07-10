@@ -71,6 +71,7 @@ function testCodexParserNormalizesOpenAIUsage() {
   assert.equal(event.outputTokens, 192)
   assert.equal(event.reasoningTokens, 90)
   assert.equal(event.cacheReadTokens, 13184)
+  assert.equal(event.tokenSemantics, 'disjoint')
   assert.equal(event.totalTokens, 25633)
 }
 
@@ -102,6 +103,12 @@ function testClaudeCodeParserKeepsSessionRootProjectWhenCwdEntersSubdir() {
   assert.equal(result.events.length, 1)
   assert.equal(result.projectName, 'One')
   assert.equal(result.events[0].agent, 'One')
+  assert.equal(result.events[0].inputTokens, 120)
+  assert.equal(result.events[0].outputTokens, 80)
+  assert.equal(result.events[0].reasoningTokens, 0)
+  assert.equal(result.events[0].cacheReadTokens, 20)
+  assert.equal(result.events[0].cacheWriteTokens, 10)
+  assert.equal(result.events[0].tokenSemantics, 'disjoint')
 }
 
 function testSessionUpsertUsesAuthoritativeUsageTotals() {
@@ -317,6 +324,7 @@ function testGeminiCliParserNormalizesCachedAndThoughtTokens() {
   assert.equal(result.events[0].outputTokens, 0)
   assert.equal(result.events[0].reasoningTokens, 60)
   assert.equal(result.events[0].cacheReadTokens, 6347)
+  assert.equal(result.events[0].tokenSemantics, 'unknown')
   assert.equal(result.events[0].totalTokens, 8188)
 }
 
@@ -347,6 +355,7 @@ function testCopilotCliParserSeparatesCacheReadAndWrite() {
   assert.equal(result.events[0].inputTokens, 700)
   assert.equal(result.events[0].cacheReadTokens, 300)
   assert.equal(result.events[0].cacheWriteTokens, 200)
+  assert.equal(result.events[0].tokenSemantics, 'unknown')
   assert.equal(result.events[0].totalTokens, 1600)
 }
 
@@ -374,6 +383,7 @@ function testOpencodeJsonParserIncludesReasoningAndCacheWrite() {
   assert.equal(result.events[0].reasoningTokens, 3)
   assert.equal(result.events[0].cacheReadTokens, 517)
   assert.equal(result.events[0].cacheWriteTokens, 25501)
+  assert.equal(result.events[0].tokenSemantics, 'unknown')
   assert.equal(result.events[0].totalTokens, 26290)
 }
 
@@ -1021,6 +1031,7 @@ function testKimiCodeParserUsesStatusUpdateTokenUsage() {
   assert.equal(result.events[0].inputTokens, 433)
   assert.equal(result.events[0].outputTokens, 179)
   assert.equal(result.events[0].cacheReadTokens, 14336)
+  assert.equal(result.events[0].tokenSemantics, 'unknown')
   assert.equal(result.events[0].totalTokens, 14948)
 }
 
@@ -1053,6 +1064,7 @@ function testQwenCodeParserAcceptsGenericStatusUpdateJsonl() {
   assert.equal(result.events[0].inputTokens, 1200)
   assert.equal(result.events[0].cacheReadTokens, 500)
   assert.equal(result.events[0].cacheWriteTokens, 100)
+  assert.equal(result.events[0].tokenSemantics, 'unknown')
   assert.equal(result.events[0].totalTokens, 2100)
 }
 

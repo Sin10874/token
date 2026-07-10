@@ -201,6 +201,7 @@ export function parseKimiCodeFile(filePath: string, sessionId: string): ParseRes
       reasoningTokens: 0,
       cacheReadTokens,
       cacheWriteTokens,
+      tokenSemantics: 'unknown',
       totalTokens,
       inputCost: 0,
       outputCost: 0,

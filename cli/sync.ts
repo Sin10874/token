@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { supabase } from './supabase-client.js'
 import { applyEstimatedCosts } from './prices.js'
 import type { RawUsageEvent, ParseResult } from '../server/ingestion/parser.js'
+import { validateUsageBuckets } from '../server/ingestion/token-normalization.js'
 import { discoverSessionFiles } from '../server/ingestion/scanner.js'
 import { parseSessionFile } from '../server/ingestion/parser.js'
 import { discoverClaudeCodeFiles } from '../server/ingestion/claude-code-scanner.js'
@@ -42,6 +43,19 @@ interface SyncState {
   parserVersion: number
 }
 
+interface CollectOptions {
+  trackSyncState?: boolean
+}
+
+interface CollectedSyncPayload {
+  uploadEvents: Record<string, unknown>[]
+  uploadMessages: Record<string, unknown>[]
+  syncStates: SyncState[]
+  sessionIds: string[]
+  warnings: string[]
+  hadActivity: boolean
+}
+
 interface HermesRemoteTotalsRow extends HermesImportedTotals {
   sessionId: string
 }
@@ -65,6 +79,7 @@ function stripEvent(e: RawUsageEvent, project?: string): Record<string, unknown>
     reasoningTokens: e.reasoningTokens,
     cacheReadTokens: e.cacheReadTokens,
     cacheWriteTokens: e.cacheWriteTokens,
+    tokenSemantics: e.tokenSemantics,
     totalTokens: e.totalTokens,
     inputCost: e.inputCost,
     outputCost: e.outputCost,
@@ -72,10 +87,68 @@ function stripEvent(e: RawUsageEvent, project?: string): Record<string, unknown>
     cacheReadCost: e.cacheReadCost,
     cacheWriteCost: e.cacheWriteCost,
     totalCost: e.totalCost,
+    pricingStatus: e.pricingStatus,
+    pricingTier: e.pricingTier,
+    priceVersion: e.priceVersion,
+    matchedModelId: e.matchedModelId,
+    unallocatedCost: e.unallocatedCost,
+    breakdownStatus: e.breakdownStatus,
     stopReason: e.stopReason,
     // codex 等渠道的 title 可能是整段 prompt（实测 46KB），超过
     // Postgres 索引行 8191 字节上限会导致整批上传失败
     project: project ? project.slice(0, 256) : null,
+  }
+}
+
+export function collectSyncPayload(
+  result: ParseResult,
+  filePath: string,
+  parserKey: string,
+  project?: string,
+  options: CollectOptions = {},
+): CollectedSyncPayload {
+  const uploadEvents: Record<string, unknown>[] = []
+  const sessionIds: string[] = []
+  const warnings = result.warnings.map(warning => `${filePath}: ${warning}`)
+
+  for (const event of result.events) {
+    const validation = validateUsageBuckets(event)
+    if (!validation.ok) {
+      warnings.push(`${filePath}: skipped usage event ${event.id}: ${validation.warning}`)
+      continue
+    }
+
+    const pricedEvent = { ...event }
+    applyEstimatedCosts(pricedEvent)
+    uploadEvents.push(stripEvent(pricedEvent, project))
+    sessionIds.push(event.sessionId)
+  }
+
+  const uploadMessages = result.messages.map(message => ({
+    id: message.id,
+    timestampMs: message.timestampMs,
+    sessionId: message.sessionId,
+    agent: message.agent,
+    channel: message.channel,
+    kind: message.kind,
+  }))
+
+  const parserVersion = PARSER_VERSIONS[parserKey] || 1
+  const syncStates = options.trackSyncState === false
+    ? []
+    : [{
+        sourcePathHash: hashPath(filePath),
+        lastProcessedLines: result.linesRead,
+        parserVersion,
+      }]
+
+  return {
+    uploadEvents,
+    uploadMessages,
+    syncStates,
+    sessionIds,
+    warnings,
+    hadActivity: result.events.length > 0 || result.messages.length > 0,
   }
 }
 
@@ -147,32 +220,17 @@ export async function runCloudSync(token: string): Promise<SyncStats> {
     filePath: string,
     parserKey: string,
     project?: string,
-    options: { trackSyncState?: boolean } = {},
+    options: CollectOptions = {},
   ) {
-    const pv = PARSER_VERSIONS[parserKey] || 1
-    for (const event of result.events) {
-      applyEstimatedCosts(event)
-      allEvents.push(stripEvent(event, project))
-      sessionIds.add(event.sessionId)
+    const collected = collectSyncPayload(result, filePath, parserKey, project, options)
+    allEvents.push(...collected.uploadEvents)
+    allMessages.push(...collected.uploadMessages)
+    allSyncStates.push(...collected.syncStates)
+    for (const sessionId of collected.sessionIds) sessionIds.add(sessionId)
+    for (const warning of collected.warnings) {
+      console.warn(`[tokend sync] ${warning}`)
     }
-    for (const msg of result.messages) {
-      allMessages.push({
-        id: msg.id,
-        timestampMs: msg.timestampMs,
-        sessionId: msg.sessionId,
-        agent: msg.agent,
-        channel: msg.channel,
-        kind: msg.kind,
-      })
-    }
-    if (result.events.length > 0 || result.messages.length > 0) stats.filesProcessed++
-    if (options.trackSyncState !== false) {
-      allSyncStates.push({
-        sourcePathHash: hashPath(filePath),
-        lastProcessedLines: result.linesRead,
-        parserVersion: pv,
-      })
-    }
+    if (collected.hadActivity) stats.filesProcessed++
   }
 
   // 2. Run all scanners and parsers
@@ -182,7 +240,7 @@ export async function runCloudSync(token: string): Promise<SyncStats> {
   for (const f of openclawFiles) {
     const startLine = getStartLine(f.filePath, PARSER_VERSIONS.openclaw)
     const result = parseSessionFile(f.filePath, f.sessionId, f.sessionKey, f.agent, f.channel || 'unknown', startLine)
-    if (result.events.length > 0 || startLine === 0) {
+    if (result.events.length > 0 || result.messages.length > 0 || result.warnings.length > 0 || startLine === 0) {
       collect(result, f.filePath, 'openclaw')
     }
   }
@@ -192,7 +250,7 @@ export async function runCloudSync(token: string): Promise<SyncStats> {
   for (const f of ccFiles) {
     const startLine = getStartLine(f.filePath, PARSER_VERSIONS.claudeCode)
     const result = parseClaudeCodeFile(f.filePath, f.sessionId, f.project, startLine)
-    if (result.events.length > 0 || startLine === 0) {
+    if (result.events.length > 0 || result.messages.length > 0 || result.warnings.length > 0 || startLine === 0) {
       // project name is already cleaned by parser into agent field — use that
       const cleanProject = result.events.length > 0 ? result.events[0].agent : undefined
       collect(result, f.filePath, 'claudeCode', cleanProject || undefined)
@@ -204,7 +262,7 @@ export async function runCloudSync(token: string): Promise<SyncStats> {
   for (const f of codexFiles) {
     const startLine = getStartLine(f.filePath, PARSER_VERSIONS.codex)
     const result = parseCodexFile(f.filePath, f.sessionId, f.title, f.cwd, startLine)
-    if (result.events.length > 0 || startLine === 0) {
+    if (result.events.length > 0 || result.messages.length > 0 || result.warnings.length > 0 || startLine === 0) {
       collect(result, f.filePath, 'codex', f.title || f.cwd || undefined)
     }
   }
@@ -213,35 +271,45 @@ export async function runCloudSync(token: string): Promise<SyncStats> {
   const geminiFiles = await discoverGeminiCliFiles()
   for (const f of geminiFiles) {
     const result = parseGeminiCliFile(f.filePath, f.sessionId)
-    if (result.events.length > 0) collect(result, f.filePath, 'geminiCli')
+    if (result.events.length > 0 || result.messages.length > 0 || result.warnings.length > 0) {
+      collect(result, f.filePath, 'geminiCli')
+    }
   }
 
   // Copilot CLI
   const copilotFiles = await discoverCopilotCliFiles()
   for (const f of copilotFiles) {
     const result = parseCopilotCliFile(f.filePath, f.sessionId)
-    if (result.events.length > 0) collect(result, f.filePath, 'copilotCli')
+    if (result.events.length > 0 || result.messages.length > 0 || result.warnings.length > 0) {
+      collect(result, f.filePath, 'copilotCli')
+    }
   }
 
   // OpenCode
   const opencodeFiles = await discoverOpencodeFiles()
   for (const f of opencodeFiles) {
     const result = parseOpencodeFile(f)
-    if (result.events.length > 0) collect(result, f.filePath, 'opencode')
+    if (result.events.length > 0 || result.messages.length > 0 || result.warnings.length > 0) {
+      collect(result, f.filePath, 'opencode')
+    }
   }
 
   // Kimi Code
   const kimiFiles = await discoverKimiCodeFiles()
   for (const f of kimiFiles) {
     const result = parseKimiCodeFile(f.filePath, f.sessionId)
-    if (result.events.length > 0) collect(result, f.filePath, 'kimiCode')
+    if (result.events.length > 0 || result.messages.length > 0 || result.warnings.length > 0) {
+      collect(result, f.filePath, 'kimiCode')
+    }
   }
 
   // Qwen Code
   const qwenFiles = await discoverQwenCodeFiles()
   for (const f of qwenFiles) {
     const result = parseQwenCodeFile(f.filePath, f.sessionId)
-    if (result.events.length > 0) collect(result, f.filePath, 'qwenCode')
+    if (result.events.length > 0 || result.messages.length > 0 || result.warnings.length > 0) {
+      collect(result, f.filePath, 'qwenCode')
+    }
   }
 
   // Hermes

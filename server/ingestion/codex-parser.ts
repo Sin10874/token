@@ -2,6 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { MessageKind, ParseResult, RawMessageEvent, RawUsageEvent } from './parser.js'
+import { validateUsageBuckets } from './token-normalization.js'
 
 /**
  * Parse Codex (CLI / App) session JSONL files.
@@ -168,12 +169,6 @@ export function parseCodexFile(
       const lastUsage = info.last_token_usage as Record<string, number> | undefined
       if (!totalUsage || !lastUsage) continue
 
-      const cachedInputTokens = lastUsage.cached_input_tokens || 0
-      const reasoningTokens = lastUsage.reasoning_output_tokens || 0
-      const inputTokens = Math.max(0, (lastUsage.input_tokens || 0) - cachedInputTokens)
-      const outputTokens = Math.max(0, (lastUsage.output_tokens || 0) - reasoningTokens)
-      const totalTokens = (lastUsage.total_tokens || 0) || (inputTokens + outputTokens + cachedInputTokens)
-
       if (totalUsage.total_tokens === prevTotal.total) continue
       prevTotal = {
         input: totalUsage.input_tokens || 0,
@@ -181,6 +176,29 @@ export function parseCodexFile(
         cached: totalUsage.cached_input_tokens || 0,
         total: totalUsage.total_tokens || 0,
       }
+
+      const cachedInputTokens = Number(lastUsage.cached_input_tokens ?? 0)
+      const reasoningTokens = Number(lastUsage.reasoning_output_tokens ?? 0)
+      const usage = {
+        inputTokens: Number(lastUsage.input_tokens ?? 0) - cachedInputTokens,
+        outputTokens: Number(lastUsage.output_tokens ?? 0) - reasoningTokens,
+        reasoningTokens,
+        cacheReadTokens: cachedInputTokens,
+        cacheWriteTokens: 0,
+      }
+      const validation = validateUsageBuckets(usage)
+      if (!validation.ok) {
+        warnings.push(`Codex token_count event at line ${i + 1}: ${validation.warning}`)
+        continue
+      }
+      const {
+        inputTokens,
+        outputTokens,
+        cacheReadTokens,
+        cacheWriteTokens,
+      } = validation.value
+      const totalTokens = Number(lastUsage.total_tokens ?? 0)
+        || (inputTokens + outputTokens + reasoningTokens + cacheReadTokens + cacheWriteTokens)
 
       if (totalTokens === 0) continue
 
@@ -198,8 +216,9 @@ export function parseCodexFile(
         inputTokens,
         outputTokens,
         reasoningTokens,
-        cacheReadTokens: cachedInputTokens,
-        cacheWriteTokens: 0,
+        cacheReadTokens,
+        cacheWriteTokens,
+        tokenSemantics: 'disjoint',
         totalTokens,
         inputCost: 0,
         outputCost: 0,

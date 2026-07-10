@@ -168,6 +168,7 @@ export function parseHermesSession(
       reasoningTokens: delta.reasoningTokens,
       cacheReadTokens: delta.cacheReadTokens,
       cacheWriteTokens: delta.cacheWriteTokens,
+      tokenSemantics: 'unknown',
       totalTokens: delta.totalTokens,
       inputCost: 0,
       outputCost: 0,

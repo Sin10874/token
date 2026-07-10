@@ -68,6 +68,7 @@ function parseUsageRecord(
     reasoningTokens,
     cacheReadTokens,
     cacheWriteTokens,
+    tokenSemantics: 'unknown',
     totalTokens,
     inputCost: 0,
     outputCost: 0,

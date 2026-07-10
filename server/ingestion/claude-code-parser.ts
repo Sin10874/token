@@ -2,6 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { ParseResult, RawMessageEvent, RawUsageEvent } from './parser.js'
+import { validateUsageBuckets } from './token-normalization.js'
 
 /**
  * Parse Claude Code conversation JSONL files.
@@ -144,11 +145,26 @@ export function parseClaudeCodeFile(
     const usage = msg.usage as Record<string, unknown> | undefined
     if (!usage) continue
 
-    const inputTokens = (usage.input_tokens as number) || 0
-    const outputTokens = (usage.output_tokens as number) || 0
-    const cacheCreationTokens = (usage.cache_creation_input_tokens as number) || 0
-    const cacheReadTokens = (usage.cache_read_input_tokens as number) || 0
-    const totalTokens = inputTokens + outputTokens + cacheCreationTokens + cacheReadTokens
+    const usageBuckets = {
+      inputTokens: Number(usage.input_tokens ?? 0),
+      outputTokens: Number(usage.output_tokens ?? 0),
+      reasoningTokens: 0,
+      cacheReadTokens: Number(usage.cache_read_input_tokens ?? 0),
+      cacheWriteTokens: Number(usage.cache_creation_input_tokens ?? 0),
+    }
+    const validation = validateUsageBuckets(usageBuckets)
+    if (!validation.ok) {
+      warnings.push(`Claude Code assistant event at line ${i + 1}: ${validation.warning}`)
+      continue
+    }
+    const {
+      inputTokens,
+      outputTokens,
+      reasoningTokens,
+      cacheReadTokens,
+      cacheWriteTokens,
+    } = validation.value
+    const totalTokens = inputTokens + outputTokens + reasoningTokens + cacheReadTokens + cacheWriteTokens
 
     if (totalTokens === 0) continue
 
@@ -168,9 +184,10 @@ export function parseClaudeCodeFile(
       channel: 'claude-code',
       inputTokens,
       outputTokens,
-      reasoningTokens: 0,
+      reasoningTokens,
       cacheReadTokens,
-      cacheWriteTokens: cacheCreationTokens,
+      cacheWriteTokens,
+      tokenSemantics: 'disjoint',
       totalTokens,
       inputCost: 0, // Costs will be calculated from model_prices during query
       outputCost: 0,

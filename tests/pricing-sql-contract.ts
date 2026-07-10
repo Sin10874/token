@@ -714,12 +714,17 @@ function testEffectiveRelationHasOneAuditablePrecedenceRule(): void {
   assert.match(precedence[0], /usage_event\.(?:total_cost|input_cost|output_cost)/i)
   assert.match(
     definition,
-    /WHEN resolved\.effective_breakdown_status\s*=\s*'invalid'\s+THEN resolved\.selected_unallocated_cost/i,
+    /WHEN resolved\.effective_breakdown_status\s*=\s*'invalid'\s+THEN 0::NUMERIC/i,
   )
   assert.match(
     definition,
-    /WHEN resolved\.effective_breakdown_status\s*=\s*'unallocated'[\s\S]*?GREATEST\([\s\S]*?resolved\.effective_total_cost[\s\S]*?0::NUMERIC/i,
+    /ELSE GREATEST\(\s*resolved\.effective_total_cost[\s\S]*?- resolved\.effective_input_cost[\s\S]*?- resolved\.effective_cache_write_cost,\s*0::NUMERIC\s*\)/i,
   )
+  assert.match(
+    definition,
+    /CASE\s+WHEN costed\.effective_input_cost \+ costed\.effective_output_cost[\s\S]*?> costed\.effective_total_cost THEN 'invalid'[\s\S]*?< costed\.effective_total_cost THEN 'unallocated'[\s\S]*?ELSE 'reconciled'\s+END AS effective_breakdown_status/i,
+  )
+  assert.doesNotMatch(definition, /selected_unallocated_cost\s*\+/i)
   assert.doesNotMatch(definition, /effective_cache_read_cost[\s\S]{0,160}(?:total_cost\s*-|-\s*[^\n]*total_cost)/i)
   assert.match(definition, /(?:usage_event|resolved)\.total_tokens\s*>\s*0\s+AS eligible_for_cost_coverage/i)
 }
@@ -752,6 +757,49 @@ function testRpcAggregationContractIsConsistent(): void {
   assert.match(migration, /RETURN json_build_object\('ok', true, 'sessions',/i)
   assert.match(migration, /RETURN json_build_object\('ok', true, 'projects',/i)
   assert.ok((migration.match(/json_build_object\('ok', false, 'error', 'invalid_token'\)/g) ?? []).length === RPC_SIGNATURES.length)
+}
+
+function testSummaryChildrenAndSessionsUseTheFullEnvelopeContract(): void {
+  const migration = readRpcMigration()
+  const summary = functionDefinition(migration, 'tokend_get_summary_v5')
+  const modelDistribution = summary.match(
+    /SELECT COALESCE\(jsonb_agg\(jsonb_build_object\(([\s\S]*?)\) ORDER BY total_tokens DESC, model\), '.*?'::JSONB\)\s+INTO v_models/i,
+  )
+  const topConversations = summary.match(
+    /SELECT COALESCE\(jsonb_agg\(jsonb_build_object\(([\s\S]*?)\) ORDER BY total_tokens DESC, total_cost DESC\), '.*?'::JSONB\)\s+INTO v_conversations/i,
+  )
+  assert.ok(modelDistribution, 'summary modelDistribution must be an auditable grouped envelope')
+  assert.ok(topConversations, 'summary topConversations must be an auditable grouped envelope')
+  for (const key of AGGREGATE_ENVELOPE_KEYS) {
+    assert.match(modelDistribution[1], new RegExp(`'${key}'\\s*,`, 'i'), `modelDistribution ${key}`)
+    assert.match(topConversations[1], new RegExp(`'${key}'\\s*,`, 'i'), `topConversations ${key}`)
+  }
+  for (const key of ['model', 'tokens']) assert.match(modelDistribution[1], new RegExp(`'${key}'\\s*,`, 'i'))
+  for (const key of ['sessionId', 'title', 'channel', 'tokens', 'cost', 'lastAt']) {
+    assert.match(topConversations[1], new RegExp(`'${key}'\\s*,`, 'i'))
+  }
+  assert.match(summary, /limited AS \(SELECT \* FROM envelope ORDER BY total_tokens DESC, model LIMIT 10\)[\s\S]*?INTO v_models/i)
+  assert.match(summary, /limited AS \(SELECT \* FROM envelope ORDER BY total_tokens DESC, total_cost DESC LIMIT 8\)[\s\S]*?INTO v_conversations/i)
+
+  const sessions = functionDefinition(migration, 'tokend_get_sessions_v2')
+  assert.match(sessions, /selected_sessions AS\s*\([\s\S]*?timestamp_ms\s*>=\s*v_from_ms/i)
+  assert.match(sessions, /FROM public\.tokend_effective_usage_events[\s\S]*?session_id IN \(SELECT session_id FROM selected_sessions\)/i)
+  assert.doesNotMatch(sessions, /MAX\((?:session_key|agent|project|channel|model)\)/i)
+  for (const column of ['session_key', 'agent', 'project', 'channel', 'model']) {
+    assert.match(
+      sessions,
+      new RegExp(`ARRAY_AGG\\(${column} ORDER BY timestamp_ms DESC\\) FILTER \\(WHERE NULLIF\\(${column}, ''\\) IS NOT NULL\\)`, 'i'),
+    )
+  }
+
+  const detail = functionDefinition(migration, 'tokend_get_session_detail_v2')
+  assert.doesNotMatch(detail, /MAX\((?:session_key|agent|project|channel|model)\)/i)
+  for (const column of ['session_key', 'agent', 'project', 'channel', 'model']) {
+    assert.match(
+      detail,
+      new RegExp(`ARRAY_AGG\\(${column} ORDER BY timestamp_ms DESC\\) FILTER \\(WHERE NULLIF\\(${column}, ''\\) IS NOT NULL\\)`, 'i'),
+    )
+  }
 }
 
 function testSupabaseConfigAndPackageScriptsAreIsolated(): void {
@@ -838,6 +886,12 @@ function testPgTapContractIsSelfContained(): void {
     'legacy function OIDs survive the additive RPC migration',
     'vNext signatures, return types, security, search_path, and ACLs are exact',
     'summary v5 preserves v14 visible-session message counts and no-message fallback',
+    'reported and legacy effective breakdowns reconcile authoritative totals',
+    'summary child lists expose complete envelopes and reconcile on the controlled fixture',
+    'cross-window sessions use full history and latest non-empty metadata',
+    'sessions period selection and limit remain exact',
+    'service_role cannot execute any vNext RPC',
+    'invalid timezone falls back to Asia Shanghai across timezone-aware RPCs',
   ]) assert.match(pgTap, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'))
   assert.doesNotMatch(pgTap, /\/Users\/|\/home\/|SUPABASE_(?:KEY|TOKEN)|NPM_TOKEN|member[_ -]?secret/i)
 }
@@ -859,6 +913,7 @@ testUploadFunctionAclsAreExplicitAndMinimal()
 testRpcMigrationDefinesExactSurfaceAndPrivileges()
 testEffectiveRelationHasOneAuditablePrecedenceRule()
 testRpcAggregationContractIsConsistent()
+testSummaryChildrenAndSessionsUseTheFullEnvelopeContract()
 testSupabaseConfigAndPackageScriptsAreIsolated()
 testPgTapContractIsSelfContained()
 console.log('pricing SQL contract tests passed')

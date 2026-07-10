@@ -86,7 +86,7 @@ WITH selected AS (
     ON revision.member_code = usage_event.member_code
    AND revision.event_id = usage_event.id
    AND revision.version = pricing_state.active_catalog_version
-), resolved AS (
+), costed AS (
   SELECT
     selected.*,
     CASE selected.effective_source
@@ -149,22 +149,23 @@ WITH selected AS (
       WHEN 'revision' THEN selected.revision_matched_model_id
       ELSE NULL
     END AS effective_matched_model_id,
-    CASE selected.effective_source
-      WHEN 'reported' THEN COALESCE(selected.breakdown_status, 'reconciled')
-      WHEN 'legacy' THEN COALESCE(selected.breakdown_status, 'reconciled')
-      WHEN 'revision' THEN COALESCE(selected.revision_breakdown_status, 'reconciled')
-      ELSE 'reconciled'
-    END AS effective_breakdown_status,
     CASE WHEN selected.effective_source = 'revision'
       THEN selected.revision_backfill_run_id ELSE NULL
-    END AS effective_backfill_run_id,
-    CASE selected.effective_source
-      WHEN 'reported' THEN COALESCE(selected.unallocated_cost, 0)::NUMERIC
-      WHEN 'legacy' THEN COALESCE(selected.unallocated_cost, 0)::NUMERIC
-      WHEN 'revision' THEN COALESCE(selected.revision_unallocated_cost, 0)::NUMERIC
-      ELSE 0::NUMERIC
-    END AS selected_unallocated_cost
+    END AS effective_backfill_run_id
   FROM selected
+), resolved AS (
+  SELECT
+    costed.*,
+    CASE
+      WHEN costed.effective_input_cost + costed.effective_output_cost
+        + costed.effective_reasoning_cost + costed.effective_cache_read_cost
+        + costed.effective_cache_write_cost > costed.effective_total_cost THEN 'invalid'
+      WHEN costed.effective_input_cost + costed.effective_output_cost
+        + costed.effective_reasoning_cost + costed.effective_cache_read_cost
+        + costed.effective_cache_write_cost < costed.effective_total_cost THEN 'unallocated'
+      ELSE 'reconciled'
+    END AS effective_breakdown_status
+  FROM costed
 )
 SELECT
   resolved.id,
@@ -205,19 +206,16 @@ SELECT
   resolved.effective_cache_write_cost,
   CASE
     WHEN resolved.effective_breakdown_status = 'invalid'
-      THEN resolved.selected_unallocated_cost
-    WHEN resolved.effective_breakdown_status = 'unallocated'
-      THEN resolved.selected_unallocated_cost + GREATEST(
-        resolved.effective_total_cost
-        - resolved.effective_input_cost
-        - resolved.effective_output_cost
-        - resolved.effective_reasoning_cost
-        - resolved.effective_cache_read_cost
-        - resolved.effective_cache_write_cost
-        - resolved.selected_unallocated_cost,
-        0::NUMERIC
-      )
-    ELSE resolved.selected_unallocated_cost
+      THEN 0::NUMERIC
+    ELSE GREATEST(
+      resolved.effective_total_cost
+      - resolved.effective_input_cost
+      - resolved.effective_output_cost
+      - resolved.effective_reasoning_cost
+      - resolved.effective_cache_read_cost
+      - resolved.effective_cache_write_cost,
+      0::NUMERIC
+    )
   END AS effective_unallocated_cost,
   resolved.effective_total_cost,
   resolved.effective_pricing_status,
@@ -424,23 +422,111 @@ BEGIN
     'coverageStatus', v_previous.coverage_status, 'costDetailsAvailable', true
   );
 
-  SELECT COALESCE(jsonb_agg(jsonb_build_object('model', model, 'tokens', tokens) ORDER BY tokens DESC), '[]'::JSONB)
-  INTO v_models FROM (
-    SELECT model, (COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) + COALESCE(SUM(reasoning_tokens), 0) + COALESCE(SUM(cache_read_tokens), 0) + COALESCE(SUM(cache_write_tokens), 0))::BIGINT AS tokens
+  WITH aggregate AS (
+    SELECT model,
+      COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
+      COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens,
+      COALESCE(SUM(reasoning_tokens), 0)::BIGINT AS reasoning_tokens,
+      COALESCE(SUM(cache_read_tokens), 0)::BIGINT AS cache_read_tokens,
+      COALESCE(SUM(cache_write_tokens), 0)::BIGINT AS cache_write_tokens,
+      COALESCE(SUM(input_tokens), 0)::BIGINT + COALESCE(SUM(output_tokens), 0)::BIGINT + COALESCE(SUM(reasoning_tokens), 0)::BIGINT + COALESCE(SUM(cache_read_tokens), 0)::BIGINT + COALESCE(SUM(cache_write_tokens), 0)::BIGINT AS total_tokens,
+      COALESCE(SUM(effective_input_cost), 0)::NUMERIC AS input_cost,
+      COALESCE(SUM(effective_output_cost), 0)::NUMERIC AS output_cost,
+      COALESCE(SUM(effective_reasoning_cost), 0)::NUMERIC AS reasoning_cost,
+      COALESCE(SUM(effective_cache_read_cost), 0)::NUMERIC AS cache_read_cost,
+      COALESCE(SUM(effective_cache_write_cost), 0)::NUMERIC AS cache_write_cost,
+      COALESCE(SUM(effective_unallocated_cost), 0)::NUMERIC AS unallocated_cost,
+      COALESCE(SUM(effective_total_cost), 0)::NUMERIC AS total_cost,
+      COUNT(*) FILTER (WHERE eligible_for_cost_coverage)::BIGINT AS eligible_event_count,
+      COUNT(*) FILTER (WHERE eligible_for_cost_coverage AND effective_pricing_status = 'reported')::BIGINT AS reported_event_count,
+      COUNT(*) FILTER (WHERE eligible_for_cost_coverage AND effective_pricing_status = 'estimated')::BIGINT AS estimated_event_count,
+      COUNT(*) FILTER (WHERE eligible_for_cost_coverage AND effective_pricing_status = 'zero_rate')::BIGINT AS zero_rate_event_count,
+      COUNT(*) FILTER (WHERE eligible_for_cost_coverage AND effective_pricing_status = 'legacy')::BIGINT AS legacy_event_count,
+      COUNT(*) FILTER (WHERE eligible_for_cost_coverage AND effective_pricing_status = 'unpriced')::BIGINT AS unpriced_event_count,
+      COUNT(*) FILTER (WHERE eligible_for_cost_coverage AND effective_breakdown_status = 'invalid')::BIGINT AS breakdown_invalid_count
     FROM public.tokend_effective_usage_events
-    WHERE member_code = v_code AND timestamp_ms >= v_from_ms AND COALESCE(channel, '') NOT IN ('', 'unknown') AND NOT (channel = 'cron' AND COALESCE(session_key, '') = '')
-    GROUP BY model ORDER BY tokens DESC LIMIT 10
-  ) AS models;
-  SELECT COALESCE(jsonb_agg(jsonb_build_object('sessionId', session_id, 'title', title, 'channel', channel, 'tokens', tokens, 'cost', cost, 'lastAt', last_at) ORDER BY tokens DESC), '[]'::JSONB)
-  INTO v_conversations FROM (
-    SELECT session_id, COALESCE(NULLIF(MAX(project), ''), NULLIF(MAX(agent), ''), LEFT(session_id, 8)) AS title,
-      MAX(channel) AS channel,
-      (COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) + COALESCE(SUM(reasoning_tokens), 0) + COALESCE(SUM(cache_read_tokens), 0) + COALESCE(SUM(cache_write_tokens), 0))::BIGINT AS tokens,
-      COALESCE(SUM(effective_total_cost), 0)::NUMERIC AS cost, MAX(timestamp_ms)::BIGINT AS last_at
+    WHERE member_code = v_code AND timestamp_ms >= v_from_ms
+      AND COALESCE(channel, '') NOT IN ('', 'unknown')
+      AND NOT (channel = 'cron' AND COALESCE(session_key, '') = '')
+    GROUP BY model
+  ), envelope AS (
+    SELECT aggregate.*,
+      CASE WHEN eligible_event_count = 0 THEN 0::NUMERIC ELSE LEAST(1::NUMERIC, GREATEST(0::NUMERIC, (reported_event_count + estimated_event_count + zero_rate_event_count + legacy_event_count)::NUMERIC / eligible_event_count::NUMERIC)) END AS cost_availability,
+      CASE WHEN eligible_event_count = 0 THEN 0::NUMERIC ELSE LEAST(1::NUMERIC, GREATEST(0::NUMERIC, (reported_event_count + estimated_event_count + zero_rate_event_count)::NUMERIC / eligible_event_count::NUMERIC)) END AS verified_cost_coverage,
+      CASE WHEN eligible_event_count = 0 THEN 'no_usage' WHEN unpriced_event_count = eligible_event_count THEN 'unpriced' WHEN zero_rate_event_count = eligible_event_count THEN 'zero_rate' WHEN unpriced_event_count > 0 AND unpriced_event_count < eligible_event_count THEN 'partial' WHEN unpriced_event_count = 0 AND legacy_event_count > 0 THEN 'legacy' ELSE 'complete' END AS coverage_status
+    FROM aggregate
+  ), limited AS (SELECT * FROM envelope ORDER BY total_tokens DESC, model LIMIT 10)
+  SELECT COALESCE(jsonb_agg(jsonb_build_object(
+    'model', model, 'tokens', total_tokens,
+    'inputTokens', input_tokens, 'outputTokens', output_tokens, 'reasoningTokens', reasoning_tokens,
+    'cacheReadTokens', cache_read_tokens, 'cacheWriteTokens', cache_write_tokens, 'totalTokens', total_tokens,
+    'inputCost', input_cost, 'outputCost', output_cost, 'reasoningCost', reasoning_cost,
+    'cacheReadCost', cache_read_cost, 'cacheWriteCost', cache_write_cost,
+    'unallocatedCost', unallocated_cost, 'totalCost', total_cost,
+    'eligibleEventCount', eligible_event_count, 'reportedEventCount', reported_event_count,
+    'estimatedEventCount', estimated_event_count, 'zeroRateEventCount', zero_rate_event_count,
+    'legacyEventCount', legacy_event_count, 'unpricedEventCount', unpriced_event_count,
+    'breakdownInvalidCount', breakdown_invalid_count, 'costAvailability', cost_availability,
+    'verifiedCostCoverage', verified_cost_coverage, 'coverageStatus', coverage_status,
+    'costDetailsAvailable', true
+  ) ORDER BY total_tokens DESC, model), '[]'::JSONB)
+  INTO v_models FROM limited;
+
+  WITH aggregate AS (
+    SELECT session_id,
+      COALESCE((ARRAY_AGG(project ORDER BY timestamp_ms DESC) FILTER (WHERE NULLIF(project, '') IS NOT NULL))[1],
+        (ARRAY_AGG(agent ORDER BY timestamp_ms DESC) FILTER (WHERE NULLIF(agent, '') IS NOT NULL))[1],
+        LEFT(session_id, 8)) AS title,
+      (ARRAY_AGG(channel ORDER BY timestamp_ms DESC) FILTER (WHERE NULLIF(channel, '') IS NOT NULL))[1] AS channel,
+      MAX(timestamp_ms)::BIGINT AS last_at,
+      COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
+      COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens,
+      COALESCE(SUM(reasoning_tokens), 0)::BIGINT AS reasoning_tokens,
+      COALESCE(SUM(cache_read_tokens), 0)::BIGINT AS cache_read_tokens,
+      COALESCE(SUM(cache_write_tokens), 0)::BIGINT AS cache_write_tokens,
+      COALESCE(SUM(input_tokens), 0)::BIGINT + COALESCE(SUM(output_tokens), 0)::BIGINT + COALESCE(SUM(reasoning_tokens), 0)::BIGINT + COALESCE(SUM(cache_read_tokens), 0)::BIGINT + COALESCE(SUM(cache_write_tokens), 0)::BIGINT AS total_tokens,
+      COALESCE(SUM(effective_input_cost), 0)::NUMERIC AS input_cost,
+      COALESCE(SUM(effective_output_cost), 0)::NUMERIC AS output_cost,
+      COALESCE(SUM(effective_reasoning_cost), 0)::NUMERIC AS reasoning_cost,
+      COALESCE(SUM(effective_cache_read_cost), 0)::NUMERIC AS cache_read_cost,
+      COALESCE(SUM(effective_cache_write_cost), 0)::NUMERIC AS cache_write_cost,
+      COALESCE(SUM(effective_unallocated_cost), 0)::NUMERIC AS unallocated_cost,
+      COALESCE(SUM(effective_total_cost), 0)::NUMERIC AS total_cost,
+      COUNT(*) FILTER (WHERE eligible_for_cost_coverage)::BIGINT AS eligible_event_count,
+      COUNT(*) FILTER (WHERE eligible_for_cost_coverage AND effective_pricing_status = 'reported')::BIGINT AS reported_event_count,
+      COUNT(*) FILTER (WHERE eligible_for_cost_coverage AND effective_pricing_status = 'estimated')::BIGINT AS estimated_event_count,
+      COUNT(*) FILTER (WHERE eligible_for_cost_coverage AND effective_pricing_status = 'zero_rate')::BIGINT AS zero_rate_event_count,
+      COUNT(*) FILTER (WHERE eligible_for_cost_coverage AND effective_pricing_status = 'legacy')::BIGINT AS legacy_event_count,
+      COUNT(*) FILTER (WHERE eligible_for_cost_coverage AND effective_pricing_status = 'unpriced')::BIGINT AS unpriced_event_count,
+      COUNT(*) FILTER (WHERE eligible_for_cost_coverage AND effective_breakdown_status = 'invalid')::BIGINT AS breakdown_invalid_count
     FROM public.tokend_effective_usage_events
-    WHERE member_code = v_code AND timestamp_ms >= v_from_ms AND COALESCE(channel, '') NOT IN ('', 'unknown') AND NOT (channel = 'cron' AND COALESCE(session_key, '') = '')
-    GROUP BY session_id ORDER BY tokens DESC LIMIT 8
-  ) AS conversations;
+    WHERE member_code = v_code AND timestamp_ms >= v_from_ms
+      AND COALESCE(channel, '') NOT IN ('', 'unknown')
+      AND NOT (channel = 'cron' AND COALESCE(session_key, '') = '')
+    GROUP BY session_id
+  ), envelope AS (
+    SELECT aggregate.*,
+      CASE WHEN eligible_event_count = 0 THEN 0::NUMERIC ELSE LEAST(1::NUMERIC, GREATEST(0::NUMERIC, (reported_event_count + estimated_event_count + zero_rate_event_count + legacy_event_count)::NUMERIC / eligible_event_count::NUMERIC)) END AS cost_availability,
+      CASE WHEN eligible_event_count = 0 THEN 0::NUMERIC ELSE LEAST(1::NUMERIC, GREATEST(0::NUMERIC, (reported_event_count + estimated_event_count + zero_rate_event_count)::NUMERIC / eligible_event_count::NUMERIC)) END AS verified_cost_coverage,
+      CASE WHEN eligible_event_count = 0 THEN 'no_usage' WHEN unpriced_event_count = eligible_event_count THEN 'unpriced' WHEN zero_rate_event_count = eligible_event_count THEN 'zero_rate' WHEN unpriced_event_count > 0 AND unpriced_event_count < eligible_event_count THEN 'partial' WHEN unpriced_event_count = 0 AND legacy_event_count > 0 THEN 'legacy' ELSE 'complete' END AS coverage_status
+    FROM aggregate
+  ), limited AS (SELECT * FROM envelope ORDER BY total_tokens DESC, total_cost DESC LIMIT 8)
+  SELECT COALESCE(jsonb_agg(jsonb_build_object(
+    'sessionId', session_id, 'title', title, 'channel', channel,
+    'tokens', total_tokens, 'cost', total_cost, 'lastAt', last_at,
+    'inputTokens', input_tokens, 'outputTokens', output_tokens, 'reasoningTokens', reasoning_tokens,
+    'cacheReadTokens', cache_read_tokens, 'cacheWriteTokens', cache_write_tokens, 'totalTokens', total_tokens,
+    'inputCost', input_cost, 'outputCost', output_cost, 'reasoningCost', reasoning_cost,
+    'cacheReadCost', cache_read_cost, 'cacheWriteCost', cache_write_cost,
+    'unallocatedCost', unallocated_cost, 'totalCost', total_cost,
+    'eligibleEventCount', eligible_event_count, 'reportedEventCount', reported_event_count,
+    'estimatedEventCount', estimated_event_count, 'zeroRateEventCount', zero_rate_event_count,
+    'legacyEventCount', legacy_event_count, 'unpricedEventCount', unpriced_event_count,
+    'breakdownInvalidCount', breakdown_invalid_count, 'costAvailability', cost_availability,
+    'verifiedCostCoverage', verified_cost_coverage, 'coverageStatus', coverage_status,
+    'costDetailsAvailable', true
+  ) ORDER BY total_tokens DESC, total_cost DESC), '[]'::JSONB)
+  INTO v_conversations FROM limited;
 
   RETURN (
     jsonb_build_object(
@@ -1127,14 +1213,24 @@ BEGIN
   ELSIF p_period = '1d' THEN v_from_ms := (EXTRACT(EPOCH FROM (now() - INTERVAL '24 hours')) * 1000)::BIGINT;
   ELSE v_from_ms := (EXTRACT(EPOCH FROM ((date_trunc('day', timezone('Asia/Shanghai', now())) - INTERVAL '6 days') AT TIME ZONE 'Asia/Shanghai')) * 1000)::BIGINT;
   END IF;
-  WITH source AS (
-    SELECT * FROM public.tokend_effective_usage_events
+  WITH selected_sessions AS (
+    SELECT DISTINCT session_id
+    FROM public.tokend_effective_usage_events
     WHERE member_code = v_code AND timestamp_ms >= v_from_ms
       AND COALESCE(channel, '') NOT IN ('', 'unknown') AND NOT (channel = 'cron' AND COALESCE(session_key, '') = '')
+  ), source AS (
+    SELECT * FROM public.tokend_effective_usage_events
+    WHERE member_code = v_code
+      AND session_id IN (SELECT session_id FROM selected_sessions)
+      AND COALESCE(channel, '') NOT IN ('', 'unknown') AND NOT (channel = 'cron' AND COALESCE(session_key, '') = '')
   ), aggregate AS (
-    SELECT session_id, MAX(session_key) AS session_key, MAX(agent) AS agent, MAX(project) AS project,
-      MAX(channel) AS channel, MIN(timestamp_ms)::BIGINT AS first_seen_at, MAX(timestamp_ms)::BIGINT AS last_seen_at,
-      (ARRAY_AGG(model ORDER BY timestamp_ms DESC))[1] AS current_model,
+    SELECT session_id,
+      (ARRAY_AGG(session_key ORDER BY timestamp_ms DESC) FILTER (WHERE NULLIF(session_key, '') IS NOT NULL))[1] AS session_key,
+      (ARRAY_AGG(agent ORDER BY timestamp_ms DESC) FILTER (WHERE NULLIF(agent, '') IS NOT NULL))[1] AS agent,
+      (ARRAY_AGG(project ORDER BY timestamp_ms DESC) FILTER (WHERE NULLIF(project, '') IS NOT NULL))[1] AS project,
+      (ARRAY_AGG(channel ORDER BY timestamp_ms DESC) FILTER (WHERE NULLIF(channel, '') IS NOT NULL))[1] AS channel,
+      (ARRAY_AGG(model ORDER BY timestamp_ms DESC) FILTER (WHERE NULLIF(model, '') IS NOT NULL))[1] AS current_model,
+      MIN(timestamp_ms)::BIGINT AS first_seen_at, MAX(timestamp_ms)::BIGINT AS last_seen_at,
       COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens, COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens,
       COALESCE(SUM(reasoning_tokens), 0)::BIGINT AS reasoning_tokens, COALESCE(SUM(cache_read_tokens), 0)::BIGINT AS cache_read_tokens,
       COALESCE(SUM(cache_write_tokens), 0)::BIGINT AS cache_write_tokens,
@@ -1268,8 +1364,12 @@ BEGIN
   SELECT member_code INTO v_code FROM public.tokend_members WHERE token = p_token LIMIT 1;
   IF NOT FOUND THEN RETURN json_build_object('ok', false, 'error', 'invalid_token'); END IF;
   WITH aggregate AS (
-    SELECT MAX(agent) AS agent, MAX(project) AS project, MAX(channel) AS channel,
-      MAX(session_key) AS session_key, (ARRAY_AGG(model ORDER BY timestamp_ms DESC))[1] AS current_model,
+    SELECT
+      (ARRAY_AGG(session_key ORDER BY timestamp_ms DESC) FILTER (WHERE NULLIF(session_key, '') IS NOT NULL))[1] AS session_key,
+      (ARRAY_AGG(agent ORDER BY timestamp_ms DESC) FILTER (WHERE NULLIF(agent, '') IS NOT NULL))[1] AS agent,
+      (ARRAY_AGG(project ORDER BY timestamp_ms DESC) FILTER (WHERE NULLIF(project, '') IS NOT NULL))[1] AS project,
+      (ARRAY_AGG(channel ORDER BY timestamp_ms DESC) FILTER (WHERE NULLIF(channel, '') IS NOT NULL))[1] AS channel,
+      (ARRAY_AGG(model ORDER BY timestamp_ms DESC) FILTER (WHERE NULLIF(model, '') IS NOT NULL))[1] AS current_model,
       MIN(timestamp_ms)::BIGINT AS first_seen_at, MAX(timestamp_ms)::BIGINT AS last_seen_at,
       COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
       COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens,

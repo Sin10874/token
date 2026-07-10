@@ -18,6 +18,7 @@
     "start": "NODE_ENV=production tsx server/index.ts",
     "prod": "npm run build && NODE_ENV=production tsx server/index.ts",
     "ingest": "tsx server/ingestion/index.ts",
+    "test:sync": "tsx tests/cli-sync-contract.ts",
     "test:pricing": "tsx tests/pricing-regression.ts",
     "setup-hooks": "git config core.hooksPath .githooks",
     "update-version-record": "node scripts/update-version-record.mjs"

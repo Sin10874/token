@@ -665,7 +665,7 @@ async function testMessageUploadsCompleteBeforeCursorCommit() {
     syncStates,
     rpc: async (name: string, args: Record<string, unknown>) => {
       calls.push({ name, args })
-      return name === 'tokend_upload_events'
+      return name === 'tokend_upload_events_v2'
         ? { data: { inserted: calls.length === 1 ? 1 : 0 }, error: null }
         : { data: { ok: true }, error: null }
     },
@@ -673,9 +673,9 @@ async function testMessageUploadsCompleteBeforeCursorCommit() {
 
   assert.equal(eventsInserted, 1)
   assert.deepEqual(calls.map(call => call.name), [
-    'tokend_upload_events',
+    'tokend_upload_events_v2',
     'tokend_upload_messages',
-    'tokend_upload_events',
+    'tokend_upload_events_v2',
   ])
   assert.deepEqual(calls[0].args, {
     p_token: 'token-1',
@@ -717,7 +717,7 @@ async function testMessageRpcErrorLeavesCursorUncommittedAndRetryable() {
   )
 
   assert.deepEqual(failedCalls.map(call => call.name), [
-    'tokend_upload_events',
+    'tokend_upload_events_v2',
     'tokend_upload_messages',
   ])
   assert.equal(
@@ -733,13 +733,13 @@ async function testMessageRpcErrorLeavesCursorUncommittedAndRetryable() {
     syncStates,
     rpc: async (name: string, args: Record<string, unknown>) => {
       retryCalls.push({ name, args })
-      return { data: { inserted: name === 'tokend_upload_events' ? 1 : 0 }, error: null }
+      return { data: { inserted: name === 'tokend_upload_events_v2' ? 1 : 0 }, error: null }
     },
   })
   assert.deepEqual(retryCalls.map(call => call.name), [
-    'tokend_upload_events',
+    'tokend_upload_events_v2',
     'tokend_upload_messages',
-    'tokend_upload_events',
+    'tokend_upload_events_v2',
   ])
   assert.deepEqual(retryCalls[2].args.p_sync_states, syncStates)
 }
@@ -765,7 +765,7 @@ async function testMessageDataErrorLeavesCursorUncommitted() {
   )
 
   assert.deepEqual(calls.map(call => call.name), [
-    'tokend_upload_events',
+    'tokend_upload_events_v2',
     'tokend_upload_messages',
   ])
 }
@@ -786,9 +786,9 @@ async function testMessageOnlyPayloadStillCommitsCursorLast() {
   })
 
   assert.deepEqual(calls.map(call => call.name), [
-    'tokend_upload_events',
+    'tokend_upload_events_v2',
     'tokend_upload_messages',
-    'tokend_upload_events',
+    'tokend_upload_events_v2',
   ])
   assert.deepEqual(calls[0].args.p_events, [])
   assert.deepEqual(calls[0].args.p_sync_states, [])
@@ -814,7 +814,7 @@ async function testMessageNetworkThrowLeavesCursorUncommitted() {
   )
 
   assert.deepEqual(calls.map(call => call.name), [
-    'tokend_upload_events',
+    'tokend_upload_events_v2',
     'tokend_upload_messages',
   ])
   assert.equal(
@@ -840,7 +840,7 @@ async function testNoMessagePayloadKeepsEventsAndCursorAtomic() {
   })
 
   assert.equal(calls.length, 1)
-  assert.equal(calls[0].name, 'tokend_upload_events')
+  assert.equal(calls[0].name, 'tokend_upload_events_v2')
   assert.deepEqual(calls[0].args.p_events, events)
   assert.deepEqual(calls[0].args.p_sync_states, syncStates)
 }

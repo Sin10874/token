@@ -51,12 +51,73 @@ interface CollectedSyncPayload {
   hadActivity: boolean
 }
 
+interface SyncRpcData {
+  ok?: boolean
+  inserted?: number
+  error?: unknown
+  [key: string]: unknown
+}
+
+interface SyncRpcError {
+  code?: string
+  message: string
+  cause?: unknown
+}
+
 interface SyncRpcResult {
-  data?: { inserted?: number; [key: string]: unknown } | null
-  error?: { message: string } | null
+  data?: SyncRpcData | null
+  error?: SyncRpcError | null
 }
 
 type SyncRpc = (name: string, args: Record<string, unknown>) => PromiseLike<SyncRpcResult>
+
+export function isMissingRpcError(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && 'code' in error
+    && error.code === 'PGRST202'
+}
+
+interface UploadEventBatchParams extends Record<string, unknown> {
+  p_token: string
+  p_events: Record<string, unknown>[]
+  p_sync_states: SyncState[]
+}
+
+interface UploadEventBatchResult {
+  ok: true
+  inserted: number
+}
+
+async function callEventUploadRpc(
+  rpc: SyncRpc,
+  name: 'tokend_upload_events_v2' | 'tokend_upload_events',
+  params: UploadEventBatchParams,
+): Promise<UploadEventBatchResult> {
+  const { data, error } = await rpc(name, params)
+  if (error) throw error
+  if (data?.ok === false) {
+    throw new Error(`Upload failed: ${String(data.error || 'unknown_error')}`)
+  }
+
+  return {
+    ok: true,
+    inserted: typeof data?.inserted === 'number' ? data.inserted : 0,
+  }
+}
+
+export async function uploadEventBatch(
+  rpc: SyncRpc,
+  params: UploadEventBatchParams,
+): Promise<UploadEventBatchResult> {
+  try {
+    return await callEventUploadRpc(rpc, 'tokend_upload_events_v2', params)
+  } catch (error) {
+    if (!isMissingRpcError(error)) throw error
+  }
+
+  return callEventUploadRpc(rpc, 'tokend_upload_events', params)
+}
 
 interface UploadSyncPayloadOptions {
   token: string
@@ -75,12 +136,14 @@ function hashPath(filePath: string): string {
   return createHash('sha256').update(filePath).digest('hex').slice(0, 16)
 }
 
-function stripEvent(e: RawUsageEvent, project?: string): Record<string, unknown> {
+export function stripEvent(e: RawUsageEvent, project?: string): Record<string, unknown> {
+  const isUnpriced = e.pricingStatus === 'unpriced'
+
   return {
     id: e.id,
     timestampMs: e.timestampMs,
     sessionId: e.sessionId,
-    sessionKey: e.sessionKey || null,
+    sessionKey: e.sessionKey ?? null,
     agent: e.agent,
     provider: e.provider,
     model: e.model,
@@ -90,24 +153,24 @@ function stripEvent(e: RawUsageEvent, project?: string): Record<string, unknown>
     reasoningTokens: e.reasoningTokens,
     cacheReadTokens: e.cacheReadTokens,
     cacheWriteTokens: e.cacheWriteTokens,
-    tokenSemantics: e.tokenSemantics,
     totalTokens: e.totalTokens,
-    inputCost: e.inputCost,
-    outputCost: e.outputCost,
-    reasoningCost: e.reasoningCost,
-    cacheReadCost: e.cacheReadCost,
-    cacheWriteCost: e.cacheWriteCost,
-    totalCost: e.totalCost,
-    pricingStatus: e.pricingStatus,
-    pricingTier: e.pricingTier,
-    priceVersion: e.priceVersion,
-    matchedModelId: e.matchedModelId,
-    unallocatedCost: e.unallocatedCost,
-    breakdownStatus: e.breakdownStatus,
+    inputCost: isUnpriced ? 0 : e.inputCost,
+    outputCost: isUnpriced ? 0 : e.outputCost,
+    reasoningCost: isUnpriced ? 0 : e.reasoningCost,
+    cacheReadCost: isUnpriced ? 0 : e.cacheReadCost,
+    cacheWriteCost: isUnpriced ? 0 : e.cacheWriteCost,
+    totalCost: isUnpriced ? 0 : e.totalCost,
     stopReason: e.stopReason,
     // codex 等渠道的 title 可能是整段 prompt（实测 46KB），超过
     // Postgres 索引行 8191 字节上限会导致整批上传失败
-    project: project ? project.slice(0, 256) : null,
+    project: project === undefined ? null : project.slice(0, 256),
+    pricingStatus: e.pricingStatus ?? null,
+    pricingTier: isUnpriced ? null : (e.pricingTier ?? null),
+    priceVersion: isUnpriced ? null : (e.priceVersion ?? null),
+    matchedModelId: isUnpriced ? null : (e.matchedModelId ?? null),
+    tokenSemantics: e.tokenSemantics,
+    unallocatedCost: isUnpriced ? 0 : (e.unallocatedCost ?? 0),
+    breakdownStatus: e.breakdownStatus ?? null,
   }
 }
 
@@ -173,25 +236,24 @@ export async function uploadSyncPayload({
 }: UploadSyncPayloadOptions): Promise<number> {
   let eventsInserted = 0
 
-  async function uploadEventBatch(
+  async function uploadEventSlice(
     eventBatch: Record<string, unknown>[],
     stateBatch: SyncState[],
   ): Promise<void> {
-    const { data, error } = await rpc('tokend_upload_events', {
+    const result = await uploadEventBatch(rpc, {
       p_token: token,
       p_events: eventBatch,
       p_sync_states: stateBatch,
     })
-    if (error) throw new Error(`Upload failed: ${error.message}`)
-    eventsInserted += data?.inserted || 0
+    eventsInserted += result.inserted
   }
 
   if (messages.length > 0) {
     if (events.length === 0) {
-      await uploadEventBatch([], [])
+      await uploadEventSlice([], [])
     } else {
       for (let i = 0; i < events.length; i += batchSize) {
-        await uploadEventBatch(events.slice(i, i + batchSize), [])
+        await uploadEventSlice(events.slice(i, i + batchSize), [])
       }
     }
 
@@ -207,7 +269,7 @@ export async function uploadSyncPayload({
     }
 
     if (syncStates.length > 0) {
-      await uploadEventBatch([], syncStates)
+      await uploadEventSlice([], syncStates)
     }
     return eventsInserted
   }
@@ -215,10 +277,10 @@ export async function uploadSyncPayload({
   if (events.length > 0) {
     for (let i = 0; i < events.length; i += batchSize) {
       const isLast = i + batchSize >= events.length
-      await uploadEventBatch(events.slice(i, i + batchSize), isLast ? syncStates : [])
+      await uploadEventSlice(events.slice(i, i + batchSize), isLast ? syncStates : [])
     }
   } else if (syncStates.length > 0) {
-    await uploadEventBatch([], syncStates)
+    await uploadEventSlice([], syncStates)
   }
 
   return eventsInserted

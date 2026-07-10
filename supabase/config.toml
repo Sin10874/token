@@ -1,0 +1,47 @@
+project_id = "tokend-pricing-contract"
+
+[api]
+enabled = true
+port = 56321
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 56322
+shadow_port = 56320
+major_version = 15
+
+[db.pooler]
+enabled = false
+port = 56329
+pool_mode = "transaction"
+default_pool_size = 20
+max_client_conn = 100
+
+[db.migrations]
+enabled = false
+
+[db.seed]
+enabled = false
+
+[realtime]
+enabled = false
+
+[studio]
+enabled = false
+port = 56323
+
+[inbucket]
+enabled = false
+port = 56324
+
+[storage]
+enabled = false
+
+[auth]
+enabled = false
+
+[analytics]
+enabled = false
+port = 56327

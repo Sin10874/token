@@ -21,14 +21,9 @@ import { discoverQwenCodeFiles } from '../server/ingestion/qwen-code-scanner.js'
 import { parseQwenCodeFile } from '../server/ingestion/qwen-code-parser.js'
 import { discoverHermesSource } from '../server/ingestion/hermes-scanner.js'
 import { HermesImportedTotals, parseHermesSession } from '../server/ingestion/hermes-parser.js'
+import { PARSER_VERSIONS } from '../server/ingestion/parser-versions.js'
 
 const BATCH_SIZE = 2000
-
-const PARSER_VERSIONS: Record<string, number> = {
-  openclaw: 2, claudeCode: 2, codex: 3,
-  geminiCli: 1, copilotCli: 1, opencode: 1,
-  kimiCode: 1, qwenCode: 1,
-}
 
 interface SyncStats {
   filesProcessed: number
@@ -119,7 +114,7 @@ function stripEvent(e: RawUsageEvent, project?: string): Record<string, unknown>
 export function collectSyncPayload(
   result: ParseResult,
   filePath: string,
-  parserKey: string,
+  parserKey: keyof typeof PARSER_VERSIONS,
   project?: string,
   options: CollectOptions = {},
 ): CollectedSyncPayload {
@@ -149,7 +144,7 @@ export function collectSyncPayload(
     kind: message.kind,
   }))
 
-  const parserVersion = PARSER_VERSIONS[parserKey] || 1
+  const parserVersion = PARSER_VERSIONS[parserKey]
   const syncStates = options.trackSyncState === false
     ? []
     : [{
@@ -295,7 +290,7 @@ export async function runCloudSync(token: string): Promise<SyncStats> {
   function collect(
     result: ParseResult,
     filePath: string,
-    parserKey: string,
+    parserKey: keyof typeof PARSER_VERSIONS,
     project?: string,
     options: CollectOptions = {},
   ) {

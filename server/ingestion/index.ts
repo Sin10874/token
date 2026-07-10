@@ -12,6 +12,14 @@ import { parseCopilotCliFile } from './copilot-cli-parser.js'
 import { discoverOpencodeFiles } from './opencode-scanner.js'
 import { parseOpencodeFile } from './opencode-parser.js'
 import { rebuildSessionsFromUsage, upsertSessionSnapshot } from './session-upsert.js'
+import {
+  prepareIngestionStateStatements,
+  resolveStartLine,
+  type IngestionState,
+} from './ingestion-state.js'
+import { PARSER_VERSIONS } from './parser-versions.js'
+
+export { resolveStartLine }
 
 interface IngestionStats {
   filesProcessed: number
@@ -35,16 +43,7 @@ const insertEvent = db.prepare(`
   )
 `)
 
-const upsertState = db.prepare(`
-  INSERT INTO ingestion_state (source_path, last_processed_lines, last_scan_at, event_count)
-  VALUES (@sourcePath, @lines, @scanAt, @eventCount)
-  ON CONFLICT(source_path) DO UPDATE SET
-    last_processed_lines = excluded.last_processed_lines,
-    last_scan_at = excluded.last_scan_at,
-    event_count = excluded.event_count
-`)
-
-const getState = db.prepare('SELECT * FROM ingestion_state WHERE source_path = ?')
+const { getState, upsertState } = prepareIngestionStateStatements(db)
 
 const insertWarning = db.prepare(`
   INSERT INTO source_warnings (source_path, warning, created_at)
@@ -102,8 +101,9 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
 
   for (const fileInfo of files) {
     const { sessionId, agent, filePath, sessionKey, channel } = fileInfo
-    const state = getState.get(filePath) as { last_processed_lines: number } | undefined
-    const startLine = forceReindex ? 0 : state?.last_processed_lines || 0
+    const parserVersion = PARSER_VERSIONS.openclaw
+    const state = getState.get(filePath) as IngestionState | undefined
+    const startLine = resolveStartLine(forceReindex, state, parserVersion)
 
     const result = parseSessionFile(filePath, sessionId, sessionKey, agent, channel || 'unknown', startLine)
 
@@ -170,6 +170,7 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
       lines: result.linesRead,
       scanAt: Date.now(),
       eventCount: result.events.length,
+      parserVersion,
     })
   }
 
@@ -178,8 +179,9 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
 
   for (const fileInfo of ccFiles) {
     const { sessionId, project, filePath } = fileInfo
-    const state = getState.get(filePath) as { last_processed_lines: number } | undefined
-    const startLine = forceReindex ? 0 : state?.last_processed_lines || 0
+    const parserVersion = PARSER_VERSIONS.claudeCode
+    const state = getState.get(filePath) as IngestionState | undefined
+    const startLine = resolveStartLine(forceReindex, state, parserVersion)
 
     const result = parseClaudeCodeFile(filePath, sessionId, project, startLine)
 
@@ -240,6 +242,7 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
       lines: result.linesRead,
       scanAt: Date.now(),
       eventCount: result.events.length,
+      parserVersion,
     })
   }
 
@@ -248,8 +251,9 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
 
   for (const fileInfo of codexFiles) {
     const { sessionId, filePath } = fileInfo
-    const state = getState.get(filePath) as { last_processed_lines: number } | undefined
-    const startLine = forceReindex ? 0 : state?.last_processed_lines || 0
+    const parserVersion = PARSER_VERSIONS.codex
+    const state = getState.get(filePath) as IngestionState | undefined
+    const startLine = resolveStartLine(forceReindex, state, parserVersion)
 
     const result = parseCodexFile(filePath, sessionId, fileInfo.title, fileInfo.cwd, startLine)
 
@@ -310,6 +314,7 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
       lines: result.linesRead,
       scanAt: Date.now(),
       eventCount: result.events.length,
+      parserVersion,
     })
   }
 

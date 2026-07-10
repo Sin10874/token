@@ -111,6 +111,47 @@ function testCatalogResolution() {
   ])
 }
 
+function attemptMutation(mutate: () => void): void {
+  try {
+    mutate()
+  } catch (error) {
+    assert.ok(error instanceof TypeError)
+  }
+}
+
+function testDefaultCatalogIsDeeplyImmutable() {
+  assert.equal(Object.isFrozen(PRICE_VERSIONS), true)
+  assert.equal(Object.isFrozen(MODEL_ALIASES), true)
+  assert.equal(Object.isFrozen(CATALOG_SNAPSHOT), true)
+  for (const row of PRICE_VERSIONS) {
+    assert.equal(Object.isFrozen(row), true)
+    assert.equal(Object.isFrozen(row.standard), true)
+    if (row.longContext) assert.equal(Object.isFrozen(row.longContext), true)
+  }
+
+  const sol = PRICE_VERSIONS.find(row => row.modelId === 'gpt-5.6-sol')!
+  const originalInputRate = sol.standard.input
+  const originalAlias = MODEL_ALIASES['gpt-5.6']
+  const originalRowCount = PRICE_VERSIONS.length
+  const originalHash = CATALOG_SNAPSHOT.hash
+  const originalCost = estimateCost(pricedEvent()).totalCost
+
+  attemptMutation(() => { sol.standard.input = 999 })
+  attemptMutation(() => { sol.provider = 'mutated-provider' })
+  attemptMutation(() => { MODEL_ALIASES['gpt-5.6'] = 'gpt-5.6-luna' })
+  attemptMutation(() => { PRICE_VERSIONS.push({ ...sol, modelId: 'mutated-model' }) })
+  attemptMutation(() => { CATALOG_SNAPSHOT.hash = '0'.repeat(64) })
+  attemptMutation(() => { CATALOG_SNAPSHOT.rows = [] })
+
+  assert.equal(sol.standard.input, originalInputRate)
+  assert.equal(sol.provider, 'openai')
+  assert.equal(MODEL_ALIASES['gpt-5.6'], originalAlias)
+  assert.equal(PRICE_VERSIONS.length, originalRowCount)
+  assert.equal(CATALOG_SNAPSHOT.hash, originalHash)
+  assert.equal(CATALOG_SNAPSHOT.rows, PRICE_VERSIONS)
+  assert.equal(estimateCost(pricedEvent()).totalCost, originalCost)
+}
+
 function testLegacyCatalogMigration() {
   const source = fs.readFileSync(path.resolve(process.cwd(), 'cli/prices.ts'), 'utf8')
   const tuplePattern = /^\s*\['([^']+)', '([^']+)', (-?\d+(?:\.\d+)?), (-?\d+(?:\.\d+)?), (-?\d+(?:\.\d+)?), (-?\d+(?:\.\d+)?)\],$/gm
@@ -711,6 +752,51 @@ function snapshotWith(rows: PriceVersion[], aliases: Record<string, string> = {}
   }
 }
 
+function expectCatalogHashMismatch(operation: () => unknown): void {
+  assert.throws(operation, error => {
+    assert.ok(error instanceof Error)
+    assert.equal(error.name, 'CatalogHashMismatchError')
+    assert.match(error.message, /catalog.*hash.*mismatch/i)
+    return true
+  })
+}
+
+function testInjectedSnapshotsAreBoundToCanonicalHash() {
+  const zeroRow = catalogRow({
+    modelId: 'bound-zero-model',
+    standard: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  })
+  const validSnapshot = snapshotWith([zeroRow], { 'zero-alias': 'bound-zero-model' })
+  const event = pricedEvent({
+    model: 'zero-alias',
+    timestampMs: Date.parse('2026-01-15T00:00:00Z'),
+  })
+
+  assert.equal(resolveModelPrice('zero-alias', validSnapshot), 'bound-zero-model')
+  assert.equal(estimateCost(event, validSnapshot).status, 'zero_rate')
+
+  const changedRateWithOldHash: CatalogSnapshot = {
+    ...validSnapshot,
+    rows: [{
+      ...zeroRow,
+      standard: { ...zeroRow.standard, input: 1 },
+    }],
+  }
+  expectCatalogHashMismatch(() => estimateCost(event, changedRateWithOldHash))
+
+  const changedVersionWithOldHash: CatalogSnapshot = {
+    ...validSnapshot,
+    version: 'changed-version',
+  }
+  expectCatalogHashMismatch(() => estimateCost(event, changedVersionWithOldHash))
+
+  const changedAliasWithOldHash: CatalogSnapshot = {
+    ...validSnapshot,
+    aliases: { 'zero-alias': 'missing-model' },
+  }
+  expectCatalogHashMismatch(() => resolveModelPrice('zero-alias', changedAliasWithOldHash))
+}
+
 function testInjectedSnapshotsAndExclusiveValidTo() {
   const zeroRow = catalogRow({
     modelId: 'zero-model',
@@ -746,6 +832,7 @@ function testInjectedSnapshotsAndExclusiveValidTo() {
 
 async function main() {
   testCatalogResolution()
+  testDefaultCatalogIsDeeplyImmutable()
   testLegacyCatalogMigration()
   testCatalogValidation()
   testCatalogHashIsStableAcrossObjectKeyOrder()
@@ -753,6 +840,7 @@ async function main() {
   testLongContextTierSelection()
   testReportedCostsTakePrecedenceAndReconcile()
   testEventAmountValidation()
+  testInjectedSnapshotsAreBoundToCanonicalHash()
   testInjectedSnapshotsAndExclusiveValidTo()
   console.log('pricing regression tests passed')
 }

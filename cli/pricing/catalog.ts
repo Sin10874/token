@@ -126,23 +126,33 @@ function compareText(left: string, right: string): number {
   return 0
 }
 
-export const CATALOG_ROWS: PriceVersion[] = [...officialRows, ...legacyRows].sort((left, right) =>
-  compareText(left.modelId, right.modelId) || compareText(left.validFrom, right.validFrom),
+function deepFreeze<T>(value: T): T {
+  if (value === null || typeof value !== 'object') return value
+  for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child)
+  return Object.freeze(value)
+}
+
+export const CATALOG_ROWS: PriceVersion[] = deepFreeze(
+  [...officialRows, ...legacyRows].sort((left, right) =>
+    compareText(left.modelId, right.modelId) || compareText(left.validFrom, right.validFrom),
+  ),
 )
 
-export const CATALOG_ALIASES: Record<string, string> = Object.fromEntries(Object.entries({
-  'M-2.7': 'MiniMax-M2.7',
-  'M-3': 'MiniMax-M3',
-  'anthropic/claude-fable-5': 'claude-fable-5',
-  'claude-fable-5-thinking': 'claude-fable-5',
-  'fable-5': 'claude-fable-5',
-  'gpt-5.6': 'gpt-5.6-sol',
-  'k2p5': 'kimi-k2.5',
-  'k2p6': 'kimi-k2.6',
-  'k2p7': 'kimi-k2.7',
-  'kimi-code/kimi-for-coding': 'kimi-k2.5',
-  'kimi-for-coding': 'kimi-k2.5',
-}).sort(([left], [right]) => compareText(left, right)))
+export const CATALOG_ALIASES: Record<string, string> = deepFreeze(
+  Object.fromEntries(Object.entries({
+    'M-2.7': 'MiniMax-M2.7',
+    'M-3': 'MiniMax-M3',
+    'anthropic/claude-fable-5': 'claude-fable-5',
+    'claude-fable-5-thinking': 'claude-fable-5',
+    'fable-5': 'claude-fable-5',
+    'gpt-5.6': 'gpt-5.6-sol',
+    'k2p5': 'kimi-k2.5',
+    'k2p6': 'kimi-k2.6',
+    'k2p7': 'kimi-k2.7',
+    'kimi-code/kimi-for-coding': 'kimi-k2.5',
+    'kimi-for-coding': 'kimi-k2.5',
+  }).sort(([left], [right]) => compareText(left, right))),
+)
 
 export const PRICE_VERSIONS = CATALOG_ROWS
 export const MODEL_ALIASES = CATALOG_ALIASES
@@ -321,6 +331,25 @@ export function computeCatalogHash(snapshot: Pick<CatalogSnapshot, 'version' | '
   return createHash('sha256').update(JSON.stringify(sortKeysRecursively(payload))).digest('hex')
 }
 
+export class CatalogHashMismatchError extends Error {
+  readonly declaredHash: string
+  readonly computedHash: string
+
+  constructor(declaredHash: string, computedHash: string) {
+    super(`Catalog snapshot hash mismatch: declared ${declaredHash}, computed ${computedHash}`)
+    this.name = 'CatalogHashMismatchError'
+    this.declaredHash = declaredHash
+    this.computedHash = computedHash
+  }
+}
+
+export function assertCatalogSnapshotHash(snapshot: CatalogSnapshot): void {
+  const computedHash = computeCatalogHash(snapshot)
+  if (snapshot.hash !== computedHash) {
+    throw new CatalogHashMismatchError(snapshot.hash, computedHash)
+  }
+}
+
 validateCatalog(CATALOG_ROWS, CATALOG_ALIASES)
 
 export const CATALOG_HASH = computeCatalogHash({
@@ -329,12 +358,12 @@ export const CATALOG_HASH = computeCatalogHash({
   aliases: CATALOG_ALIASES,
 })
 
-export const CATALOG_SNAPSHOT: CatalogSnapshot = {
+export const CATALOG_SNAPSHOT: CatalogSnapshot = deepFreeze({
   version: CATALOG_VERSION,
   hash: CATALOG_HASH,
   rows: CATALOG_ROWS,
   aliases: CATALOG_ALIASES,
-}
+})
 
 function resolveExact(rawModel: string, snapshot: CatalogSnapshot): string | null {
   const canonicalIds = new Set(snapshot.rows.map(row => row.modelId))
@@ -362,6 +391,7 @@ function hasValidDateSuffix(value: string): boolean {
 }
 
 export function resolveModelPrice(rawModel: string, snapshot: CatalogSnapshot = CATALOG_SNAPSHOT): string | null {
+  assertCatalogSnapshotHash(snapshot)
   const exact = resolveExact(rawModel, snapshot)
   if (exact) return exact
 

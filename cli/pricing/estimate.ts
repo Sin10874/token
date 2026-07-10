@@ -1,4 +1,4 @@
-import { CATALOG_SNAPSHOT, resolveModelPrice } from './catalog.ts'
+import { assertCatalogSnapshotHash, CATALOG_SNAPSHOT, resolveModelPrice } from './catalog.ts'
 import type {
   CatalogSnapshot,
   CostEstimate,
@@ -142,6 +142,7 @@ export function estimateCost(
   event: PricingEvent,
   snapshot: CatalogSnapshot = CATALOG_SNAPSHOT,
 ): CostEstimate {
+  assertCatalogSnapshotHash(snapshot)
   validateEventAmounts(event)
   if (hasReportedCosts(event)) return reportedEstimate(event, snapshot)
 

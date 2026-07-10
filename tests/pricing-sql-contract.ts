@@ -215,6 +215,22 @@ function readMigration(): string {
   )
 }
 
+function readUploadMigration(): string {
+  return fs.readFileSync(
+    path.resolve(process.cwd(), 'supabase/migrations/202607100002_pricing_upload.sql'),
+    'utf8',
+  )
+}
+
+function functionDefinition(sql: string, name: string): string {
+  const match = sql.match(new RegExp(
+    `CREATE OR REPLACE FUNCTION public\\.${name}\\s*\\([\\s\\S]*?\\n\\$function\\$;`,
+    'i',
+  ))
+  assert.ok(match, `missing complete function definition for ${name}`)
+  return match[0]
+}
+
 function tableDefinition(sql: string, table: string): string {
   const match = sql.match(
     new RegExp(`CREATE TABLE IF NOT EXISTS public\\.${table}\\s*\\(([\\s\\S]*?)\\n\\);`, 'i'),
@@ -437,6 +453,162 @@ function testMigrationSeedsOnlyNullStatePointers(): void {
   )
 }
 
+function testUploadMigrationDefinesOnlyExactRpcSignatures(): void {
+  const migration = readUploadMigration()
+  const expected = [
+    ['tokend_price_event', 'p_event JSONB, p_catalog_version TEXT', 'JSONB'],
+    ['tokend_upload_events_v2', 'p_token TEXT, p_events JSONB, p_sync_states JSONB', 'JSON'],
+    ['tokend_upload_events', 'p_token TEXT, p_events JSONB, p_sync_states JSONB', 'JSON'],
+    ['tokend_pricing_preflight', '', 'JSON'],
+  ] as const
+
+  const definitions = [...migration.matchAll(
+    /CREATE OR REPLACE FUNCTION public\.([a-z0-9_]+)\s*\(([^)]*)\)\s*RETURNS\s+(JSONB|JSON)\b/gi,
+  )]
+  assert.equal(definitions.length, expected.length)
+  for (const [name, args, returns] of expected) {
+    const matches = definitions.filter(match => match[1] === name)
+    assert.equal(matches.length, 1, `${name} must not be overloaded`)
+    assert.equal(matches[0][2].replace(/\s+/g, ' ').trim(), args)
+    assert.equal(matches[0][3].toUpperCase(), returns)
+
+    const body = functionDefinition(migration, name)
+    assert.match(body, /LANGUAGE\s+(?:plpgsql|sql)\b/i)
+    assert.match(body, /SECURITY DEFINER/i)
+    assert.match(body, /SET search_path\s*=\s*public\s*,\s*pg_temp/i)
+  }
+
+  assert.doesNotMatch(
+    migration,
+    /DROP\s+(?:TABLE|VIEW)\s+(?:IF EXISTS\s+)?(?:public\.)?tokend_/i,
+  )
+  assert.doesNotMatch(
+    migration,
+    /DROP\s+FUNCTION[^;]*tokend_(?:get_|validate_token|upload_messages|rebuild|backfill)/i,
+  )
+  assert.match(migration, /NOTIFY pgrst, 'reload schema'/i)
+}
+
+function testUploadMigrationValidatesBeforeMutatingAndPreservesBaseRows(): void {
+  const migration = readUploadMigration()
+  const upload = functionDefinition(migration, 'tokend_upload_events_v2')
+  const wrapper = functionDefinition(migration, 'tokend_upload_events')
+
+  assert.match(upload, /jsonb_typeof\(p_events\)\s+IS DISTINCT FROM\s+'array'/i)
+  assert.match(upload, /jsonb_typeof\(p_sync_states\)\s+IS DISTINCT FROM\s+'array'/i)
+  assert.match(upload, /ERRCODE\s*=\s*'22023'/i)
+  assert.match(upload, /WITH ORDINALITY/i)
+  assert.match(upload, /DISTINCT ON\s*\([^)]*->>\s*'id'\)/i)
+  for (const field of [
+    'inputTokens', 'outputTokens', 'reasoningTokens', 'cacheReadTokens', 'cacheWriteTokens',
+  ]) assert.match(upload, new RegExp(`'${field}'`))
+  assert.match(upload, /ON CONFLICT\s*\(id, member_code\)\s*DO NOTHING/i)
+  assert.match(upload, /SET\s+project\s*=\s*COALESCE/i)
+  const baseUpdates = [...upload.matchAll(
+    /UPDATE public\.tokend_usage_events\s+SET([\s\S]*?)\s+WHERE\s+id\s*=/gi,
+  )]
+  assert.equal(baseUpdates.length, 1)
+  assert.match(baseUpdates[0][1], /^\s*project\s*=\s*COALESCE\([\s\S]*\)\s*$/i)
+  assert.doesNotMatch(baseUpdates[0][1], /,\s*[a-z_]+\s*=/i)
+  assert.match(upload, /pricing_status\s*[,)]/i)
+  assert.match(upload, /'reported'/i)
+  assert.match(upload, /'legacy'/i)
+  assert.match(upload, /'unpriced'/i)
+  assert.match(upload, /LEFT\([^,]+,\s*256\)/i)
+  assert.match(upload, /LEFT\([^,]+,\s*512\)/i)
+  assert.match(upload, /RETURN json_build_object\('ok', true, 'inserted', v_inserted\)/i)
+  assert.match(upload, /RETURN json_build_object\('ok', false, 'error', 'invalid_token'\)/i)
+  assert.match(wrapper, /tokend_upload_events_v2\(p_token, p_events, p_sync_states\)/i)
+}
+
+function testServerEstimatorAndRevisionContractAreComplete(): void {
+  const migration = readUploadMigration()
+  const estimator = functionDefinition(migration, 'tokend_price_event')
+  const upload = functionDefinition(migration, 'tokend_upload_events_v2')
+
+  assert.match(estimator, /tokend_pricing_canonical_models/i)
+  assert.match(estimator, /tokend_pricing_aliases/i)
+  assert.match(estimator, /\^\(\.\*\)-\(\[0-9\]\{8\}\)\$/i)
+  assert.match(estimator, /make_date/i)
+  assert.match(estimator, /valid_from\s*<=\s*v_event_at/i)
+  assert.match(estimator, /v_event_at\s*<\s*[^\n;]*valid_to/i)
+  assert.match(estimator, /v_prompt_tokens\s*>\s*v_price\.long_context_threshold/i)
+  assert.match(estimator, /v_semantics\s*=\s*'disjoint'/i)
+  assert.match(estimator, /reasoning_cost[\s\S]{0,180}output_rate/i)
+  assert.match(estimator, /'zero_rate'/i)
+  assert.match(estimator, /'estimated'/i)
+  assert.match(estimator, /'unpriced'/i)
+  assert.match(estimator, /unknown_token_semantics/i)
+  assert.doesNotMatch(estimator, /\b(?:INSERT|UPDATE|DELETE|TRUNCATE)\b/i)
+
+  assert.match(upload, /active_catalog_version/i)
+  assert.match(upload, /previous_catalog_version/i)
+  assert.match(upload, /status\s+IN\s*\('staging',\s*'reconciled'\)/i)
+  assert.match(upload, /array_agg\(DISTINCT target\.catalog_version ORDER BY target\.catalog_version\)/i)
+  assert.match(upload, /FOREACH v_catalog_version IN ARRAY v_catalog_versions/i)
+  assert.match(upload, /tokend_price_event\(v_evt, v_catalog_version\)/i)
+  assert.match(upload, /INSERT INTO public\.tokend_event_cost_revisions/i)
+  assert.match(upload, /backfill_run_id[\s\S]{0,900}\bNULL\b/i)
+  assert.match(upload, /ON CONFLICT\s*\(version, member_code, event_id\)\s*DO UPDATE/i)
+  assert.match(upload, /pricing_status\s*=\s*EXCLUDED\.pricing_status/i)
+  assert.match(upload, /tokend_event_cost_revisions\.pricing_status\s*=\s*'unpriced'/i)
+}
+
+function testPreflightIsAggregateOnlyWithExactKeys(): void {
+  const migration = readUploadMigration()
+  const preflight = functionDefinition(migration, 'tokend_pricing_preflight')
+  const expectedKeys = [
+    'eventCount', 'eligibleEventCount', 'eligibleZeroCostEventCount', 'zeroCostByModel',
+    'legacyPriceRowCount', 'statusCounts', 'unpricedEventCount', 'unpricedShare',
+    'postSnapshotEventCount', 'membersOver2xCount', 'activeRunStatus',
+    'activeReconciliationHash', 'rolloutFixtureCount', 'activeCatalogVersion',
+    'activeRunId', 'previousCatalogVersion', 'previousRunId',
+  ]
+  const topLevelReturn = preflight.match(/RETURN json_build_object\(([\s\S]*?)\n\s*\);\s*\nEND/i)
+  assert.ok(topLevelReturn, 'preflight must return one final JSON object')
+  for (const key of expectedKeys) {
+    assert.equal((topLevelReturn[1].match(new RegExp(`'${key}'`, 'g')) ?? []).length, 1, key)
+  }
+  assert.match(preflight, /total_tokens\s*>\s*0/i)
+  assert.match(preflight, /member_code\s+LIKE\s+'ROLL%'/i)
+  assert.match(preflight, />\s*2\s*\*/i)
+  assert.match(preflight, /revision\.computed_at\s*>=\s*v_snapshot_at/i)
+  assert.match(preflight, /revision\.backfill_run_id\s+IS NULL/i)
+  assert.match(preflight, /tokend_pricing_backfill_targets[\s\S]{0,320}NOT EXISTS|NOT EXISTS[\s\S]{0,320}tokend_pricing_backfill_targets/i)
+  assert.doesNotMatch(preflight, /usage_event\.timestamp_ms\s*>=/i)
+  assert.doesNotMatch(preflight, /json_build_object\([\s\S]*?'(?:memberCode|token|phone|sessionId|eventId)'/i)
+}
+
+function testUploadFunctionAclsAreExplicitAndMinimal(): void {
+  const migration = readUploadMigration()
+  const signatures = [
+    'tokend_price_event(JSONB, TEXT)',
+    'tokend_upload_events_v2(TEXT, JSONB, JSONB)',
+    'tokend_upload_events(TEXT, JSONB, JSONB)',
+    'tokend_pricing_preflight()',
+  ]
+  for (const signature of signatures) {
+    assert.match(
+      migration,
+      new RegExp(`REVOKE ALL ON FUNCTION public\\.${signature.replace(/[()]/g, value => `\\${value}`)} FROM PUBLIC, anon, authenticated, service_role`, 'i'),
+    )
+  }
+  assert.match(
+    migration,
+    /GRANT EXECUTE ON FUNCTION public\.tokend_upload_events_v2\(TEXT, JSONB, JSONB\) TO anon, authenticated/i,
+  )
+  assert.match(
+    migration,
+    /GRANT EXECUTE ON FUNCTION public\.tokend_upload_events\(TEXT, JSONB, JSONB\) TO anon, authenticated/i,
+  )
+  assert.match(
+    migration,
+    /GRANT EXECUTE ON FUNCTION public\.tokend_pricing_preflight\(\) TO service_role/i,
+  )
+  assert.doesNotMatch(migration, /GRANT EXECUTE[^;]*tokend_price_event/i)
+  assert.doesNotMatch(migration, /GRANT EXECUTE[^;]*tokend_upload_events[^;]*service_role/i)
+}
+
 function testSupabaseConfigAndPackageScriptsAreIsolated(): void {
   const packageJson = JSON.parse(
     fs.readFileSync(path.resolve(process.cwd(), 'package.json'), 'utf8'),
@@ -467,9 +639,13 @@ function testPgTapContractIsSelfContained(): void {
   )
   assert.match(pgTap, /^BEGIN;/m)
   assert.match(pgTap, /^ROLLBACK;/m)
-  assert.match(pgTap, /SELECT plan\(34\);/)
+  assert.match(pgTap, /SELECT plan\(102\);/)
   assert.equal(
     (pgTap.match(/^\\ir \.\.\/\.\.\/migrations\/202607100001_pricing_core\.sql$/gm) ?? []).length,
+    2,
+  )
+  assert.equal(
+    (pgTap.match(/^\\ir \.\.\/\.\.\/migrations\/202607100002_pricing_upload\.sql$/gm) ?? []).length,
     2,
   )
   for (const fixture of [
@@ -485,7 +661,7 @@ function testPgTapContractIsSelfContained(): void {
     /SELECT fk_ok\([\s\S]*ARRAY\['version', 'model_id'\][\s\S]*tokend_pricing_canonical_models/i,
   )
   assert.doesNotMatch(pgTap, /SELECT has_fk\(/i)
-  assert.ok((pgTap.match(/throws_ok\(/g) ?? []).length >= 11)
+  assert.ok((pgTap.match(/throws_ok\(/g) ?? []).length >= 20)
   assert.ok((pgTap.match(/'55000'/g) ?? []).length >= 11)
   assert.match(pgTap, /has_table_privilege\(\s*'service_role'[\s\S]*'SELECT'\s*\)/i)
   assert.match(pgTap, /has_table_privilege\(\s*'service_role'[\s\S]*'DELETE'\s*\)/i)
@@ -508,6 +684,11 @@ testMigrationIsAdditiveAndDefinesRequiredKeys()
 testMigrationUsesExactMoneyTypesAndAuditShape()
 testMigrationLocksDownCatalogAndTableAccess()
 testMigrationSeedsOnlyNullStatePointers()
+testUploadMigrationDefinesOnlyExactRpcSignatures()
+testUploadMigrationValidatesBeforeMutatingAndPreservesBaseRows()
+testServerEstimatorAndRevisionContractAreComplete()
+testPreflightIsAggregateOnlyWithExactKeys()
+testUploadFunctionAclsAreExplicitAndMinimal()
 testSupabaseConfigAndPackageScriptsAreIsolated()
 testPgTapContractIsSelfContained()
 console.log('pricing SQL contract tests passed')

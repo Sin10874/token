@@ -289,12 +289,57 @@ function canonicalizeSql(statement) {
   return output.trim().replace(/\s*;\s*$/, ';')
 }
 
+function splitSqlList(text) {
+  const parts = []
+  let start = 0
+  let depth = 0
+  let quote = null
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]
+    if (quote) {
+      if (char === quote && text[index + 1] === quote) { index += 1; continue }
+      if (char === quote) quote = null
+      continue
+    }
+    if (char === "'" || char === '"') { quote = char; continue }
+    if (char === '(' || char === '[') { depth += 1; continue }
+    if (char === ')' || char === ']') { depth -= 1; continue }
+    if (char === ',' && depth === 0) {
+      parts.push(text.slice(start, index))
+      start = index + 1
+    }
+  }
+  parts.push(text.slice(start))
+  return parts
+}
+
+function unquoteSqlIdentifiers(value) {
+  return value.replace(/"((?:[^"]|"")*)"/g, (_match, identifier) => identifier.replace(/""/g, '"'))
+}
+
 function signatureTypes(parameterText) {
-  return parameterText.split(',').map(parameter => {
+  if (!parameterText.trim()) return []
+  return splitSqlList(parameterText).map(parameter => {
     const withoutDefault = parameter.replace(/\s+DEFAULT[\s\S]*$/i, '')
-    const words = withoutDefault.trim().toLowerCase().replace(/\bpg_catalog\./g, '').split(/\s+/)
-    return words.at(-1)
+    const normalized = unquoteSqlIdentifiers(withoutDefault).trim().toLowerCase()
+      .replace(/\bpg_catalog\s*\.\s*/g, '')
+      .replace(/^(?:in|out|inout|variadic)\s+/i, '')
+    return normalized.split(/\s+/).at(-1)
   })
+}
+
+function sqlIdentifierPattern(identifier) {
+  const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return `(?:"${escaped}"|${escaped})`
+}
+
+function qualifiedPublicFunctionPattern(name) {
+  return `${sqlIdentifierPattern('public')}\\s*\\.\\s*${sqlIdentifierPattern(name)}`
+}
+
+function normalizeSqlRole(role) {
+  const normalized = unquoteSqlIdentifiers(role.trim())
+  return /^public$/i.test(normalized) ? 'PUBLIC' : normalized
 }
 
 const WRAPPER_SIGNATURE = 'public.tokend_upload_events(text,jsonb,jsonb)'
@@ -503,6 +548,14 @@ function expectedNextMigration(bound, candidate) {
   return null
 }
 
+function hasMatchingPostBinding(state, version) {
+  const hash = state.appliedMigrationHashes?.[version]
+  if (!hash) return false
+  const bindingHash = sha256(`${version}:${hash}`)
+  return (state.migrationGateHistory ?? []).some(entry =>
+    entry.phase === 'post' && entry.version === version && entry.hash === hash && entry.bindingHash === bindingHash)
+}
+
 export async function validateMigrationGate({ state, migrationList, migrationsDir, phase, fs = nodeFs, now = () => new Date().toISOString() }) {
   if (!['pre', 'post'].includes(phase)) fail('Migration gate phase must be pre or post')
   const rows = parseMigrationList(migrationList)
@@ -514,7 +567,9 @@ export async function validateMigrationGate({ state, migrationList, migrationsDi
   const history = [...(state.migrationGateHistory ?? [])]
   if (phase === 'pre') {
     if (!Array.isArray(state.migrationBaselineVersions)) {
-      if (listed.includes(EMERGENCY_VERSION)) fail('Emergency migration cannot be part of a normal pre baseline')
+      const contaminated = listed.find(version =>
+        MANAGED_MIGRATION_VERSIONS.includes(version) || version === EMERGENCY_VERSION || version >= RECOVERY_MIN_VERSION)
+      if (contaminated) fail(`Emergency, managed, or recovery rollout version ${contaminated} cannot be part of the initial baseline`)
       history.push({
         phase: 'pre',
         versions: listed,
@@ -542,6 +597,7 @@ export async function validateMigrationGate({ state, migrationList, migrationsDi
   const additions = listed.slice(prefix.length)
   if (additions.length > 1) fail('Post migration gate binds exactly one migration at a time')
   if (listed.length < prefix.length) fail('Post migration history lost a baseline or bound migration')
+  if (additions.length === 0 && bound.length === 0) fail('Post migration gate must add exactly one migration unless a matching post binding already exists')
   if (additions.length === 1) {
     const expected = expectedNextMigration(bound, additions[0])
     if (expected === null || additions[0] !== expected) fail(`Migration violates production order; expected ${expected ?? 'no further migration'}`)
@@ -573,6 +629,9 @@ export async function validateMigrationGate({ state, migrationList, migrationsDi
         timestamp: now(),
       })
     }
+  }
+  for (const version of bound) {
+    if (!hasMatchingPostBinding(state, version)) fail(`Migration ${version} is missing a matching post binding`)
   }
   const sticky = state.forwardRecoveryRequired === true || Object.hasOwn(appliedMigrationHashes, EMERGENCY_VERSION)
   return {
@@ -620,34 +679,34 @@ function validateReviewedPostSchema(sql) {
   const surfaceNames = Object.keys(signatures)
   const surfaceRecords = []
   for (const name of surfaceNames) {
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const definitions = statements.filter(statement => new RegExp(`^CREATE(?: OR REPLACE)? FUNCTION public\\.${escaped}\\s*\\(`, 'i').test(statement))
+    const qualified = qualifiedPublicFunctionPattern(name)
+    const definitions = statements.filter(statement => new RegExp(`^CREATE(?: OR REPLACE)? FUNCTION\\s+${qualified}\\s*\\(`, 'i').test(statement))
     if (definitions.length !== 1 || !/\bSECURITY DEFINER\b/i.test(definitions[0])
-      || !/\bSET search_path (?:=|TO) '?public'?, '?pg_temp'?(?:\s|$)/i.test(definitions[0])) {
+      || !/\bSET\s+(?:"search_path"|search_path)\s+(?:=|TO)\s+(?:"public"|'public'|public)\s*,\s*(?:"pg_temp"|'pg_temp'|pg_temp)(?:\s|$)/i.test(definitions[0])) {
       fail(`Post schema is missing exact security/search_path for ${name}`)
     }
-    const header = new RegExp(`^CREATE(?: OR REPLACE)? FUNCTION public\\.${escaped}\\s*\\(([\\s\\S]*?)\\)\\s*RETURNS`, 'i').exec(definitions[0])
+    const header = new RegExp(`^CREATE(?: OR REPLACE)? FUNCTION\\s+${qualified}\\s*\\(([\\s\\S]*?)\\)\\s*RETURNS`, 'i').exec(definitions[0])
     const actualTypes = header?.[1].trim() ? signatureTypes(header[1]).join(',') : ''
     const expectedTypes = signatures[name].trim() ? signatureTypes(signatures[name]).join(',') : ''
     if (actualTypes !== expectedTypes) fail(`Post schema signature mismatch for ${name}`)
     const grants = []
     for (const statement of statements) {
-      const match = new RegExp(`^GRANT EXECUTE ON FUNCTION public\\.${escaped}\\s*\\(([^)]*)\\) TO ([^;]+);?$`, 'i').exec(statement)
+      const match = new RegExp(`^GRANT\\s+(?:EXECUTE|ALL(?:\\s+PRIVILEGES)?)\\s+ON\\s+FUNCTION\\s+${qualified}\\s*\\(([^)]*)\\)\\s+TO\\s+([^;]+);?$`, 'i').exec(statement)
       if (match) {
         const aclTypes = match[1].trim() ? signatureTypes(match[1]).join(',') : ''
         if (aclTypes !== expectedTypes) fail(`Post schema grant signature mismatch for ${name}`)
-        grants.push(...match[2].split(',').map(role => role.trim()))
+        grants.push(...splitSqlList(match[2]).map(normalizeSqlRole))
       }
     }
     const expected = ADMIN_RPC_NAMES.includes(name) || name === PREFLIGHT_RPC_NAME ? ['service_role'] : ['anon', 'authenticated']
     if (!sameSet(grants, expected)) fail(`Post schema grant mismatch for ${name}`)
     const revokedRoles = []
     for (const statement of statements) {
-      const match = new RegExp(`^REVOKE ALL ON FUNCTION public\\.${escaped}\\s*\\(([^)]*)\\) FROM ([^;]+);?$`, 'i').exec(statement)
+      const match = new RegExp(`^REVOKE\\s+(?:EXECUTE|ALL(?:\\s+PRIVILEGES)?)\\s+ON\\s+FUNCTION\\s+${qualified}\\s*\\(([^)]*)\\)\\s+FROM\\s+([^;]+);?$`, 'i').exec(statement)
       if (!match) continue
       const aclTypes = match[1].trim() ? signatureTypes(match[1]).join(',') : ''
       if (aclTypes !== expectedTypes) fail(`Post schema revoke signature mismatch for ${name}`)
-      revokedRoles.push(...match[2].split(',').map(role => role.trim()))
+      revokedRoles.push(...splitSqlList(match[2]).map(normalizeSqlRole))
     }
     if (!sameSet(revokedRoles, ['PUBLIC', 'anon', 'authenticated', 'service_role'])) fail(`Post schema grant revocation is missing for ${name}`)
     surfaceRecords.push({

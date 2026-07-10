@@ -368,6 +368,23 @@ test('migration gate records a clean baseline then binds planned migrations incr
   await assert.rejects(validateMigrationGate({
     state: gated, migrationList: exactMigrationList([oldVersion, '202606010002']), migrationsDir: stagedDir, phase: 'pre', fs: nodeFs,
   }), /baseline.*bound|unexpected.*migration|rogue/i)
+  for (const contaminatedVersion of [MANAGED_MIGRATION_VERSIONS[0], EMERGENCY_VERSION, RECOVERY_MIN_VERSION]) {
+    await assert.rejects(validateMigrationGate({
+      state,
+      migrationList: exactMigrationList([oldVersion, contaminatedVersion]),
+      migrationsDir: stagedDir,
+      phase: 'pre',
+      fs: nodeFs,
+    }), /initial.*baseline.*rollout|managed|emergency|recovery/i)
+  }
+
+  await assert.rejects(validateMigrationGate({
+    state: gated,
+    migrationList: exactMigrationList([oldVersion]),
+    migrationsDir: stagedDir,
+    phase: 'post',
+    fs: nodeFs,
+  }), /exactly one|idempotent.*binding|matching post binding/i)
 
   await writeFile(path.join(stagedDir, path.basename(files[MANAGED_MIGRATION_VERSIONS[0]])), await readFile(files[MANAGED_MIGRATION_VERSIONS[0]]))
   await writeFile(path.join(stagedDir, path.basename(files[MANAGED_MIGRATION_VERSIONS[1]])), await readFile(files[MANAGED_MIGRATION_VERSIONS[1]]))
@@ -391,6 +408,10 @@ test('migration gate records a clean baseline then binds planned migrations incr
       now: () => `2026-07-10T00:0${deployed.length}:00.000Z`,
     })
     assert.equal(post.appliedMigrationHashes[version], manifest.migrationHashes[version])
+    const idempotent = await validateMigrationGate({
+      state: post, migrationList: exactMigrationList(deployed), migrationsDir: stagedDir, phase: 'post', fs: nodeFs,
+    })
+    assert.equal(idempotent.appliedMigrationHashes[version], manifest.migrationHashes[version])
     const precheck = await validateMigrationGate({
       state: post, migrationList: exactMigrationList(deployed), migrationsDir: stagedDir, phase: 'pre', fs: nodeFs,
     })
@@ -398,6 +419,15 @@ test('migration gate records a clean baseline then binds planned migrations incr
   }
   assert.deepEqual(post.appliedMigrationHashes, manifest.migrationHashes)
   assert.equal(post.migrationGateHistory.filter(entry => entry.phase === 'post').length, MANAGED_MIGRATION_VERSIONS.length)
+
+  const latestVersion = MANAGED_MIGRATION_VERSIONS.at(-1)!
+  await assert.rejects(validateMigrationGate({
+    state: { ...post, migrationGateHistory: post.migrationGateHistory.filter(entry => entry.version !== latestVersion) },
+    migrationList: exactMigrationList(deployed),
+    migrationsDir: stagedDir,
+    phase: 'post',
+    fs: nodeFs,
+  }), /matching post binding/i)
 
   await assert.rejects(validateMigrationGate({
     state, migrationList: exactMigrationList([oldVersion]).replace(`${oldVersion} | ${oldVersion}`, `${oldVersion} | 202607109998`),
@@ -511,23 +541,39 @@ test('emergency verification requires 999 history and only the legacy surface', 
   }), /legacy.*allowed/i)
 })
 
-function reviewedPostSchema(): string {
+function pgDumpPostSchema({ grantPrivilege = 'ALL', body = `SELECT '{}'::"jsonb";` } = {}): string {
   const signatures: Record<string, string> = {
     tokend_upload_events_v2: 'TEXT, JSONB, JSONB',
     [PREFLIGHT_RPC_NAME]: '',
     ...ADMIN_RPC_SIGNATURES,
     ...CLIENT_RPC_SIGNATURES,
   }
-  return Object.entries(signatures).map(([name, signature]) => {
-    const role = ADMIN_RPC_NAMES.includes(name) || name === PREFLIGHT_RPC_NAME ? 'service_role' : 'anon, authenticated'
+  const functions = Object.entries(signatures).map(([name, signature]) => {
+    const types = signature ? signature.split(',').map(type => type.trim().toLowerCase()) : []
+    const namedSignature = types.map((type, index) => `"p_arg_${index + 1}" "${type}"`).join(', ')
+    const aclSignature = types.map(type => `"${type}"`).join(', ')
+    const roles = ADMIN_RPC_NAMES.includes(name) || name === PREFLIGHT_RPC_NAME
+      ? ['service_role']
+      : ['anon', 'authenticated']
+    const grants = roles.map(role => `GRANT ${grantPrivilege} ON FUNCTION "public"."${name}"(${aclSignature}) TO "${role}";`).join('\n')
     return `
-CREATE OR REPLACE FUNCTION public.${name}(${signature}) RETURNS JSON
-LANGUAGE SQL SECURITY DEFINER SET search_path = public, pg_temp
-AS $$ SELECT '{}'::JSON $$;
-REVOKE ALL ON FUNCTION public.${name}(${signature}) FROM PUBLIC, anon, authenticated, service_role;
-GRANT EXECUTE ON FUNCTION public.${name}(${signature}) TO ${role};
+CREATE FUNCTION "public"."${name}"(${namedSignature}) RETURNS "jsonb"
+    LANGUAGE "sql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_temp'
+    AS $function$
+${body}
+$function$;
+
+ALTER FUNCTION "public"."${name}"(${aclSignature}) OWNER TO "postgres";
+
+REVOKE ALL ON FUNCTION "public"."${name}"(${aclSignature}) FROM PUBLIC;
+REVOKE ALL ON FUNCTION "public"."${name}"(${aclSignature}) FROM "anon";
+REVOKE ALL ON FUNCTION "public"."${name}"(${aclSignature}) FROM "authenticated";
+REVOKE ALL ON FUNCTION "public"."${name}"(${aclSignature}) FROM "service_role";
+${grants}
 `
   }).join('\n')
+  return `-- PostgreSQL database dump\n\nSET statement_timeout = 0;\nSET lock_timeout = 0;\n${functions}\n-- PostgreSQL database dump complete\n`
 }
 
 function recoveredLiveSurface() {
@@ -574,8 +620,8 @@ test('forward recovery rejects every bypass and only one newly reviewed exact bi
     migrationsDir: dir,
     migrationFile,
     approval,
-    postSchema: reviewedPostSchema(),
-    livePostSchema: reviewedPostSchema(),
+    postSchema: pgDumpPostSchema({ grantPrivilege: 'EXECUTE' }),
+    livePostSchema: pgDumpPostSchema({ grantPrivilege: 'ALL' }),
     liveSurface: recoveredLiveSurface(),
     fs: nodeFs,
     now: () => '2026-07-11T00:00:00.000Z',
@@ -596,16 +642,22 @@ test('forward recovery rejects every bypass and only one newly reviewed exact bi
     ['spec review missing', { approval: { ...approval, specReview: 'Pending' } }, /specReview.*Approved/i],
     ['quality review missing', { approval: { ...approval, qualityReview: 'Rejected' } }, /qualityReview.*Approved/i],
     ['post gate missing', { state: { ...baseState, migrationGateHistory: [] } }, /post migration gate/i],
-    ['schema only incomplete', { postSchema: reviewedPostSchema().replace('tokend_upload_events_v2', 'missing_v2') }, /post schema/i],
+    ['schema only incomplete', { postSchema: pgDumpPostSchema().replace('tokend_upload_events_v2', 'missing_v2') }, /post schema/i],
     ['schema grants incomplete', {
-      postSchema: reviewedPostSchema().replace(
-        `GRANT EXECUTE ON FUNCTION public.tokend_get_summary_v5(${CLIENT_RPC_SIGNATURES.tokend_get_summary_v5}) TO anon, authenticated;`,
-        `GRANT EXECUTE ON FUNCTION public.tokend_get_summary_v5(${CLIENT_RPC_SIGNATURES.tokend_get_summary_v5}) TO service_role;`,
+      postSchema: pgDumpPostSchema().replace(
+        `GRANT ALL ON FUNCTION "public"."tokend_get_summary_v5"("text", "text", "text") TO "anon";`,
+        `GRANT ALL ON FUNCTION "public"."tokend_get_summary_v5"("text", "text", "text") TO "service_role";`,
       ),
     }, /post schema.*grant/i],
     ['linked live schema differs from reviewed schema', {
-      livePostSchema: reviewedPostSchema().replace("SELECT '{}'::JSON", "SELECT '{\"live\":true}'::JSON"),
+      livePostSchema: pgDumpPostSchema({ body: `SELECT '{"live":true}'::"jsonb";` }),
     }, /linked live schema.*reviewed/i],
+    ['linked dump ACL role is invalid', {
+      livePostSchema: pgDumpPostSchema().replace(
+        `GRANT ALL ON FUNCTION "public"."tokend_get_summary_v5"("text", "text", "text") TO "anon";`,
+        `GRANT ALL ON FUNCTION "public"."tokend_get_summary_v5"("text", "text", "text") TO "intruder";`,
+      ),
+    }, /post schema.*grant/i],
     ['RPC only incomplete', { liveSurface: { ...recoveredLiveSurface(), anonExecuteNames: [] } }, /live.*grants/i],
   ]
   for (const [label, override, pattern] of rejected) {
@@ -634,7 +686,7 @@ test('forward-recover command obtains an independent linked schema dump instead 
   await atomicWriteJson(statePath, { wrapperGatePassed: true, forwardRecoveryRequired: true }, { fs: nodeFs, randomUUID })
   await writeFile(migrationListPath, exactMigrationList([...MANAGED_MIGRATION_VERSIONS, EMERGENCY_VERSION, RECOVERY_MIN_VERSION]))
   await writeFile(migrationFile, 'SELECT recovery;')
-  await writeFile(postSchemaPath, reviewedPostSchema())
+  await writeFile(postSchemaPath, pgDumpPostSchema({ grantPrivilege: 'EXECUTE' }))
   await writeFile(approvalPath, '{}')
   let dumpCalls = 0
   const runner = createRolloutRunner({
@@ -643,7 +695,7 @@ test('forward-recover command obtains an independent linked schema dump instead 
     fs: nodeFs,
     dumpLinkedSchema: async () => {
       dumpCalls += 1
-      return reviewedPostSchema().replace("SELECT '{}'::JSON", "SELECT '{\"linked\":true}'::JSON")
+      return pgDumpPostSchema({ grantPrivilege: 'ALL', body: `SELECT '{"linked":true}'::"jsonb";` })
     },
     clock: () => new Date(), sleep: async () => {}, randomUUID,
   })

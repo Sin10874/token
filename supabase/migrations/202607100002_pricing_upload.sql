@@ -698,6 +698,12 @@ BEGIN
     END LOOP;
   END LOOP;
 
+  -- Take the upload fence before choosing catalog versions. ROW EXCLUSIVE
+  -- conflicts with the backfill creator's SHARE fence, so exactly one ordering
+  -- wins: an earlier upload commits and is frozen into the snapshot, or an
+  -- earlier backfill publishes its staging catalog before this upload prices.
+  LOCK TABLE public.tokend_usage_events IN ROW EXCLUSIVE MODE;
+
   SELECT COALESCE(
     array_agg(DISTINCT target.catalog_version ORDER BY target.catalog_version),
     ARRAY[]::TEXT[]

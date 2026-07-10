@@ -20,6 +20,7 @@
     "ingest": "tsx server/ingestion/index.ts",
     "test:sync": "tsx tests/cli-sync-contract.ts",
     "test:pricing": "tsx tests/pricing-regression.ts",
+    "test:pricing-db": "bash scripts/test-pricing-db.sh",
     "generate:pricing-sql": "tsx scripts/generate-supabase-pricing.mjs --write",
     "check:pricing-sql": "tsx scripts/generate-supabase-pricing.mjs --check",
     "setup-hooks": "git config core.hooksPath .githooks",

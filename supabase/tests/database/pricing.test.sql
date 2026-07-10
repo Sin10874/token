@@ -115,7 +115,7 @@ WHERE pronamespace = 'public'::regnamespace
 \ir ../../migrations/202607100003_pricing_rpcs.sql
 \ir ../../migrations/202607100003_pricing_rpcs.sql
 
-SELECT plan(139);
+SELECT plan(141);
 
 SELECT pass('pricing migration compiles and applies twice');
 
@@ -1568,6 +1568,8 @@ INSERT INTO public.tokend_members (member_code, token) VALUES
   ('RPC_BREAKDOWN', 'rpc-breakdown'),
   ('RPC_CROSS_SESSION', 'rpc-cross-session'),
   ('RPC_FLOAT', 'rpc-float'),
+  ('RPC_TINY_BASE', 'rpc-tiny-base'),
+  ('RPC_TINY_REVISION', 'rpc-tiny-revision'),
   ('RPC_OVERFLOW', 'rpc-overflow');
 
 INSERT INTO public.tokend_usage_events (
@@ -1666,9 +1668,19 @@ INSERT INTO public.tokend_usage_events (
   ('rpc-float-reconciled', 'RPC_FLOAT', (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT - 7000,
     'rpc-float-s', 'float-key', 'float-agent', 'openai', 'gpt-5.6-sol', 'coding',
     1, 0, 0, 0, 0, 1,
-    0.071762::REAL, 0.054700::REAL, 0.049848::REAL, 0.076374::REAL, 0.060217::REAL,
-    0.312901::REAL, 'stop', 'float-project',
+    0.375045::REAL, 0.45624::REAL, 0.29478::REAL, 0.0097025::REAL, 0.409206::REAL,
+    1.54497::REAL, 'stop', 'float-project',
     'reported', 'standard', 'client-report-v1', NULL, 'disjoint', 0, NULL),
+  ('rpc-tiny-base-invalid', 'RPC_TINY_BASE', (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT - 6500,
+    'rpc-tiny-base-s', 'tiny-key', 'tiny-agent', 'openai', 'gpt-5.6-sol', 'coding',
+    1, 0, 0, 0, 0, 1,
+    0.000002::REAL, 0, 0, 0, 0, 0.000001::REAL, 'stop', 'tiny-project',
+    'reported', 'standard', 'client-report-v1', NULL, 'disjoint', 0, NULL),
+  ('rpc-tiny-revision-gap', 'RPC_TINY_REVISION', (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT - 6250,
+    'rpc-tiny-revision-s', 'tiny-revision-key', 'tiny-revision-agent', 'openai', 'gpt-5.6-sol', 'coding',
+    1, 0, 0, 0, 0, 1,
+    0, 0, 0, 0, 0, 0, 'stop', 'tiny-revision-project',
+    'unpriced', 'standard', NULL, NULL, 'disjoint', 0, 'reconciled'),
   ('rpc-overflow-event', 'RPC_OVERFLOW', (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT - 6000,
     'rpc-overflow-s', 'overflow-key', 'overflow-agent', 'openai', 'gpt-5.6-sol', 'coding',
     500000000, 500000000, 500000000, 500000000, 500000000, 1,
@@ -1687,7 +1699,10 @@ INSERT INTO public.tokend_event_cost_revisions (
   ('2026-07-09', 'RPC_FIX', 'rpc-estimated', '00000000-0000-0000-0000-000000000002', 10, 20, 10, 10, 10, 0, 60, 'estimated', 'standard', 'gpt-5.6-sol', '2026-07-09', 'reconciled'),
   ('2026-07-10', 'RPC_FIX', 'rpc-zero-rate', NULL, 0, 0, 0, 0, 0, 0, 0, 'zero_rate', 'standard', 'gpt-5.6-sol', '2026-07-10', 'reconciled'),
   ('2026-07-10', 'RPC_FIX', 'rpc-unpriced', NULL, 0, 0, 0, 0, 0, 0, 0, 'unpriced', 'standard', NULL, NULL, 'reconciled'),
-  ('2026-07-10', 'RPC_ZERO', 'rpc-zero-event', NULL, 0, 0, 0, 0, 0, 0, 0, 'zero_rate', 'standard', 'gpt-5.6-sol', '2026-07-10', 'reconciled');
+  ('2026-07-10', 'RPC_ZERO', 'rpc-zero-event', NULL, 0, 0, 0, 0, 0, 0, 0, 'zero_rate', 'standard', 'gpt-5.6-sol', '2026-07-10', 'reconciled'),
+  ('2026-07-10', 'RPC_TINY_REVISION', 'rpc-tiny-revision-gap', NULL,
+    1.0000000000, 0, 0, 0, 0, 0.0000000001, 1.0000000001,
+    'estimated', 'standard', 'gpt-5.6-sol', '2026-07-10', 'unallocated');
 
 CREATE FUNCTION pg_temp.rpc_envelope(p_payload JSONB)
 RETURNS JSONB
@@ -1966,12 +1981,42 @@ SELECT results_eq(
 SELECT results_eq(
   $actual$
     SELECT effective_breakdown_status, effective_unallocated_cost,
+      effective_input_cost + effective_output_cost + effective_reasoning_cost
+        + effective_cache_read_cost + effective_cache_write_cost = effective_total_cost,
+      effective_input_cost IS DISTINCT FROM input_cost::NUMERIC
+        OR effective_output_cost IS DISTINCT FROM output_cost::NUMERIC
+        OR effective_reasoning_cost IS DISTINCT FROM reasoning_cost::NUMERIC
+        OR effective_cache_read_cost IS DISTINCT FROM cache_read_cost::NUMERIC
+        OR effective_cache_write_cost IS DISTINCT FROM cache_write_cost::NUMERIC,
       (public.tokend_get_summary_v5('rpc-float')::JSONB->>'breakdownInvalidCount')::BIGINT
     FROM public.tokend_effective_usage_events
     WHERE member_code = 'RPC_FLOAT' AND id = 'rpc-float-reconciled'
   $actual$,
-  $expected$ VALUES ('reconciled'::TEXT, 0::NUMERIC, 0::BIGINT) $expected$,
+  $expected$ VALUES ('reconciled'::TEXT, 0::NUMERIC, true, true, 0::BIGINT) $expected$,
   'REAL base costs use epsilon without inventing invalid or unallocated breakdowns'
+);
+
+SELECT results_eq(
+  $actual$
+    SELECT effective_breakdown_status, effective_unallocated_cost
+    FROM public.tokend_effective_usage_events
+    WHERE member_code = 'RPC_TINY_BASE' AND id = 'rpc-tiny-base-invalid'
+  $actual$,
+  $expected$ VALUES ('invalid'::TEXT, 0::NUMERIC) $expected$,
+  'small significant base mismatch is not hidden by a fixed epsilon floor'
+);
+
+SELECT results_eq(
+  $actual$
+    SELECT effective_breakdown_status, effective_unallocated_cost,
+      effective_total_cost
+        - effective_input_cost - effective_output_cost - effective_reasoning_cost
+        - effective_cache_read_cost - effective_cache_write_cost
+    FROM public.tokend_effective_usage_events
+    WHERE member_code = 'RPC_TINY_REVISION' AND id = 'rpc-tiny-revision-gap'
+  $actual$,
+  $expected$ VALUES ('unallocated'::TEXT, 0.0000000001::NUMERIC, 0.0000000001::NUMERIC) $expected$,
+  'NUMERIC revision discrepancies use zero epsilon'
 );
 
 SELECT lives_ok(

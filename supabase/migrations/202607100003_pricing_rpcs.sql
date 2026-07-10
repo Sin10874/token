@@ -94,37 +94,37 @@ WITH selected AS (
       WHEN 'legacy' THEN COALESCE(selected.input_cost, 0)::NUMERIC
       WHEN 'revision' THEN COALESCE(selected.revision_input_cost, 0)::NUMERIC
       ELSE 0::NUMERIC
-    END AS effective_input_cost,
+    END AS selected_input_cost,
     CASE selected.effective_source
       WHEN 'reported' THEN COALESCE(selected.output_cost, 0)::NUMERIC
       WHEN 'legacy' THEN COALESCE(selected.output_cost, 0)::NUMERIC
       WHEN 'revision' THEN COALESCE(selected.revision_output_cost, 0)::NUMERIC
       ELSE 0::NUMERIC
-    END AS effective_output_cost,
+    END AS selected_output_cost,
     CASE selected.effective_source
       WHEN 'reported' THEN COALESCE(selected.reasoning_cost, 0)::NUMERIC
       WHEN 'legacy' THEN COALESCE(selected.reasoning_cost, 0)::NUMERIC
       WHEN 'revision' THEN COALESCE(selected.revision_reasoning_cost, 0)::NUMERIC
       ELSE 0::NUMERIC
-    END AS effective_reasoning_cost,
+    END AS selected_reasoning_cost,
     CASE selected.effective_source
       WHEN 'reported' THEN COALESCE(selected.cache_read_cost, 0)::NUMERIC
       WHEN 'legacy' THEN COALESCE(selected.cache_read_cost, 0)::NUMERIC
       WHEN 'revision' THEN COALESCE(selected.revision_cache_read_cost, 0)::NUMERIC
       ELSE 0::NUMERIC
-    END AS effective_cache_read_cost,
+    END AS selected_cache_read_cost,
     CASE selected.effective_source
       WHEN 'reported' THEN COALESCE(selected.cache_write_cost, 0)::NUMERIC
       WHEN 'legacy' THEN COALESCE(selected.cache_write_cost, 0)::NUMERIC
       WHEN 'revision' THEN COALESCE(selected.revision_cache_write_cost, 0)::NUMERIC
       ELSE 0::NUMERIC
-    END AS effective_cache_write_cost,
+    END AS selected_cache_write_cost,
     CASE selected.effective_source
       WHEN 'reported' THEN COALESCE(selected.total_cost, 0)::NUMERIC
       WHEN 'legacy' THEN COALESCE(selected.total_cost, 0)::NUMERIC
       WHEN 'revision' THEN COALESCE(selected.revision_total_cost, 0)::NUMERIC
       ELSE 0::NUMERIC
-    END AS effective_total_cost,
+    END AS selected_total_cost,
     CASE selected.effective_source
       WHEN 'reported' THEN 'reported'
       WHEN 'legacy' THEN 'legacy'
@@ -156,24 +156,84 @@ WITH selected AS (
 ), compared AS (
   SELECT
     costed.*,
-    costed.effective_input_cost + costed.effective_output_cost
-      + costed.effective_reasoning_cost + costed.effective_cache_read_cost
-      + costed.effective_cache_write_cost AS effective_component_total,
+    costed.selected_total_cost
+      - costed.selected_input_cost - costed.selected_output_cost
+      - costed.selected_reasoning_cost - costed.selected_cache_read_cost
+      - costed.selected_cache_write_cost AS comparison_delta,
     CASE
       WHEN costed.effective_source IN ('reported', 'legacy')
-        THEN GREATEST(0.000001::NUMERIC, ABS(costed.effective_total_cost) * 0.000001::NUMERIC)
+        THEN (
+          ABS(costed.selected_total_cost)
+          + ABS(costed.selected_input_cost)
+          + ABS(costed.selected_output_cost)
+          + ABS(costed.selected_reasoning_cost)
+          + ABS(costed.selected_cache_read_cost)
+          + ABS(costed.selected_cache_write_cost)
+        ) * 0.000002::NUMERIC
       ELSE 0::NUMERIC
-    END AS comparison_epsilon
+    END AS comparison_epsilon,
+    CASE
+      WHEN costed.selected_input_cost >= costed.selected_output_cost
+        AND costed.selected_input_cost >= costed.selected_reasoning_cost
+        AND costed.selected_input_cost >= costed.selected_cache_read_cost
+        AND costed.selected_input_cost >= costed.selected_cache_write_cost THEN 'input'
+      WHEN costed.selected_output_cost >= costed.selected_reasoning_cost
+        AND costed.selected_output_cost >= costed.selected_cache_read_cost
+        AND costed.selected_output_cost >= costed.selected_cache_write_cost THEN 'output'
+      WHEN costed.selected_reasoning_cost >= costed.selected_cache_read_cost
+        AND costed.selected_reasoning_cost >= costed.selected_cache_write_cost THEN 'reasoning'
+      WHEN costed.selected_cache_read_cost >= costed.selected_cache_write_cost THEN 'cache_read'
+      ELSE 'cache_write'
+    END AS normalization_target,
+    GREATEST(
+      costed.selected_input_cost,
+      costed.selected_output_cost,
+      costed.selected_reasoning_cost,
+      costed.selected_cache_read_cost,
+      costed.selected_cache_write_cost
+    ) AS normalization_component
   FROM costed
-), resolved AS (
+), classified AS (
   SELECT
     compared.*,
     CASE
-      WHEN effective_component_total > effective_total_cost + comparison_epsilon THEN 'invalid'
-      WHEN effective_total_cost - effective_component_total > comparison_epsilon THEN 'unallocated'
+      WHEN comparison_delta < -comparison_epsilon THEN 'invalid'
+      WHEN comparison_delta > comparison_epsilon THEN 'unallocated'
+      WHEN comparison_delta < 0
+        AND normalization_component + comparison_delta < 0 THEN 'invalid'
       ELSE 'reconciled'
     END AS effective_breakdown_status
   FROM compared
+), resolved AS (
+  SELECT
+    classified.*,
+    CASE
+      WHEN classified.effective_breakdown_status = 'reconciled' AND classified.normalization_target = 'input'
+        THEN classified.selected_input_cost + classified.comparison_delta
+      ELSE classified.selected_input_cost
+    END AS effective_input_cost,
+    CASE
+      WHEN classified.effective_breakdown_status = 'reconciled' AND classified.normalization_target = 'output'
+        THEN classified.selected_output_cost + classified.comparison_delta
+      ELSE classified.selected_output_cost
+    END AS effective_output_cost,
+    CASE
+      WHEN classified.effective_breakdown_status = 'reconciled' AND classified.normalization_target = 'reasoning'
+        THEN classified.selected_reasoning_cost + classified.comparison_delta
+      ELSE classified.selected_reasoning_cost
+    END AS effective_reasoning_cost,
+    CASE
+      WHEN classified.effective_breakdown_status = 'reconciled' AND classified.normalization_target = 'cache_read'
+        THEN classified.selected_cache_read_cost + classified.comparison_delta
+      ELSE classified.selected_cache_read_cost
+    END AS effective_cache_read_cost,
+    CASE
+      WHEN classified.effective_breakdown_status = 'reconciled' AND classified.normalization_target = 'cache_write'
+        THEN classified.selected_cache_write_cost + classified.comparison_delta
+      ELSE classified.selected_cache_write_cost
+    END AS effective_cache_write_cost,
+    classified.selected_total_cost AS effective_total_cost
+  FROM classified
 )
 SELECT
   resolved.id,

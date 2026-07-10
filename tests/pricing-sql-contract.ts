@@ -722,12 +722,31 @@ function testEffectiveRelationHasOneAuditablePrecedenceRule(): void {
   )
   assert.match(
     definition,
-    /CASE\s+WHEN costed\.effective_source IN \('reported', 'legacy'\)[\s\S]*?GREATEST\(0\.000001::NUMERIC, ABS\(costed\.effective_total_cost\) \* 0\.000001::NUMERIC\)[\s\S]*?ELSE 0::NUMERIC\s+END AS comparison_epsilon/i,
+    /CASE\s+WHEN costed\.effective_source IN \('reported', 'legacy'\)\s+THEN \(\s*ABS\(costed\.selected_total_cost\)\s*\+ ABS\(costed\.selected_input_cost\)\s*\+ ABS\(costed\.selected_output_cost\)\s*\+ ABS\(costed\.selected_reasoning_cost\)\s*\+ ABS\(costed\.selected_cache_read_cost\)\s*\+ ABS\(costed\.selected_cache_write_cost\)\s*\) \* 0\.000002::NUMERIC\s+ELSE 0::NUMERIC\s+END AS comparison_epsilon/i,
+  )
+  assert.doesNotMatch(definition, /GREATEST\(\s*0\.000001::NUMERIC/i)
+  assert.match(
+    definition,
+    /costed\.selected_total_cost\s+- costed\.selected_input_cost\s+- costed\.selected_output_cost\s+- costed\.selected_reasoning_cost\s+- costed\.selected_cache_read_cost\s+- costed\.selected_cache_write_cost AS comparison_delta/i,
   )
   assert.match(
     definition,
-    /effective_component_total > effective_total_cost \+ comparison_epsilon THEN 'invalid'[\s\S]*?effective_total_cost - effective_component_total > comparison_epsilon THEN 'unallocated'[\s\S]*?ELSE 'reconciled'/i,
+    /comparison_delta < -comparison_epsilon THEN 'invalid'[\s\S]*?comparison_delta > comparison_epsilon THEN 'unallocated'[\s\S]*?comparison_delta < 0[\s\S]*?normalization_component \+ comparison_delta < 0 THEN 'invalid'[\s\S]*?ELSE 'reconciled'/i,
   )
+  assert.match(
+    definition,
+    /CASE\s+WHEN costed\.selected_input_cost >= costed\.selected_output_cost\s+AND costed\.selected_input_cost >= costed\.selected_reasoning_cost\s+AND costed\.selected_input_cost >= costed\.selected_cache_read_cost\s+AND costed\.selected_input_cost >= costed\.selected_cache_write_cost THEN 'input'\s+WHEN costed\.selected_output_cost >= costed\.selected_reasoning_cost\s+AND costed\.selected_output_cost >= costed\.selected_cache_read_cost\s+AND costed\.selected_output_cost >= costed\.selected_cache_write_cost THEN 'output'\s+WHEN costed\.selected_reasoning_cost >= costed\.selected_cache_read_cost\s+AND costed\.selected_reasoning_cost >= costed\.selected_cache_write_cost THEN 'reasoning'\s+WHEN costed\.selected_cache_read_cost >= costed\.selected_cache_write_cost THEN 'cache_read'\s+ELSE 'cache_write'\s+END AS normalization_target/i,
+  )
+  assert.match(
+    definition,
+    /GREATEST\(\s*costed\.selected_input_cost,\s*costed\.selected_output_cost,\s*costed\.selected_reasoning_cost,\s*costed\.selected_cache_read_cost,\s*costed\.selected_cache_write_cost\s*\) AS normalization_component/i,
+  )
+  for (const component of ['input', 'output', 'reasoning', 'cache_read', 'cache_write']) {
+    assert.match(
+      definition,
+      new RegExp(`WHEN classified\\.effective_breakdown_status = 'reconciled' AND classified\\.normalization_target = '${component}'\\s+THEN classified\\.selected_${component}_cost \\+ classified\\.comparison_delta\\s+ELSE classified\\.selected_${component}_cost\\s+END AS effective_${component}_cost`, 'i'),
+    )
+  }
   assert.doesNotMatch(definition, /selected_unallocated_cost\s*\+/i)
   assert.doesNotMatch(definition, /effective_component_total\s*>\s*effective_total_cost\s+THEN/i)
   assert.doesNotMatch(definition, /effective_cache_read_cost[\s\S]{0,160}(?:total_cost\s*-|-\s*[^\n]*total_cost)/i)
@@ -929,6 +948,8 @@ function testPgTapContractIsSelfContained(): void {
     'service_role cannot execute any vNext RPC',
     'invalid timezone falls back to Asia Shanghai across timezone-aware RPCs',
     'REAL base costs use epsilon without inventing invalid or unallocated breakdowns',
+    'small significant base mismatch is not hidden by a fixed epsilon floor',
+    'NUMERIC revision discrepancies use zero epsilon',
     'session detail event token arithmetic widens before summing five buckets',
     'same timestamp metadata resolves by id descending in parent and detail',
     'session limits clamp negative and oversized anonymous requests',

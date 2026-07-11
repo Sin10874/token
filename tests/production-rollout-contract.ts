@@ -2484,6 +2484,33 @@ test('fixture create checkpoints and adopts one commit-unknown member', async ()
   assert.equal(postCalls, 1)
 })
 
+test('explicit cleanup removes a commit-unknown fixture candidate', async () => {
+  const dir = await tempDir()
+  const statePath = path.join(dir, 'fixture-candidate-cleanup.json')
+  const candidate = {
+    suffix: 'candidate', memberCode: 'ROLL_candidate', memberToken: 'roll_candidate',
+    phone: 'tokend-rollout-candidate', createdAt: '2026-07-10T00:00:00Z',
+  }
+  await atomicWriteJson(statePath, { wrapperGatePassed: true, fixtureCandidate: candidate }, { fs: nodeFs, randomUUID })
+  const deletes: string[] = []
+  const runner = createRolloutRunner({
+    env: { SUPABASE_URL: 'https://project.supabase.co', SUPABASE_SERVICE_KEY: 'svc', SUPABASE_ANON_KEY: 'anon' },
+    fetch: async (input, init = {}) => {
+      const url = String(input)
+      if (init.method === 'DELETE') { deletes.push(url); return jsonResponse([]) }
+      if (url.includes('/tokend_pricing_backfill_targets?')) return jsonResponse([])
+      if (url.includes('/tokend_members?')) return jsonResponse([])
+      return jsonResponse([])
+    },
+    fs: nodeFs, clock: () => new Date(), sleep: async () => {}, randomUUID,
+  })
+  await runner.execute('cleanup', { state: statePath })
+  const cleaned = JSON.parse(await readFile(statePath, 'utf8'))
+  assert.equal(cleaned.fixtureCandidate, undefined)
+  assert.ok(deletes.some(url => url.includes('/tokend_members?member_code=eq.ROLL_candidate')))
+  assert.ok(deletes.every(url => url.includes('member_code=eq.ROLL_candidate')))
+})
+
 test('fixture creation preserves gates and smoke uses exact upload bodies plus authoritative row queries', async () => {
   const dir = await tempDir()
   const statePath = path.join(dir, 'state.json')

@@ -2100,6 +2100,7 @@ function childRows(payload, keys) {
 
 async function deleteFixtureData({ state, http, includeMember, preserveBackfill = false, timestamp }) {
   const memberCode = state.fixture?.memberCode
+    ?? (includeMember ? state.fixtureCandidate?.memberCode : null)
   if (!memberCode) {
     return state
   }
@@ -2134,6 +2135,7 @@ async function deleteFixtureData({ state, http, includeMember, preserveBackfill 
     const remaining = await http.json(`tokend_members?select=member_code&${filter}`, { role: 'service', method: 'GET' })
     if (!Array.isArray(remaining) || remaining.length !== 0) fail('Fixture cleanup zero-row verification failed')
     delete next.fixture
+    delete next.fixtureCandidate
     return next
   }
   return { ...next, fixture: { ...state.fixture, resetAt: timestamp } }
@@ -3243,7 +3245,7 @@ export function createRolloutRunner(dependencies = {}) {
     async cleanupOnFailure(stateFile) {
       if (!stateFile) return
       const state = await loadState(stateFile)
-      if (state.backfillCreateAttempt || state.backfill?.runId || (
+      if (state.fixtureCandidate || state.backfillCreateAttempt || state.backfill?.runId || (
         state.activationRehearsal?.phase && state.activationRehearsal.phase !== 'reactivated'
       )) return
       const next = await deleteFixtureData({

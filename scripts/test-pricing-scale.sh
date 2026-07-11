@@ -12,10 +12,13 @@ upload_rate="${TOKEND_SCALE_UPLOAD_RATE:-20}"
 freeze_load_seconds="${TOKEND_SCALE_FREEZE_LOAD_SECONDS:-90}"
 backfill_load_seconds="${TOKEND_SCALE_BACKFILL_LOAD_SECONDS:-180}"
 steady_load_seconds="${TOKEND_SCALE_STEADY_LOAD_SECONDS:-30}"
+pre_rollout_load_seconds="${TOKEND_SCALE_PRE_ROLLOUT_LOAD_SECONDS:-30}"
+min_overlap_samples="${TOKEND_SCALE_MIN_OVERLAP_SAMPLES:-100}"
 database="tokend_pricing_scale_${scale_rows}_$$"
 evidence_dir="${TOKEND_SCALE_EVIDENCE_DIR:-/tmp/tokend-pricing-scale-${scale_rows}-$(date +%Y%m%d-%H%M%S)}"
 active_database=""
 memory_sampler_pid=""
+lock_holder_pid=""
 
 mkdir -p "$evidence_dir"
 chmod 700 "$evidence_dir"
@@ -40,6 +43,24 @@ run_file() {
     psql -X -v ON_ERROR_STOP=1 \
     -h 127.0.0.1 -p 5432 -U "$pg_user" -d "$active_database" "$@" -f - \
     < "$repo_root/$file"
+}
+
+postgres_rss_kb() {
+  container_command sh -c 'for pid in $(pgrep postgres); do
+    if [ -r "/proc/$pid/status" ]; then
+      awk "/^VmRSS:/ {print \$2}" "/proc/$pid/status" 2>/dev/null
+    fi
+  done | awk "{sum += \$1} END {print sum + 0}"'
+}
+
+container_memory_limit_kb() {
+  local limit
+  limit="$(container_command sh -c 'cat /sys/fs/cgroup/memory.max 2>/dev/null || echo max')"
+  if [[ "$limit" == "max" ]]; then
+    container_command awk '/^MemTotal:/ {print $2}' /proc/meminfo
+  else
+    echo $((limit / 1024))
+  fi
 }
 
 timed_sql() {
@@ -88,6 +109,17 @@ maximum_ms() {
   awk 'NF >= 3 && $3 ~ /^[0-9]+$/ { value = $3 / 1000; if (value > max) max = value } END { printf "%.6f\n", max }' "$1"
 }
 
+filter_log_interval() {
+  local input="$1" output="$2" started_ms="$3" finished_ms="$4"
+  awk -v started="$started_ms" -v finished="$finished_ms" '
+    NF >= 6 && $3 ~ /^[0-9]+$/ && $5 ~ /^[0-9]+$/ && $6 ~ /^[0-9]+$/ {
+      completed_ms = ($5 * 1000) + ($6 / 1000)
+      transaction_started_ms = completed_ms - ($3 / 1000)
+      if (transaction_started_ms <= finished && completed_ms >= started) print
+    }
+  ' "$input" > "$output"
+}
+
 json_field() {
   node -e "const fs=require('fs'); const value=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); console.log(value[process.argv[2]])" "$1" "$2"
 }
@@ -130,12 +162,16 @@ finish_pgbench() {
 sample_memory() {
   while container_command true >/dev/null 2>&1; do
     printf '%s\t' "$(now_ms)"
-    container_command sh -c "ps -e -o rss= -o comm= | awk '\$2 ~ /postgres/ {sum += \$1} END {print sum + 0}'"
+    postgres_rss_kb
     sleep 1
   done
 }
 
 cleanup() {
+  if [[ -n "$lock_holder_pid" ]]; then
+    kill "$lock_holder_pid" >/dev/null 2>&1 || true
+    wait "$lock_holder_pid" >/dev/null 2>&1 || true
+  fi
   if [[ -n "$memory_sampler_pid" ]]; then
     kill "$memory_sampler_pid" >/dev/null 2>&1 || true
     wait "$memory_sampler_pid" >/dev/null 2>&1 || true
@@ -160,15 +196,43 @@ seed_started="$(now_ms)"
 run_file supabase/tests/database/pricing-scale-fixture.sql -v "scale_rows=$scale_rows" \
   > "$evidence_dir/seed.out" 2>&1
 seed_ms=$(( $(now_ms) - seed_started ))
-baseline_rss_kb="$(container_command sh -c "ps -e -o rss= -o comm= | awk '\$2 ~ /postgres/ {sum += \$1} END {print sum + 0}'")"
+baseline_rss_kb="$(postgres_rss_kb)"
+memory_limit_kb="$(container_memory_limit_kb)"
 sample_memory > "$evidence_dir/postgres-rss.tsv" &
 memory_sampler_pid=$!
 
 echo "scale: migration 001 under legacy uploads"
+container_command psql -X -qAt -v ON_ERROR_STOP=1 \
+  -h 127.0.0.1 -p 5432 -U "$pg_user" -d "$active_database" \
+  -c "BEGIN; LOCK TABLE public.tokend_usage_events IN ROW EXCLUSIVE MODE; SELECT pg_sleep(4); COMMIT" \
+  > "$evidence_dir/migration-lock-holder.out" 2>&1 &
+lock_holder_pid=$!
+sleep 0.5
+migration_lock_started="$(now_ms)"
+if run_file supabase/migrations/202607100001_pricing_core.sql --single-transaction \
+  > "$evidence_dir/migration-001-lock-failure.out" 2>&1
+then
+  echo "Migration 001 unexpectedly succeeded under a conflicting lock" >&2
+  exit 1
+fi
+migration_lock_failure_ms=$(( $(now_ms) - migration_lock_started ))
+wait "$lock_holder_pid"
+lock_holder_pid=""
+grep -qi 'lock timeout\|canceling statement due to lock timeout' "$evidence_dir/migration-001-lock-failure.out"
+assert_eq "migration lock rollback" "$(run_sql "
+  SELECT CASE WHEN to_regclass('public.tokend_pricing_catalogs') IS NULL
+    AND NOT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'tokend_usage_events'
+        AND column_name = 'pricing_ingest_epoch'
+    ) THEN 'rolled_back' ELSE 'partial' END")" "rolled_back"
+assert_le "migration lock failure ms" "$migration_lock_failure_ms" 3000
+awk -v elapsed="$migration_lock_failure_ms" 'BEGIN { if (elapsed < 1800) exit 1 }'
+
 start_pgbench migration_live 20 supabase/tests/database/pricing-scale-legacy-upload.sql
 sleep 1
 migration_started="$(now_ms)"
-run_file supabase/migrations/202607100001_pricing_core.sql > "$evidence_dir/migration-001.out" 2>&1
+run_file supabase/migrations/202607100001_pricing_core.sql --single-transaction > "$evidence_dir/migration-001.out" 2>&1
 migration_001_ms=$(( $(now_ms) - migration_started ))
 finish_pgbench
 for migration in \
@@ -176,13 +240,42 @@ for migration in \
   supabase/migrations/202607100003_pricing_rpcs.sql \
   supabase/migrations/202607100004_pricing_backfill.sql
 do
-  run_file "$migration" >> "$evidence_dir/migrations-002-004.out" 2>&1
+  run_file "$migration" --single-transaction >> "$evidence_dir/migrations-002-004.out" 2>&1
 done
+
+create_request_id="$(run_sql "SELECT gen_random_uuid()")"
+create_epoch_before="$(run_sql "SELECT current_ingest_epoch FROM public.tokend_pricing_state WHERE singleton")"
+create_runs_before="$(run_sql "SELECT count(*) FROM public.tokend_pricing_backfill_runs")"
+container_command psql -X -qAt -v ON_ERROR_STOP=1 \
+  -h 127.0.0.1 -p 5432 -U "$pg_user" -d "$active_database" \
+  -c "BEGIN; LOCK TABLE public.tokend_usage_events IN ROW EXCLUSIVE MODE; SELECT pg_sleep(4); COMMIT" \
+  > "$evidence_dir/create-lock-holder.out" 2>&1 &
+lock_holder_pid=$!
+sleep 0.5
+create_lock_started="$(now_ms)"
+if run_sql "SELECT public.tokend_pricing_create_backfill('2026-07-10', '$create_request_id'::UUID)" \
+  > "$evidence_dir/create-lock-failure.out" 2>&1
+then
+  echo "Backfill create unexpectedly succeeded under a conflicting lock" >&2
+  exit 1
+fi
+create_lock_failure_ms=$(( $(now_ms) - create_lock_started ))
+wait "$lock_holder_pid"
+lock_holder_pid=""
+grep -qi 'lock timeout\|canceling statement due to lock timeout' "$evidence_dir/create-lock-failure.out"
+assert_le "create lock failure ms" "$create_lock_failure_ms" 3000
+awk -v elapsed="$create_lock_failure_ms" 'BEGIN { if (elapsed < 1800) exit 1 }'
+assert_eq "create lock epoch rollback" "$(run_sql "SELECT current_ingest_epoch FROM public.tokend_pricing_state WHERE singleton")" "$create_epoch_before"
+assert_eq "create lock run rollback" "$(run_sql "SELECT count(*) FROM public.tokend_pricing_backfill_runs")" "$create_runs_before"
+
+echo "scale: pre-rollout v2 upload baseline"
+start_pgbench pre_rollout "$pre_rollout_load_seconds" supabase/tests/database/pricing-scale-upload.sql
+finish_pgbench
 
 echo "scale: create and freeze with v2 uploads"
 start_pgbench freeze_live "$freeze_load_seconds" supabase/tests/database/pricing-scale-upload.sql
 sleep 1
-create_request_id="$(run_sql "SELECT gen_random_uuid()")"
+freeze_overlap_started="$(now_ms)"
 timed_sql "SELECT public.tokend_pricing_create_backfill('2026-07-10', '$create_request_id'::UUID)->>'runId'"
 run_id="$LAST_RESULT"
 create_ms="$LAST_ELAPSED_MS"
@@ -205,7 +298,7 @@ freeze_started="$(now_ms)"
 freeze_complete="f"
 freeze_batches=0
 while [[ "$freeze_complete" != "t" ]]; do
-  timed_sql "SELECT (public.tokend_pricing_freeze_batch('$run_id'::UUID, 5000)->>'freezeComplete')::BOOLEAN"
+  timed_sql "SELECT (public.tokend_pricing_freeze_batch('$run_id'::UUID, 2000)->>'freezeComplete')::BOOLEAN"
   freeze_complete="$LAST_RESULT"
   freeze_batches=$((freeze_batches + 1))
   printf '%s\t%s\t%s\n' "$freeze_batches" "$LAST_ELAPSED_MS" "$freeze_complete" >> "$evidence_dir/freeze-batches.tsv"
@@ -218,6 +311,7 @@ while [[ "$freeze_complete" != "t" ]]; do
     exit 1
   fi
 done
+freeze_overlap_finished="$(now_ms)"
 freeze_ms=$(( $(now_ms) - freeze_started ))
 finish_pgbench
 timed_sql "SELECT public.tokend_pricing_finalize_backfill('$run_id'::UUID)->>'status'"
@@ -229,12 +323,13 @@ echo "scale: price with v2 uploads"
 start_pgbench backfill_live "$backfill_load_seconds" supabase/tests/database/pricing-scale-upload.sql
 printf 'batch\telapsed_ms\tprocessed\tremaining\n' > "$evidence_dir/backfill-batches.tsv"
 backfill_started="$(now_ms)"
+backfill_overlap_started="$backfill_started"
 remaining="$expected_target_count"
 backfill_batches=0
 while [[ "$remaining" != "0" ]]; do
   timed_sql "
     WITH response AS MATERIALIZED (
-      SELECT public.tokend_pricing_backfill_batch('$run_id'::UUID, '', '', 10000)::JSONB AS value
+      SELECT public.tokend_pricing_backfill_batch('$run_id'::UUID, '', '', 5000)::JSONB AS value
     )
     SELECT (value->>'processed') || '|' || (value->>'remainingCount') FROM response"
   IFS='|' read -r processed remaining <<< "$LAST_RESULT"
@@ -249,6 +344,7 @@ while [[ "$remaining" != "0" ]]; do
     exit 1
   fi
 done
+backfill_overlap_finished="$(now_ms)"
 backfill_ms=$(( $(now_ms) - backfill_started ))
 finish_pgbench
 
@@ -304,12 +400,29 @@ assert_eq "unexplained members" "$unexplained_count" "0"
 preflight="$(run_sql "SELECT (value->>'authoritative') || '|' || (value->>'source') FROM (SELECT public.tokend_pricing_preflight()::JSONB AS value) AS result")"
 assert_eq "authoritative preflight" "$preflight" "true|frozen_reconciled_run"
 
-cat "$evidence_dir/freeze_live.log" "$evidence_dir/backfill_live.log" > "$evidence_dir/live-combined.log"
+filter_log_interval "$evidence_dir/freeze_live.log" "$evidence_dir/freeze-overlap.log" "$freeze_overlap_started" "$freeze_overlap_finished"
+filter_log_interval "$evidence_dir/backfill_live.log" "$evidence_dir/backfill-overlap.log" "$backfill_overlap_started" "$backfill_overlap_finished"
+cat "$evidence_dir/freeze-overlap.log" "$evidence_dir/backfill-overlap.log" > "$evidence_dir/live-combined.log"
+live_overlap_samples="$(wc -l < "$evidence_dir/live-combined.log" | tr -d ' ')"
+freeze_overlap_samples="$(wc -l < "$evidence_dir/freeze-overlap.log" | tr -d ' ')"
+backfill_overlap_samples="$(wc -l < "$evidence_dir/backfill-overlap.log" | tr -d ' ')"
+min_phase_samples=$(( (min_overlap_samples + 1) / 2 ))
+if [[ "$live_overlap_samples" -lt "$min_overlap_samples"
+  || "$freeze_overlap_samples" -lt "$min_phase_samples"
+  || "$backfill_overlap_samples" -lt "$min_phase_samples" ]]; then
+  echo "Insufficient upload samples overlapped rollout work: $live_overlap_samples" >&2
+  exit 1
+fi
 migration_p95_ms="$(percentile_ms "$evidence_dir/migration_live.log" 95)"
 migration_max_ms="$(maximum_ms "$evidence_dir/migration_live.log")"
 live_p95_ms="$(percentile_ms "$evidence_dir/live-combined.log" 95)"
 live_max_ms="$(maximum_ms "$evidence_dir/live-combined.log")"
+freeze_upload_p95_ms="$(percentile_ms "$evidence_dir/freeze-overlap.log" 95)"
+freeze_upload_max_ms="$(maximum_ms "$evidence_dir/freeze-overlap.log")"
+backfill_upload_p95_ms="$(percentile_ms "$evidence_dir/backfill-overlap.log" 95)"
+backfill_upload_max_ms="$(maximum_ms "$evidence_dir/backfill-overlap.log")"
 steady_p95_ms="$(percentile_ms "$evidence_dir/steady.log" 95)"
+pre_rollout_p95_ms="$(percentile_ms "$evidence_dir/pre_rollout.log" 95)"
 freeze_batch_p95_ms="$(column_percentile_ms "$evidence_dir/freeze-batches.tsv" 95)"
 freeze_batch_max_ms="$(column_maximum_ms "$evidence_dir/freeze-batches.tsv")"
 backfill_batch_p95_ms="$(column_percentile_ms "$evidence_dir/backfill-batches.tsv" 95)"
@@ -318,9 +431,13 @@ health_p95_ms="$(column_percentile_ms "$evidence_dir/health.tsv" 95)"
 
 peak_rss_kb="$(awk 'NF >= 2 && $2 > max { max = $2 } END { print max + 0 }' "$evidence_dir/postgres-rss.tsv")"
 rss_delta_kb=$((peak_rss_kb - baseline_rss_kb))
+if [[ "$rss_delta_kb" -lt 0 ]]; then rss_delta_kb=0; fi
+rss_quarter_limit_kb=$((memory_limit_kb / 4))
 disk_free_percent="$(container_command sh -c "df -Pk /var/lib/postgresql/data | awk 'NR == 2 {gsub(/%/, \"\", \$5); print 100 - \$5}'")"
 
 assert_le "migration upload max latency ms" "$migration_max_ms" 2000
+assert_le "migration 001 success ms" "$migration_001_ms" 1000
+assert_le "backfill create success ms" "$create_ms" 2000
 assert_le "freeze total ms" "$freeze_ms" 900000
 assert_le "freeze batch p95 ms" "$freeze_batch_p95_ms" 30000
 assert_le "freeze batch max ms" "$freeze_batch_max_ms" 45000
@@ -334,8 +451,13 @@ assert_le "rollback ms" "$rollback_ms" 2000
 assert_le "second activation ms" "$second_activation_ms" 30000
 assert_le "health p95 ms" "$health_p95_ms" 3000
 assert_le "live upload p95 ms" "$live_p95_ms" 2000
-assert_le "live upload p95 ratio" "$live_p95_ms" "$(awk -v baseline="$steady_p95_ms" 'BEGIN { print baseline * 2 }')"
+assert_le "live upload p95 ratio" "$live_p95_ms" "$(awk -v baseline="$pre_rollout_p95_ms" 'BEGIN { print baseline * 2 }')"
+assert_le "freeze upload p95 ms" "$freeze_upload_p95_ms" 2000
+assert_le "freeze upload p95 ratio" "$freeze_upload_p95_ms" "$(awk -v baseline="$pre_rollout_p95_ms" 'BEGIN { print baseline * 2 }')"
+assert_le "backfill upload p95 ms" "$backfill_upload_p95_ms" 2000
+assert_le "backfill upload p95 ratio" "$backfill_upload_p95_ms" "$(awk -v baseline="$pre_rollout_p95_ms" 'BEGIN { print baseline * 2 }')"
 assert_le "postgres RSS delta KiB" "$rss_delta_kb" 524288
+assert_le "postgres RSS delta versus 25% memory KiB" "$rss_delta_kb" "$rss_quarter_limit_kb"
 if [[ "$disk_free_percent" -lt 30 ]]; then
   echo "Database disk reserve below 30%: ${disk_free_percent}%" >&2
   exit 1
@@ -348,9 +470,11 @@ cat > "$evidence_dir/summary.json" <<JSON
   "revisionCount": $actual_revision_count,
   "seedMs": $seed_ms,
   "migration001Ms": $migration_001_ms,
+  "migrationLockFailureMs": $migration_lock_failure_ms,
   "migrationUploadP95Ms": $migration_p95_ms,
   "migrationUploadMaxMs": $migration_max_ms,
   "createMs": $create_ms,
+  "createLockFailureMs": $create_lock_failure_ms,
   "freezeMs": $freeze_ms,
   "freezeBatchP95Ms": $freeze_batch_p95_ms,
   "freezeBatchMaxMs": $freeze_batch_max_ms,
@@ -364,9 +488,18 @@ cat > "$evidence_dir/summary.json" <<JSON
   "secondActivationMs": $second_activation_ms,
   "liveUploadP95Ms": $live_p95_ms,
   "liveUploadMaxMs": $live_max_ms,
+  "liveUploadOverlapSamples": $live_overlap_samples,
+  "freezeUploadP95Ms": $freeze_upload_p95_ms,
+  "freezeUploadMaxMs": $freeze_upload_max_ms,
+  "freezeUploadOverlapSamples": $freeze_overlap_samples,
+  "backfillUploadP95Ms": $backfill_upload_p95_ms,
+  "backfillUploadMaxMs": $backfill_upload_max_ms,
+  "backfillUploadOverlapSamples": $backfill_overlap_samples,
+  "preRolloutUploadP95Ms": $pre_rollout_p95_ms,
   "steadyUploadP95Ms": $steady_p95_ms,
   "healthP95Ms": $health_p95_ms,
   "postgresRssDeltaKiB": $rss_delta_kb,
+  "containerMemoryLimitKiB": $memory_limit_kb,
   "diskFreePercent": $disk_free_percent,
   "targetHash": "$target_hash_one",
   "reconciliationHash": "$reconciliation_hash_one",

@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS public.tokend_pricing_state (
   previous_catalog_version TEXT,
   active_backfill_run_id UUID,
   previous_backfill_run_id UUID,
+  current_ingest_epoch BIGINT NOT NULL DEFAULT 0,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -82,6 +83,15 @@ CREATE TABLE IF NOT EXISTS public.tokend_pricing_backfill_runs (
   cache_read_tokens BIGINT NOT NULL DEFAULT 0,
   cache_write_tokens BIGINT NOT NULL DEFAULT 0,
   before_total_cost NUMERIC(20,10) NOT NULL DEFAULT 0,
+  target_ingest_epoch BIGINT NOT NULL DEFAULT 0,
+  freeze_cursor_event_id TEXT,
+  freeze_cursor_member_code TEXT,
+  freeze_scanned_count BIGINT NOT NULL DEFAULT 0,
+  frozen_count BIGINT NOT NULL DEFAULT 0,
+  freeze_complete BOOLEAN NOT NULL DEFAULT FALSE,
+  frozen_at TIMESTAMPTZ,
+  priced_count BIGINT NOT NULL DEFAULT 0,
+  post_snapshot_event_count BIGINT NOT NULL DEFAULT 0,
   cursor_member_code TEXT,
   cursor_event_id TEXT,
   reconciliation_hash TEXT,
@@ -96,8 +106,15 @@ CREATE TABLE IF NOT EXISTS public.tokend_pricing_backfill_targets (
   member_code TEXT NOT NULL,
   event_id TEXT NOT NULL,
   event_snapshot JSONB NOT NULL,
+  snapshot_hash TEXT NOT NULL,
   processed_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.tokend_pricing_ingest_epochs (
+  epoch BIGINT NOT NULL,
+  event_count BIGINT NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS public.tokend_pricing_shadow_sessions (
@@ -136,21 +153,6 @@ CREATE TABLE IF NOT EXISTS public.tokend_pricing_audit (
   payload JSONB NOT NULL DEFAULT '{}'::JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
-ALTER TABLE public.tokend_usage_events
-  ADD COLUMN IF NOT EXISTS pricing_status TEXT;
-ALTER TABLE public.tokend_usage_events
-  ADD COLUMN IF NOT EXISTS pricing_tier TEXT;
-ALTER TABLE public.tokend_usage_events
-  ADD COLUMN IF NOT EXISTS price_version TEXT;
-ALTER TABLE public.tokend_usage_events
-  ADD COLUMN IF NOT EXISTS matched_model_id TEXT;
-ALTER TABLE public.tokend_usage_events
-  ADD COLUMN IF NOT EXISTS token_semantics TEXT;
-ALTER TABLE public.tokend_usage_events
-  ADD COLUMN IF NOT EXISTS unallocated_cost NUMERIC(20,10);
-ALTER TABLE public.tokend_usage_events
-  ADD COLUMN IF NOT EXISTS breakdown_status TEXT;
 
 DO $constraints$
 BEGIN
@@ -309,12 +311,35 @@ BEGIN
     ALTER TABLE public.tokend_pricing_backfill_runs
       ADD CONSTRAINT tokend_pricing_backfill_runs_counts_check CHECK (
         target_count >= 0
+        AND target_ingest_epoch >= 0
+        AND freeze_scanned_count >= 0
+        AND frozen_count >= 0
+        AND priced_count >= 0
+        AND post_snapshot_event_count >= 0
         AND input_tokens >= 0
         AND output_tokens >= 0
         AND reasoning_tokens >= 0
         AND cache_read_tokens >= 0
         AND cache_write_tokens >= 0
       );
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'tokend_pricing_ingest_epochs_pkey'
+      AND conrelid = 'public.tokend_pricing_ingest_epochs'::regclass
+  ) THEN
+    ALTER TABLE public.tokend_pricing_ingest_epochs
+      ADD CONSTRAINT tokend_pricing_ingest_epochs_pkey PRIMARY KEY (epoch);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'tokend_pricing_ingest_epochs_counts_check'
+      AND conrelid = 'public.tokend_pricing_ingest_epochs'::regclass
+  ) THEN
+    ALTER TABLE public.tokend_pricing_ingest_epochs
+      ADD CONSTRAINT tokend_pricing_ingest_epochs_counts_check
+      CHECK (epoch >= 0 AND event_count >= 0);
   END IF;
 
   IF NOT EXISTS (
@@ -456,6 +481,15 @@ BEGIN
       FOREIGN KEY (event_id, member_code)
       REFERENCES public.tokend_usage_events(id, member_code);
   END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'tokend_pricing_backfill_targets_hash_check'
+      AND conrelid = 'public.tokend_pricing_backfill_targets'::regclass
+  ) THEN
+    ALTER TABLE public.tokend_pricing_backfill_targets
+      ADD CONSTRAINT tokend_pricing_backfill_targets_hash_check
+      CHECK (snapshot_hash ~ '^[0-9a-f]{64}$');
+  END IF;
 
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
@@ -503,42 +537,6 @@ BEGIN
       FOREIGN KEY (run_id) REFERENCES public.tokend_pricing_backfill_runs(run_id);
   END IF;
 
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint
-    WHERE conname = 'tokend_usage_events_pricing_status_check'
-      AND conrelid = 'public.tokend_usage_events'::regclass
-  ) THEN
-    ALTER TABLE public.tokend_usage_events
-      ADD CONSTRAINT tokend_usage_events_pricing_status_check
-      CHECK (pricing_status IS NULL OR pricing_status IN ('reported', 'estimated', 'zero_rate', 'unpriced', 'legacy'));
-  END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint
-    WHERE conname = 'tokend_usage_events_pricing_tier_check'
-      AND conrelid = 'public.tokend_usage_events'::regclass
-  ) THEN
-    ALTER TABLE public.tokend_usage_events
-      ADD CONSTRAINT tokend_usage_events_pricing_tier_check
-      CHECK (pricing_tier IS NULL OR pricing_tier IN ('standard', 'long_context'));
-  END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint
-    WHERE conname = 'tokend_usage_events_token_semantics_check'
-      AND conrelid = 'public.tokend_usage_events'::regclass
-  ) THEN
-    ALTER TABLE public.tokend_usage_events
-      ADD CONSTRAINT tokend_usage_events_token_semantics_check
-      CHECK (token_semantics IS NULL OR token_semantics IN ('disjoint', 'unknown'));
-  END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint
-    WHERE conname = 'tokend_usage_events_breakdown_status_check'
-      AND conrelid = 'public.tokend_usage_events'::regclass
-  ) THEN
-    ALTER TABLE public.tokend_usage_events
-      ADD CONSTRAINT tokend_usage_events_breakdown_status_check
-      CHECK (breakdown_status IS NULL OR breakdown_status IN ('reconciled', 'unallocated', 'invalid'));
-  END IF;
 END
 $constraints$;
 
@@ -547,7 +545,7 @@ CREATE INDEX IF NOT EXISTS tokend_pricing_models_effective_idx
 CREATE INDEX IF NOT EXISTS tokend_pricing_aliases_model_idx
   ON public.tokend_pricing_aliases (version, model_id);
 CREATE INDEX IF NOT EXISTS tokend_event_cost_revisions_run_idx
-  ON public.tokend_event_cost_revisions (backfill_run_id)
+  ON public.tokend_event_cost_revisions (backfill_run_id, member_code, event_id)
   WHERE backfill_run_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS tokend_pricing_backfill_targets_pending_idx
   ON public.tokend_pricing_backfill_targets (run_id, member_code, event_id)
@@ -862,6 +860,7 @@ BEGIN
     OR NEW.member_code IS DISTINCT FROM OLD.member_code
     OR NEW.event_id IS DISTINCT FROM OLD.event_id
     OR NEW.event_snapshot IS DISTINCT FROM OLD.event_snapshot
+    OR NEW.snapshot_hash IS DISTINCT FROM OLD.snapshot_hash
     OR NEW.created_at IS DISTINCT FROM OLD.created_at
     OR (
       OLD.processed_at IS NOT NULL
@@ -950,6 +949,7 @@ ALTER TABLE public.tokend_event_cost_revisions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.tokend_pricing_state ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.tokend_pricing_backfill_runs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.tokend_pricing_backfill_targets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.tokend_pricing_ingest_epochs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.tokend_pricing_shadow_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.tokend_pricing_audit ENABLE ROW LEVEL SECURITY;
 
@@ -961,6 +961,7 @@ REVOKE ALL PRIVILEGES ON TABLE public.tokend_event_cost_revisions FROM PUBLIC, a
 REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_state FROM PUBLIC, anon, authenticated;
 REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_backfill_runs FROM PUBLIC, anon, authenticated;
 REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_backfill_targets FROM PUBLIC, anon, authenticated;
+REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_ingest_epochs FROM PUBLIC, anon, authenticated;
 REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_shadow_sessions FROM PUBLIC, anon, authenticated;
 REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_audit FROM PUBLIC, anon, authenticated;
 
@@ -972,6 +973,7 @@ REVOKE ALL PRIVILEGES ON TABLE public.tokend_event_cost_revisions FROM service_r
 REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_state FROM service_role;
 REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_backfill_runs FROM service_role;
 REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_backfill_targets FROM service_role;
+REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_ingest_epochs FROM service_role;
 REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_shadow_sessions FROM service_role;
 REVOKE ALL PRIVILEGES ON TABLE public.tokend_pricing_audit FROM service_role;
 
@@ -983,6 +985,7 @@ GRANT SELECT ON TABLE public.tokend_event_cost_revisions TO service_role;
 GRANT SELECT ON TABLE public.tokend_pricing_state TO service_role;
 GRANT SELECT ON TABLE public.tokend_pricing_backfill_runs TO service_role;
 GRANT SELECT ON TABLE public.tokend_pricing_backfill_targets TO service_role;
+GRANT SELECT ON TABLE public.tokend_pricing_ingest_epochs TO service_role;
 GRANT SELECT ON TABLE public.tokend_pricing_shadow_sessions TO service_role;
 GRANT SELECT ON TABLE public.tokend_pricing_audit TO service_role;
 GRANT DELETE ON TABLE public.tokend_event_cost_revisions TO service_role;
@@ -996,6 +999,10 @@ INSERT INTO public.tokend_pricing_state (
 )
 VALUES (TRUE, NULL, NULL, NULL, NULL)
 ON CONFLICT (singleton) DO NOTHING;
+
+INSERT INTO public.tokend_pricing_ingest_epochs (epoch, event_count)
+VALUES (0, 0)
+ON CONFLICT (epoch) DO NOTHING;
 
 -- BEGIN GENERATED PRICING CATALOG
 -- Generated from cli/pricing/catalog.ts. Do not edit by hand.
@@ -1369,5 +1376,66 @@ INSERT INTO pg_temp.tokend_expected_pricing_aliases (version, alias, model_id)
 VALUES ('2026-07-10', 'kimi-for-coding', 'kimi-k2.5');
 SELECT public.tokend_install_pricing_catalog('2026-07-10', 'c08b7254af1f5e8d29d12b565a560e1ead0b0f882657836ec20c605831a61955', '2026-07-10');
 -- END GENERATED PRICING CATALOG
+
+-- Keep the ACCESS EXCLUSIVE window on the existing 1.3 GB event table at the
+-- very end of the migration. All additions are metadata-only on PostgreSQL 17;
+-- existing rows are deliberately not scanned during the release transaction.
+SET LOCAL lock_timeout = '2s';
+
+ALTER TABLE public.tokend_usage_events
+  ADD COLUMN IF NOT EXISTS pricing_status TEXT,
+  ADD COLUMN IF NOT EXISTS pricing_tier TEXT,
+  ADD COLUMN IF NOT EXISTS price_version TEXT,
+  ADD COLUMN IF NOT EXISTS matched_model_id TEXT,
+  ADD COLUMN IF NOT EXISTS token_semantics TEXT,
+  ADD COLUMN IF NOT EXISTS unallocated_cost NUMERIC(20,10),
+  ADD COLUMN IF NOT EXISTS breakdown_status TEXT,
+  ADD COLUMN IF NOT EXISTS pricing_ingest_epoch BIGINT NOT NULL DEFAULT 0,
+  ALTER COLUMN uploaded_at SET DEFAULT clock_timestamp();
+
+DO $usage_constraints$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'tokend_usage_events_pricing_status_check'
+      AND conrelid = 'public.tokend_usage_events'::regclass
+  ) THEN
+    ALTER TABLE public.tokend_usage_events
+      ADD CONSTRAINT tokend_usage_events_pricing_status_check
+      CHECK (pricing_status IS NULL OR pricing_status IN ('reported', 'estimated', 'zero_rate', 'unpriced', 'legacy'))
+      NOT VALID;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'tokend_usage_events_pricing_tier_check'
+      AND conrelid = 'public.tokend_usage_events'::regclass
+  ) THEN
+    ALTER TABLE public.tokend_usage_events
+      ADD CONSTRAINT tokend_usage_events_pricing_tier_check
+      CHECK (pricing_tier IS NULL OR pricing_tier IN ('standard', 'long_context'))
+      NOT VALID;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'tokend_usage_events_token_semantics_check'
+      AND conrelid = 'public.tokend_usage_events'::regclass
+  ) THEN
+    ALTER TABLE public.tokend_usage_events
+      ADD CONSTRAINT tokend_usage_events_token_semantics_check
+      CHECK (token_semantics IS NULL OR token_semantics IN ('disjoint', 'unknown'))
+      NOT VALID;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'tokend_usage_events_breakdown_status_check'
+      AND conrelid = 'public.tokend_usage_events'::regclass
+  ) THEN
+    ALTER TABLE public.tokend_usage_events
+      ADD CONSTRAINT tokend_usage_events_breakdown_status_check
+      CHECK (breakdown_status IS NULL OR breakdown_status IN ('reconciled', 'unallocated', 'invalid'))
+      NOT VALID;
+  END IF;
+END
+$usage_constraints$;
 
 NOTIFY pgrst, 'reload schema';

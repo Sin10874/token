@@ -545,6 +545,7 @@ DECLARE
   v_breakdown_status TEXT;
   v_inserted INTEGER := 0;
   v_row_count INTEGER;
+  v_ingest_epoch BIGINT := 0;
   v_catalog_version TEXT;
   v_catalog_versions TEXT[] := ARRAY[]::TEXT[];
   v_price JSONB;
@@ -704,6 +705,15 @@ BEGIN
   -- earlier backfill publishes its staging catalog before this upload prices.
   LOCK TABLE public.tokend_usage_events IN ROW EXCLUSIVE MODE;
 
+  SELECT pricing_state.current_ingest_epoch
+  INTO v_ingest_epoch
+  FROM public.tokend_pricing_state AS pricing_state
+  WHERE pricing_state.singleton;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Pricing singleton state is missing'
+      USING ERRCODE = '55000';
+  END IF;
+
   SELECT COALESCE(
     array_agg(DISTINCT target.catalog_version ORDER BY target.catalog_version),
     ARRAY[]::TEXT[]
@@ -720,7 +730,7 @@ BEGIN
     UNION ALL
     SELECT backfill.catalog_version
     FROM public.tokend_pricing_backfill_runs AS backfill
-    WHERE backfill.status IN ('staging', 'reconciled')
+    WHERE backfill.status IN ('freezing', 'staging', 'reconciled')
       AND backfill.snapshot_at <= clock_timestamp()
   ) AS target
   WHERE target.catalog_version IS NOT NULL;
@@ -875,7 +885,8 @@ BEGIN
       cache_read_cost, cache_write_cost, total_cost,
       stop_reason, project,
       pricing_status, pricing_tier, price_version, matched_model_id,
-      token_semantics, unallocated_cost, breakdown_status
+      token_semantics, unallocated_cost, breakdown_status,
+      pricing_ingest_epoch
     ) VALUES (
       v_evt->>'id',
       v_code,
@@ -906,7 +917,8 @@ BEGIN
       NULL,
       v_token_semantics,
       v_unallocated_cost,
-      v_breakdown_status
+      v_breakdown_status,
+      v_ingest_epoch
     )
     ON CONFLICT (id, member_code) DO NOTHING;
 
@@ -1018,6 +1030,21 @@ BEGIN
       parser_version = EXCLUDED.parser_version,
       last_sync_at = EXCLUDED.last_sync_at;
   END LOOP;
+
+  IF v_inserted > 0 THEN
+    INSERT INTO public.tokend_pricing_ingest_epochs (
+      epoch,
+      event_count,
+      updated_at
+    ) VALUES (
+      v_ingest_epoch,
+      v_inserted,
+      clock_timestamp()
+    )
+    ON CONFLICT (epoch) DO UPDATE SET
+      event_count = public.tokend_pricing_ingest_epochs.event_count + EXCLUDED.event_count,
+      updated_at = EXCLUDED.updated_at;
+  END IF;
 
   RETURN json_build_object('ok', true, 'inserted', v_inserted);
 END

@@ -1772,6 +1772,17 @@ test('fixture creation preserves gates and smoke uses exact upload bodies plus a
   assert.match(state.fixture.memberCode, /^ROLL_/)
   assert.ok(state.fixture.memberToken)
   assert.equal((await stat(statePath)).mode & 0o777, 0o600)
+  const memberCreate = calls.find(call =>
+    call.method === 'POST' && call.url.endsWith('/rest/v1/tokend_members'))
+  assert.ok(memberCreate, 'fixture creation must insert one isolated member')
+  const [createdMember] = JSON.parse(memberCreate.body)
+  assert.deepEqual(Object.keys(createdMember).sort(), ['member_code', 'phone', 'token'])
+  assert.equal(createdMember.member_code, state.fixture.memberCode)
+  assert.equal(createdMember.token, state.fixture.memberToken)
+  assert.equal(createdMember.phone, 'tokend-rollout-fixtureuuid')
+  assert.doesNotMatch(createdMember.phone, /^\+?[0-9][0-9 ()-]+$/)
+  assert.equal(Object.hasOwn(state.fixture, 'phone'), false)
+  assert.doesNotMatch(JSON.stringify(sanitizeForOutput(state)), /tokend-rollout-fixtureuuid/)
 
   await runner.execute('upload-smoke', { state: statePath })
   const uploadCalls = calls.filter(call => call.url.includes('/rpc/tokend_upload_events'))

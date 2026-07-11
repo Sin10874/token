@@ -1973,7 +1973,11 @@ export function createRolloutRunner(dependencies = {}) {
       }
       await http.json('tokend_members', {
         role: 'service', method: 'POST',
-        body: [{ member_code: fixture.memberCode, token: fixture.memberToken }],
+        body: [{
+          member_code: fixture.memberCode,
+          phone: `tokend-rollout-${suffix}`,
+          token: fixture.memberToken,
+        }],
         extraHeaders: { Prefer: 'return=representation' },
       })
       const next = { ...state, fixture, transition: 'rollout-active' }

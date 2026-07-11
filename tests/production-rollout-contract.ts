@@ -144,6 +144,39 @@ REVOKE EXECUTE ON FUNCTION public.tokend_upload_events(TEXT, JSONB, JSONB) FROM 
 GRANT EXECUTE ON FUNCTION public.tokend_upload_events(TEXT, JSONB, JSONB) TO anon, authenticated;
 `
 
+const reviewedDefaultAclWrapper = `
+CREATE FUNCTION public.tokend_upload_events(
+  p_token TEXT,
+  p_events JSONB,
+  p_sync_states JSONB
+)
+RETURNS JSON
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $reviewed$
+BEGIN
+  PERFORM '; retained inside the function body';
+  RETURN json_build_object('ok', true);
+END;
+$reviewed$;
+`
+
+const pgDumpDefaultAclWrapper = `
+CREATE OR REPLACE FUNCTION "public"."tokend_upload_events"("p_token" "text", "p_events" "jsonb", "p_sync_states" "jsonb") RETURNS "json"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $_pg_dump_tag_$
+BEGIN
+  PERFORM '; retained inside the function body';
+  RETURN json_build_object('ok', true);
+END;
+$_pg_dump_tag_$;
+
+ALTER FUNCTION "public"."tokend_upload_events"("p_token" "text", "p_events" "jsonb", "p_sync_states" "jsonb") OWNER TO "postgres";
+GRANT ALL ON FUNCTION "public"."tokend_upload_events"("p_token" "text", "p_events" "jsonb", "p_sync_states" "jsonb") TO "anon";
+GRANT ALL ON FUNCTION "public"."tokend_upload_events"("p_token" "text", "p_events" "jsonb", "p_sync_states" "jsonb") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."tokend_upload_events"("p_token" "text", "p_events" "jsonb", "p_sync_states" "jsonb") TO "service_role";
+`
+
 test('balanced wrapper parser preserves dollar bodies and canonicalizes only SQL trivia', () => {
   const crlf = wrapperBody.replace(/\n/g, '\r\n')
   const spaced = wrapperBody
@@ -159,6 +192,49 @@ test('balanced wrapper parser preserves dollar bodies and canonicalizes only SQL
     'REVOKE:authenticated', 'REVOKE:service_role',
   ])
   assert.equal(compareWrapperDefinitions(crlf, spaced).wrapperGatePassed, true)
+})
+
+test('wrapper gate accepts semantic pg_dump quoting, dollar tags, and redundant grants under default PUBLIC execute', () => {
+  const live = extractExactUploadWrapper(pgDumpDefaultAclWrapper)
+  const reviewed = extractExactUploadWrapper(reviewedDefaultAclWrapper)
+  assert.equal(live.signature, 'public.tokend_upload_events(text,jsonb,jsonb)')
+  assert.equal(live.hash, reviewed.hash)
+  assert.equal(live.aclHash, reviewed.aclHash)
+  assert.equal(compareWrapperDefinitions(pgDumpDefaultAclWrapper, reviewedDefaultAclWrapper).wrapperGatePassed, true)
+})
+
+test('wrapper gate still rejects function body drift after semantic pg_dump normalization', () => {
+  const drifted = pgDumpDefaultAclWrapper.replace("'ok', true", "'ok', false")
+  assert.throws(
+    () => compareWrapperDefinitions(drifted, reviewedDefaultAclWrapper),
+    /definition hash mismatch/i,
+  )
+})
+
+test('wrapper gate compares exact named grants only after PUBLIC execute is revoked', () => {
+  const restrictedReviewed = `${reviewedDefaultAclWrapper}
+REVOKE EXECUTE ON FUNCTION public.tokend_upload_events(TEXT, JSONB, JSONB) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.tokend_upload_events(TEXT, JSONB, JSONB) TO anon, authenticated;
+`
+  const restrictedDump = `${pgDumpDefaultAclWrapper.replace(/^GRANT ALL ON FUNCTION .* TO "service_role";$/m, '')}
+REVOKE ALL ON FUNCTION "public"."tokend_upload_events"("text", "jsonb", "jsonb") FROM PUBLIC;
+`
+  assert.equal(compareWrapperDefinitions(restrictedDump, restrictedReviewed).wrapperGatePassed, true)
+  assert.throws(
+    () => compareWrapperDefinitions(
+      restrictedDump.replace('FROM PUBLIC;', 'FROM PUBLIC;\nGRANT ALL ON FUNCTION "public"."tokend_upload_events"("text", "jsonb", "jsonb") TO "auditor";'),
+      restrictedReviewed,
+    ),
+    /ACL mismatch/i,
+  )
+  assert.throws(
+    () => compareWrapperDefinitions(
+      restrictedDump.replace(/^GRANT ALL ON FUNCTION .* TO "authenticated";$/m, ''),
+      restrictedReviewed,
+    ),
+    /ACL mismatch/i,
+  )
+  assert.throws(() => compareWrapperDefinitions(restrictedDump, reviewedDefaultAclWrapper), /ACL mismatch/i)
 })
 
 test('wrapper gate rejects missing, ambiguous, changed body, metadata, and ACL tuples', () => {
@@ -177,7 +253,7 @@ test('wrapper gate rejects missing, ambiguous, changed body, metadata, and ACL t
     /definition hash mismatch/i,
   )
   assert.throws(
-    () => compareWrapperDefinitions(wrapperBody, wrapperBody.replace(', authenticated', '')),
+    () => compareWrapperDefinitions(wrapperBody, wrapperBody.replace('TO anon, authenticated;', 'TO anon;')),
     /ACL mismatch/i,
   )
 })

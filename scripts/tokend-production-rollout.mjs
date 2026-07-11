@@ -344,32 +344,77 @@ function normalizeSqlRole(role) {
 
 const WRAPPER_SIGNATURE = 'public.tokend_upload_events(text,jsonb,jsonb)'
 
+function normalizeSqlType(value) {
+  return unquoteSqlIdentifiers(value).trim().toLowerCase()
+    .replace(/\s+/g, '')
+    .replace(/^pg_catalog\./, '')
+}
+
+function normalizeFunctionBody(value) {
+  return value.replace(/\r\n?/g, '\n').trim()
+}
+
+function parseWrapperDefinition(statement, parameterText) {
+  const returnType = /\bRETURNS\s+((?:"(?:""|[^"])*"|[A-Za-z_][A-Za-z0-9_$]*)(?:\s*\.\s*(?:"(?:""|[^"])*"|[A-Za-z_][A-Za-z0-9_$]*))?(?:\s*\[\s*\])*)/i.exec(statement)
+  const language = /\bLANGUAGE\s+("(?:""|[^"])*"|[A-Za-z_][A-Za-z0-9_$]*)/i.exec(statement)
+  const security = /\bSECURITY\s+(DEFINER|INVOKER)\b/i.exec(statement)
+  const body = /\bAS\s+(\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$)([\s\S]*?)\1\s*;?$/i.exec(statement)
+  if (!returnType || !language || !body) fail('Exact wrapper definition metadata is incomplete')
+  const semantic = {
+    signature: `public.tokend_upload_events(${signatureTypes(parameterText).join(',')})`,
+    returnType: normalizeSqlType(returnType[1]),
+    language: unquoteSqlIdentifiers(language[1]).toLowerCase(),
+    securityDefiner: security?.[1].toUpperCase() === 'DEFINER',
+    body: normalizeFunctionBody(body[2]),
+  }
+  return { semantic, hash: sha256(JSON.stringify(semantic)) }
+}
+
 export function extractExactUploadWrapper(sql) {
   const statements = []
   scanSql(sql, statement => statements.push(canonicalizeSql(statement)))
   const wrappers = []
   const aclTuples = []
+  let publicExecute = true
+  const namedGrants = new Set()
+  const functionPattern = qualifiedPublicFunctionPattern('tokend_upload_events')
+  const definitionPattern = new RegExp(`^CREATE(?: OR REPLACE)? FUNCTION\\s+${functionPattern}\\s*\\(([\\s\\S]*?)\\)\\s*RETURNS\\b`, 'i')
+  const aclPattern = new RegExp(`^(GRANT\\s+(?:ALL(?: PRIVILEGES)?|EXECUTE)|REVOKE\\s+(?:ALL(?: PRIVILEGES)?|EXECUTE))\\s+ON\\s+FUNCTION\\s+${functionPattern}\\s*\\(([^)]*)\\)\\s+(TO|FROM)\\s+([\\s\\S]*?)(?:\\s+WITH GRANT OPTION|\\s+(?:CASCADE|RESTRICT))?;?$`, 'i')
   for (const statement of statements) {
-    const header = /^CREATE(?: OR REPLACE)? FUNCTION\s+public\.tokend_upload_events\s*\(([\s\S]*?)\)\s*RETURNS\b/i.exec(statement)
-    if (header && signatureTypes(header[1]).join(',') === 'text,jsonb,jsonb') wrappers.push(statement)
-    const acl = /^(GRANT\s+EXECUTE|REVOKE\s+(?:ALL|EXECUTE))\s+ON\s+FUNCTION\s+public\.tokend_upload_events\s*\(([^)]*)\)\s+(TO|FROM)\s+([^;]+);?$/i.exec(statement)
+    const header = definitionPattern.exec(statement)
+    if (header && signatureTypes(header[1]).join(',') === 'text,jsonb,jsonb') {
+      wrappers.push({ statement, parameterText: header[1] })
+    }
+    const acl = aclPattern.exec(statement)
     if (acl && signatureTypes(acl[2]).join(',') === 'text,jsonb,jsonb') {
       const action = acl[1].toUpperCase().startsWith('GRANT') ? 'GRANT' : 'REVOKE'
-      for (const rawRole of acl[4].split(',')) {
-        const role = rawRole.trim().replace(/^"|"$/g, '')
-        aclTuples.push(`${action}:${/^public$/i.test(role) ? 'PUBLIC' : role}`)
+      for (const rawRole of splitSqlList(acl[4])) {
+        const role = normalizeSqlRole(rawRole)
+        aclTuples.push(`${action}:${role}`)
+        if (role === 'PUBLIC') {
+          publicExecute = action === 'GRANT'
+        } else if (action === 'GRANT') {
+          namedGrants.add(role)
+        } else {
+          namedGrants.delete(role)
+        }
       }
     }
   }
   if (wrappers.length === 0) fail('Exact wrapper definition missing')
   if (wrappers.length !== 1) fail('Exact wrapper definition is ambiguous')
-  const definition = wrappers[0]
+  const definition = wrappers[0].statement
+  const parsed = parseWrapperDefinition(definition, wrappers[0].parameterText)
+  const effectiveAcl = publicExecute
+    ? { publicExecute: true, namedGrants: [] }
+    : { publicExecute: false, namedGrants: [...namedGrants].sort() }
   return {
     signature: WRAPPER_SIGNATURE,
     definition,
-    hash: sha256(definition),
+    hash: parsed.hash,
     aclTuples: aclTuples.sort(),
-    aclHash: sha256(JSON.stringify(aclTuples.sort())),
+    effectiveAcl,
+    aclHash: sha256(JSON.stringify(effectiveAcl)),
   }
 }
 
@@ -377,12 +422,12 @@ export function compareWrapperDefinitions(liveSql, reviewedSql) {
   const live = extractExactUploadWrapper(liveSql)
   const reviewed = extractExactUploadWrapper(reviewedSql)
   if (live.hash !== reviewed.hash) fail('Wrapper definition hash mismatch')
-  if (JSON.stringify(live.aclTuples) !== JSON.stringify(reviewed.aclTuples)) fail('Wrapper ACL mismatch')
+  if (live.aclHash !== reviewed.aclHash) fail('Wrapper ACL mismatch')
   return {
     wrapperGatePassed: true,
     wrapperHash: live.hash,
     aclHash: live.aclHash,
-    roleNames: [...new Set(live.aclTuples.map(tuple => tuple.slice(tuple.indexOf(':') + 1)))].sort(),
+    roleNames: live.effectiveAcl.publicExecute ? ['PUBLIC'] : live.effectiveAcl.namedGrants,
   }
 }
 

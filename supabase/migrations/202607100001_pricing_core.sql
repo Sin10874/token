@@ -86,6 +86,8 @@ CREATE TABLE IF NOT EXISTS public.tokend_pricing_backfill_runs (
   target_ingest_epoch BIGINT NOT NULL DEFAULT 0,
   freeze_cursor_event_id TEXT,
   freeze_cursor_member_code TEXT,
+  freeze_upper_event_id TEXT,
+  freeze_upper_member_code TEXT,
   freeze_scanned_count BIGINT NOT NULL DEFAULT 0,
   frozen_count BIGINT NOT NULL DEFAULT 0,
   freeze_complete BOOLEAN NOT NULL DEFAULT FALSE,

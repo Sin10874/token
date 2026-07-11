@@ -239,9 +239,10 @@ for migration in \
   supabase/migrations/202607100002_pricing_upload.sql \
   supabase/migrations/202607100003_pricing_rpcs.sql \
   supabase/migrations/202607100004_pricing_backfill.sql \
-  supabase/migrations/202607100005_optimize_sessions_v2.sql
+  supabase/migrations/202607100005_optimize_sessions_v2.sql \
+  supabase/migrations/202607100006_extend_reconcile_timeout.sql
 do
-  run_file "$migration" --single-transaction >> "$evidence_dir/migrations-002-005.out" 2>&1
+  run_file "$migration" --single-transaction >> "$evidence_dir/migrations-002-006.out" 2>&1
 done
 
 echo "scale: sessions v2 sparse-member performance gate"

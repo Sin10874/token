@@ -244,6 +244,13 @@ function readSessionsHotfixMigration(): string {
   )
 }
 
+function readReconcileTimeoutMigration(): string {
+  return fs.readFileSync(
+    path.resolve(process.cwd(), 'supabase/migrations/202607100006_extend_reconcile_timeout.sql'),
+    'utf8',
+  )
+}
+
 function readPricingRollback(): string {
   return fs.readFileSync(
     path.resolve(process.cwd(), 'supabase/rollback/20260710_restore_prepricing.sql'),
@@ -993,6 +1000,18 @@ function testSessionsHotfixUsesOneEffectiveScanAndPreservesTheRpcContract(): voi
   assert.match(migration, /NOTIFY pgrst, 'reload schema';/i)
 }
 
+function testReconcileTimeoutMigrationChangesOnlyTheFunctionRuntimeBudget(): void {
+  const migration = readReconcileTimeoutMigration()
+  assert.match(migration, /SET lock_timeout = '2s';/i)
+  assert.equal(
+    (migration.match(/ALTER FUNCTION public\.tokend_pricing_reconcile\(UUID\)\s+SET statement_timeout = '45s';/gi) ?? []).length,
+    1,
+  )
+  assert.doesNotMatch(migration, /CREATE(?: OR REPLACE)? FUNCTION|\bGRANT\b|\bREVOKE\b/i)
+  assert.match(migration, /RESET lock_timeout;/i)
+  assert.match(migration, /NOTIFY pgrst, 'reload schema';/i)
+}
+
 const BACKFILL_ADMIN_SIGNATURES = [
   ['tokend_pricing_create_backfill', 'p_catalog_version TEXT, p_create_request_id UUID', 'TEXT, UUID'],
   ['tokend_pricing_freeze_batch', 'p_run_id UUID, p_limit INTEGER DEFAULT 5000', 'UUID, INTEGER'],
@@ -1539,6 +1558,10 @@ function testPgTapContractIsSelfContained(): void {
     2,
   )
   assert.equal(
+    (pgTap.match(/^\\ir \.\.\/\.\.\/migrations\/202607100006_extend_reconcile_timeout\.sql$/gm) ?? []).length,
+    2,
+  )
+  assert.equal(
     (pgTap.match(/^\\ir \.\.\/\.\.\/rollback\/20260710_restore_prepricing\.sql$/gm) ?? []).length,
     2,
   )
@@ -1638,6 +1661,7 @@ testRpcAggregationContractIsConsistent()
 testSummaryChildrenAndSessionsUseTheFullEnvelopeContract()
 testSummaryUsesTheV14SingleScanExecutionShape()
 testSessionsHotfixUsesOneEffectiveScanAndPreservesTheRpcContract()
+testReconcileTimeoutMigrationChangesOnlyTheFunctionRuntimeBudget()
 testBackfillMigrationDefinesExactAdminSurfaceAndAcls()
 testBackfillMigrationUsesAShortEpochFenceAndBoundedFreeze()
 testBackfillBatchUsesPersistedCursorAndOneLockedPendingWindow()

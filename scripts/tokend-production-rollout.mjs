@@ -1891,7 +1891,12 @@ function childRows(payload, keys) {
 
 async function deleteFixtureData({ state, http, includeMember, preserveBackfill = false, timestamp }) {
   const memberCode = state.fixture?.memberCode
-  if (!memberCode) return state
+  if (!memberCode) {
+    if (!includeMember || preserveBackfill) return state
+    const next = { ...state }
+    delete next.backfill
+    return next
+  }
   const filter = `member_code=eq.${encodeURIComponent(memberCode)}`
   const optionalAdditive = async operation => {
     try { return await operation() } catch (error) {

@@ -2162,12 +2162,6 @@ test('failure cleanup removes fixture data but preserves resumable backfill stat
   assert.deepEqual(cleaned.backfill, backfill)
   assert.deepEqual(cleaned.backfillSnapshot, backfillSnapshot)
 
-  await atomicWriteJson(statePath, {
-    wrapperGatePassed: true,
-    fixture: { memberCode: 'ROLL_cleanup', memberToken: 'fixture-secret' },
-    backfill,
-    backfillSnapshot,
-  }, { fs: nodeFs, randomUUID })
   await runner.execute('cleanup', { state: statePath })
   const explicitlyCleaned = JSON.parse(await readFile(statePath, 'utf8'))
   assert.equal(explicitlyCleaned.fixture, undefined)

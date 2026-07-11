@@ -115,9 +115,15 @@ test('every exact subcommand validates required, optional, numeric, and secret-f
   assert.equal(parseCli(['sample', ...validArgv.sample, '--state', 'private.json']).options.state, 'private.json')
   assert.equal(parseCli(['backfill-run', ...validArgv['backfill-run']]).options.interruptAfterBatches, 1)
   assert.equal(parseCli(['upload-smoke', '--state', 'private.json', '--legacy-only']).options.legacyOnly, true)
+  assert.equal(parseCli(['migration-gate', ...validArgv['migration-gate'], '--allow-empty-history']).options.allowEmptyHistory, true)
   assert.throws(() => parseCli(['sample', '--rpc', 'x', '--count', '0', '--out', 'x']), /positive/i)
   assert.throws(() => parseCli(['backfill-run', '--state', 'x', '--limit', '5001']), /at most 5000/i)
   assert.throws(() => parseCli(['migration-gate', ...validArgv['migration-gate'].map(value => value === 'pre' ? 'other' : value)]), /pre or post/i)
+  assert.throws(() => parseCli([
+    'migration-gate',
+    ...validArgv['migration-gate'].map(value => value === 'pre' ? 'post' : value),
+    '--allow-empty-history',
+  ]), /allow-empty-history.*pre/i)
   for (const flag of ['--supabase-url', '--service-key', '--anon-key', '--token']) {
     assert.throws(() => parseCli(['preflight', '--out', 'x', flag, 'secret']), /unknown option/i)
   }
@@ -483,6 +489,142 @@ function exactMigrationList(versions = MANAGED_MIGRATION_VERSIONS): string {
     ...versions.map(version => ` ${version} | ${version} | 2026-07-10`),
   ].join('\n')
 }
+
+function emptyPrettyMigrationList(): string {
+  return [
+    '',
+    '  ',
+    '   Local | Remote | Time (UTC) ',
+    '  -------|--------|------------',
+    '',
+  ].join('\n')
+}
+
+test('migration gate accepts only an explicit empty Supabase pre-history and records its audit proof', async () => {
+  const migrationsDir = await tempDir()
+  const migrationList = emptyPrettyMigrationList()
+  assert.throws(() => parseMigrationList(migrationList), /no version rows/i)
+  assert.deepEqual(parseMigrationList(migrationList, { allowEmptyHistory: true }), [])
+
+  const acceptedAt = '2026-07-11T01:02:03.000Z'
+  const accepted = await validateMigrationGate({
+    state: { wrapperGatePassed: true },
+    migrationList,
+    migrationsDir,
+    phase: 'pre',
+    allowEmptyHistory: true,
+    fs: nodeFs,
+    now: () => acceptedAt,
+  })
+  const emptyHash = digest(JSON.stringify([]))
+  assert.deepEqual(accepted.migrationBaselineVersions, [])
+  assert.equal(accepted.migrationBaselineHash, emptyHash)
+  assert.equal(accepted.emptyHistoryAccepted, true)
+  assert.deepEqual(accepted.migrationGateHistory, [{
+    phase: 'pre',
+    versions: [],
+    historyHash: emptyHash,
+    emptyHistoryAccepted: true,
+    timestamp: acceptedAt,
+  }])
+
+  const repeated = await validateMigrationGate({
+    state: accepted,
+    migrationList,
+    migrationsDir,
+    phase: 'pre',
+    allowEmptyHistory: true,
+    fs: nodeFs,
+  })
+  assert.deepEqual(repeated.migrationBaselineVersions, [])
+  assert.equal(repeated.emptyHistoryAccepted, true)
+  assert.equal(repeated.migrationGateHistory.length, 1)
+
+  await assert.rejects(validateMigrationGate({
+    state: { ...accepted, appliedMigrationHashes: { [MANAGED_MIGRATION_VERSIONS[0]]: 'bound-hash' } },
+    migrationList,
+    migrationsDir,
+    phase: 'pre',
+    allowEmptyHistory: true,
+    fs: nodeFs,
+  }), /baseline.*bound|migration history/i)
+  await assert.rejects(validateMigrationGate({
+    state: { appliedMigrationHashes: { [MANAGED_MIGRATION_VERSIONS[0]]: 'bound-hash' } },
+    migrationList,
+    migrationsDir,
+    phase: 'pre',
+    allowEmptyHistory: true,
+    fs: nodeFs,
+  }), /bound.*empty|empty.*bound/i)
+})
+
+test('empty-history opt-in rejects unsafe output shapes, nonempty rows, and post phase', async () => {
+  const migrationsDir = await tempDir()
+  const validEmpty = emptyPrettyMigrationList()
+  const invalidEmptyOutputs = [
+    '',
+    '   \n',
+    'not supabase migration output',
+    'Local | Remote | Time (UTC)',
+    'Local | Remote | Timestamp\n------|--------|----------',
+    `${validEmpty}\nunexpected warning`,
+  ]
+  for (const migrationList of invalidEmptyOutputs) {
+    assert.throws(() => parseMigrationList(migrationList, { allowEmptyHistory: true }), /migration list|empty history|supabase/i)
+  }
+
+  await assert.rejects(validateMigrationGate({
+    state: {}, migrationList: validEmpty, migrationsDir, phase: 'pre', fs: nodeFs,
+  }), /no version rows/i)
+  await assert.rejects(validateMigrationGate({
+    state: {}, migrationList: validEmpty, migrationsDir, phase: 'post', allowEmptyHistory: true, fs: nodeFs,
+  }), /allow-empty-history.*pre/i)
+  await assert.rejects(validateMigrationGate({
+    state: {}, migrationList: exactMigrationList(['202606010001']), migrationsDir, phase: 'pre', allowEmptyHistory: true, fs: nodeFs,
+  }), /allow-empty-history.*empty/i)
+
+  for (const migrationList of [
+    exactMigrationList(['202606010001']).replace('202606010001 | 202606010001', '202606010001 |'),
+    exactMigrationList(['202606010001']).replace('202606010001 | 202606010001', '| 202606010001'),
+  ]) {
+    await assert.rejects(validateMigrationGate({
+      state: {}, migrationList, migrationsDir, phase: 'pre', allowEmptyHistory: true, fs: nodeFs,
+    }), /allow-empty-history.*empty|local.*remote mismatch/i)
+  }
+})
+
+test('migration-gate CLI forwards empty-history opt-in and emits only the sanitized boolean proof', async () => {
+  const dir = await tempDir()
+  const migrationsDir = path.join(dir, 'migrations')
+  const migrationListPath = path.join(dir, 'migration-list.txt')
+  const statePath = path.join(dir, 'private-state.json')
+  const outPath = path.join(dir, 'migration-gate.json')
+  await mkdir(migrationsDir)
+  await writeFile(migrationListPath, emptyPrettyMigrationList())
+  await writeFile(statePath, JSON.stringify({ wrapperGatePassed: true, serviceKey: 'sentinel-secret' }))
+
+  const modulePath = path.resolve(process.cwd(), 'scripts/tokend-production-rollout.mjs')
+  const child = spawnSync(process.execPath, [
+    modulePath,
+    'migration-gate',
+    '--migration-list', migrationListPath,
+    '--migrations-dir', migrationsDir,
+    '--state', statePath,
+    '--phase', 'pre',
+    '--allow-empty-history',
+    '--out', outPath,
+  ], { encoding: 'utf8' })
+  assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`)
+
+  const stdout = JSON.parse(child.stdout.trim())
+  const output = JSON.parse(await readFile(outPath, 'utf8'))
+  const saved = JSON.parse(await readFile(statePath, 'utf8'))
+  assert.equal(stdout.emptyHistoryAccepted, true)
+  assert.equal(output.emptyHistoryAccepted, true)
+  assert.equal(saved.emptyHistoryAccepted, true)
+  assert.deepEqual(saved.migrationBaselineVersions, [])
+  assert.doesNotMatch(`${child.stdout}\n${child.stderr}\n${JSON.stringify(output)}`, /sentinel-secret/)
+})
 
 test('migration gate records a clean baseline then binds planned migrations incrementally on post', async () => {
   const sourceDir = await tempDir()

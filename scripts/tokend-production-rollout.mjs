@@ -69,7 +69,13 @@ const spec = (required, optional = [], numeric = [], array = [], boolean = []) =
 export const COMMAND_SPECS = Object.freeze({
   'wrapper-gate': spec(['live-schema', 'rollback-sql', 'state', 'out']),
   'migration-manifest': spec(['files', 'state', 'out'], [], [], ['files']),
-  'migration-gate': spec(['migration-list', 'migrations-dir', 'state', 'phase', 'out']),
+  'migration-gate': spec(
+    ['migration-list', 'migrations-dir', 'state', 'phase', 'out'],
+    ['allow-empty-history'],
+    [],
+    [],
+    ['allow-empty-history'],
+  ),
   preflight: spec(['out']),
   'fixture-create': spec(['state']),
   'fixture-reset': spec(['state']),
@@ -154,6 +160,9 @@ export function parseCli(argv) {
   }
   if (command === 'migration-gate' && !['pre', 'post'].includes(options.phase)) {
     fail('--phase must be pre or post')
+  }
+  if (command === 'migration-gate' && options.allowEmptyHistory === true && options.phase !== 'pre') {
+    fail('--allow-empty-history is only valid with --phase pre')
   }
   if (command === 'backfill-run' && options.limit > 5000) fail('--limit must be at most 5000')
   if (command === 'sample' && options.count > 10000) fail('--count must be at most 10000')
@@ -652,7 +661,19 @@ export function mergeMigrationManifestState(state, manifest) {
   }
 }
 
-export function parseMigrationList(text) {
+function isEmptySupabasePrettyMigrationList(text) {
+  const lines = String(text).split(/\r?\n/)
+  let first = 0
+  while (first < lines.length && lines[first].trim() === '') first += 1
+  let last = lines.length - 1
+  while (last >= first && lines[last].trim() === '') last -= 1
+  const body = lines.slice(first, last + 1)
+  return body.length === 2
+    && /^\s*Local\s*\|\s*Remote\s*\|\s*Time\s+\(UTC\)\s*$/.test(body[0])
+    && /^\s*-{3,}\s*\|\s*-{3,}\s*\|\s*-{3,}\s*$/.test(body[1])
+}
+
+export function parseMigrationList(text, { allowEmptyHistory = false } = {}) {
   const rows = []
   for (const line of String(text).split(/\r?\n/)) {
     if (!line.includes('|') || /^\s*(?:Local|-)/i.test(line)) continue
@@ -661,7 +682,14 @@ export function parseMigrationList(text) {
     if ((local && !/^\d{12,14}$/.test(local)) || (remote && !/^\d{12,14}$/.test(remote))) fail('Migration list contains an invalid local/remote row')
     rows.push({ local, remote })
   }
-  if (rows.length === 0) fail('Migration list contains no version rows')
+  if (rows.length > 0) {
+    if (allowEmptyHistory) fail('--allow-empty-history requires an empty migration history')
+    return rows
+  }
+  if (!allowEmptyHistory) fail('Migration list contains no version rows')
+  if (!isEmptySupabasePrettyMigrationList(text)) {
+    fail('Empty migration history requires an exact Supabase pretty header')
+  }
   return rows
 }
 
@@ -717,9 +745,18 @@ function hasMatchingPostBinding(state, version) {
     entry.phase === 'post' && entry.version === version && entry.hash === hash && entry.bindingHash === bindingHash)
 }
 
-export async function validateMigrationGate({ state, migrationList, migrationsDir, phase, fs = nodeFs, now = () => new Date().toISOString() }) {
+export async function validateMigrationGate({
+  state,
+  migrationList,
+  migrationsDir,
+  phase,
+  allowEmptyHistory = false,
+  fs = nodeFs,
+  now = () => new Date().toISOString(),
+}) {
   if (!['pre', 'post'].includes(phase)) fail('Migration gate phase must be pre or post')
-  const rows = parseMigrationList(migrationList)
+  if (allowEmptyHistory && phase !== 'pre') fail('--allow-empty-history is only valid with phase pre')
+  const rows = parseMigrationList(migrationList, { allowEmptyHistory })
   for (const row of rows) {
     if (!row.local || !row.remote || row.local !== row.remote) fail(`Migration local/remote mismatch at ${row.local || row.remote}`)
   }
@@ -728,19 +765,25 @@ export async function validateMigrationGate({ state, migrationList, migrationsDi
   const history = [...(state.migrationGateHistory ?? [])]
   if (phase === 'pre') {
     if (!Array.isArray(state.migrationBaselineVersions)) {
+      if (allowEmptyHistory && orderedBoundVersions(state).length > 0) {
+        fail('Bound migrations cannot establish an empty migration baseline')
+      }
       const contaminated = listed.find(version =>
         MANAGED_MIGRATION_VERSIONS.includes(version) || version === EMERGENCY_VERSION || version >= RECOVERY_MIN_VERSION)
       if (contaminated) fail(`Emergency, managed, or recovery rollout version ${contaminated} cannot be part of the initial baseline`)
+      const historyHash = sha256(JSON.stringify(listed))
       history.push({
         phase: 'pre',
         versions: listed,
-        historyHash: sha256(JSON.stringify(listed)),
+        historyHash,
+        ...(allowEmptyHistory ? { emptyHistoryAccepted: true } : {}),
         timestamp: now(),
       })
       return {
         ...state,
         migrationBaselineVersions: listed,
-        migrationBaselineHash: sha256(JSON.stringify(listed)),
+        migrationBaselineHash: historyHash,
+        ...(allowEmptyHistory ? { emptyHistoryAccepted: true } : {}),
         migrationGateHistory: history,
         transition: 'migrations-consistent',
       }
@@ -1814,12 +1857,14 @@ export function createRolloutRunner(dependencies = {}) {
       const migrationList = await fs.readFile(options.migrationList, 'utf8')
       const next = await validateMigrationGate({
         state, migrationList, migrationsDir: options.migrationsDir, phase: options.phase, fs,
+        allowEmptyHistory: options.allowEmptyHistory === true,
         now: () => clock().toISOString(),
       })
       await saveState(options.state, next)
       return writeSanitized(options.out, {
         phase: options.phase,
         transition: next.transition,
+        emptyHistoryAccepted: next.emptyHistoryAccepted === true,
         forwardRecoveryRequired: next.forwardRecoveryRequired === true,
         appliedMigrationHashes: next.appliedMigrationHashes,
         timestamp: clock().toISOString(),

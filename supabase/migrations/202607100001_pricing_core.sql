@@ -361,16 +361,6 @@ BEGIN
   END IF;
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
-    WHERE conname = 'tokend_event_cost_revisions_event_fkey'
-      AND conrelid = 'public.tokend_event_cost_revisions'::regclass
-  ) THEN
-    ALTER TABLE public.tokend_event_cost_revisions
-      ADD CONSTRAINT tokend_event_cost_revisions_event_fkey
-      FOREIGN KEY (event_id, member_code)
-      REFERENCES public.tokend_usage_events(id, member_code);
-  END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint
     WHERE conname = 'tokend_event_cost_revisions_run_fkey'
       AND conrelid = 'public.tokend_event_cost_revisions'::regclass
   ) THEN
@@ -473,16 +463,6 @@ BEGIN
   END IF;
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
-    WHERE conname = 'tokend_pricing_backfill_targets_event_fkey'
-      AND conrelid = 'public.tokend_pricing_backfill_targets'::regclass
-  ) THEN
-    ALTER TABLE public.tokend_pricing_backfill_targets
-      ADD CONSTRAINT tokend_pricing_backfill_targets_event_fkey
-      FOREIGN KEY (event_id, member_code)
-      REFERENCES public.tokend_usage_events(id, member_code);
-  END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint
     WHERE conname = 'tokend_pricing_backfill_targets_hash_check'
       AND conrelid = 'public.tokend_pricing_backfill_targets'::regclass
   ) THEN
@@ -507,16 +487,6 @@ BEGIN
     ALTER TABLE public.tokend_pricing_shadow_sessions
       ADD CONSTRAINT tokend_pricing_shadow_sessions_run_fkey
       FOREIGN KEY (run_id) REFERENCES public.tokend_pricing_backfill_runs(run_id);
-  END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint
-    WHERE conname = 'tokend_pricing_shadow_sessions_session_fkey'
-      AND conrelid = 'public.tokend_pricing_shadow_sessions'::regclass
-  ) THEN
-    ALTER TABLE public.tokend_pricing_shadow_sessions
-      ADD CONSTRAINT tokend_pricing_shadow_sessions_session_fkey
-      FOREIGN KEY (session_id, member_code)
-      REFERENCES public.tokend_sessions(session_id, member_code);
   END IF;
 
   IF NOT EXISTS (
@@ -1395,6 +1365,36 @@ ALTER TABLE public.tokend_usage_events
 
 DO $usage_constraints$
 BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'tokend_event_cost_revisions_event_fkey'
+      AND conrelid = 'public.tokend_event_cost_revisions'::regclass
+  ) THEN
+    ALTER TABLE public.tokend_event_cost_revisions
+      ADD CONSTRAINT tokend_event_cost_revisions_event_fkey
+      FOREIGN KEY (event_id, member_code)
+      REFERENCES public.tokend_usage_events(id, member_code);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'tokend_pricing_backfill_targets_event_fkey'
+      AND conrelid = 'public.tokend_pricing_backfill_targets'::regclass
+  ) THEN
+    ALTER TABLE public.tokend_pricing_backfill_targets
+      ADD CONSTRAINT tokend_pricing_backfill_targets_event_fkey
+      FOREIGN KEY (event_id, member_code)
+      REFERENCES public.tokend_usage_events(id, member_code);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'tokend_pricing_shadow_sessions_session_fkey'
+      AND conrelid = 'public.tokend_pricing_shadow_sessions'::regclass
+  ) THEN
+    ALTER TABLE public.tokend_pricing_shadow_sessions
+      ADD CONSTRAINT tokend_pricing_shadow_sessions_session_fkey
+      FOREIGN KEY (session_id, member_code)
+      REFERENCES public.tokend_sessions(session_id, member_code);
+  END IF;
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
     WHERE conname = 'tokend_usage_events_pricing_status_check'

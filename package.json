@@ -21,6 +21,7 @@
     "test:sync": "tsx tests/cli-sync-contract.ts",
     "test:pricing": "tsx tests/pricing-regression.ts",
     "test:pricing-db": "bash scripts/test-pricing-db.sh",
+    "test:pricing-scale": "bash scripts/test-pricing-scale.sh",
     "generate:pricing-sql": "tsx scripts/generate-supabase-pricing.mjs --write",
     "check:pricing-sql": "tsx scripts/generate-supabase-pricing.mjs --check",
     "setup-hooks": "git config core.hooksPath .githooks",

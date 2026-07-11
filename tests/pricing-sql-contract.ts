@@ -204,6 +204,7 @@ const NEW_TABLES = [
   'tokend_pricing_state',
   'tokend_pricing_backfill_runs',
   'tokend_pricing_backfill_targets',
+  'tokend_pricing_ingest_epochs',
   'tokend_pricing_shadow_sessions',
   'tokend_pricing_audit',
 ] as const
@@ -289,6 +290,7 @@ function testMigrationIsAdditiveAndDefinesRequiredKeys(): void {
     tokend_pricing_state: ['singleton'],
     tokend_pricing_backfill_runs: ['run_id'],
     tokend_pricing_backfill_targets: ['run_id', 'member_code', 'event_id'],
+    tokend_pricing_ingest_epochs: ['epoch'],
     tokend_pricing_shadow_sessions: ['run_id', 'member_code', 'session_id'],
     tokend_pricing_audit: ['audit_id'],
   }
@@ -315,7 +317,7 @@ function testMigrationIsAdditiveAndDefinesRequiredKeys(): void {
   ]) {
     assert.match(
       migration,
-      new RegExp(`ALTER TABLE public\\.tokend_usage_events\\s+ADD COLUMN IF NOT EXISTS ${column}\\b`, 'i'),
+      new RegExp(`ALTER TABLE public\\.tokend_usage_events[\\s\\S]{0,800}ADD COLUMN IF NOT EXISTS ${column}\\b`, 'i'),
     )
   }
 
@@ -325,9 +327,44 @@ function testMigrationIsAdditiveAndDefinesRequiredKeys(): void {
   )
   assert.doesNotMatch(
     migration,
-    /ALTER TABLE public\.tokend_(?:members|usage_events|sessions|sync_state|model_prices)[^;]*\b(?:DROP|RENAME|ALTER COLUMN|PRIMARY KEY)\b/i,
+    /ALTER TABLE public\.tokend_(?:members|usage_events|sessions|sync_state|model_prices)[^;]*\b(?:DROP|RENAME|PRIMARY KEY)\b/i,
   )
   assert.doesNotMatch(migration, /ON CONFLICT[\s\S]{0,120}DO UPDATE/i)
+}
+
+function testLargeUsageTableDdlIsOneShortFailFastTailWindow(): void {
+  const migration = readMigration()
+  const generatedEndAt = migration.indexOf(END_MARKER) + END_MARKER.length
+  const beforeGeneratedEnd = migration.slice(0, generatedEndAt)
+  const ddlTail = migration.slice(generatedEndAt)
+  const lockTimeoutAt = ddlTail.search(/SET\s+lock_timeout\s*=\s*'2s'/i)
+  const usageAlterAt = ddlTail.search(/ALTER TABLE public\.tokend_usage_events/i)
+  const resetAt = ddlTail.search(/RESET\s+lock_timeout/i)
+
+  assert.ok(generatedEndAt >= END_MARKER.length, 'generated catalog end marker must exist')
+  assert.doesNotMatch(beforeGeneratedEnd, /ALTER TABLE public\.tokend_usage_events/i)
+  assert.ok(
+    lockTimeoutAt >= 0 && usageAlterAt > lockTimeoutAt && resetAt > usageAlterAt,
+    'large-table DDL must run after the generated catalog inside one fail-fast lock timeout window',
+  )
+  assert.equal((ddlTail.match(/ALTER TABLE public\.tokend_usage_events\s+ADD COLUMN/gi) ?? []).length, 1)
+  assert.match(
+    ddlTail,
+    /ALTER TABLE public\.tokend_usage_events[\s\S]*?pricing_ingest_epoch\s+BIGINT\s+NOT NULL\s+DEFAULT\s+0[\s\S]*?ALTER COLUMN uploaded_at SET DEFAULT clock_timestamp\(\)/i,
+  )
+  for (const constraint of [
+    'pricing_status', 'pricing_tier', 'token_semantics', 'breakdown_status',
+  ]) {
+    assert.match(
+      ddlTail,
+      new RegExp(`ADD CONSTRAINT tokend_usage_events_${constraint}_check[\\s\\S]{0,360}NOT VALID`, 'i'),
+    )
+  }
+  for (const constraint of [
+    'tokend_event_cost_revisions_event_fkey',
+    'tokend_pricing_backfill_targets_event_fkey',
+    'tokend_pricing_shadow_sessions_session_fkey',
+  ]) assert.match(ddlTail, new RegExp(`ADD CONSTRAINT ${constraint}\\b`, 'i'))
 }
 
 function testMigrationUsesExactMoneyTypesAndAuditShape(): void {
@@ -355,13 +392,27 @@ function testMigrationUsesExactMoneyTypesAndAuditShape(): void {
 
   const runs = tableDefinition(migration, 'tokend_pricing_backfill_runs')
   for (const column of [
-    'catalog_version', 'status', 'snapshot_at', 'target_count', 'input_tokens', 'output_tokens',
+    'catalog_version', 'create_request_id', 'status', 'snapshot_at', 'target_count', 'input_tokens', 'output_tokens',
     'reasoning_tokens', 'cache_read_tokens', 'cache_write_tokens', 'before_total_cost',
+    'target_ingest_epoch', 'freeze_upper_event_id', 'freeze_upper_member_code',
+    'freeze_cursor_event_id', 'freeze_cursor_member_code', 'freeze_scanned_count',
+    'frozen_count', 'freeze_complete', 'frozen_at', 'priced_count',
+    'post_snapshot_event_count', 'members_over_2x_count',
     'cursor_member_code', 'cursor_event_id', 'reconciliation_hash', 'started_at', 'completed_at',
   ]) assert.match(runs, new RegExp(`\\b${column}\\b`))
+  assert.match(
+    migration,
+    /ADD CONSTRAINT tokend_pricing_backfill_runs_create_request_id_key\s+UNIQUE\s*\(create_request_id\)/i,
+  )
+  assert.match(
+    migration,
+    /ALTER TABLE public\.tokend_pricing_backfill_runs\s+ADD COLUMN IF NOT EXISTS create_request_id\s+UUID/i,
+    'rerunning core over a pre-idempotency runs table must add the request column before its constraint',
+  )
 
   const targets = tableDefinition(migration, 'tokend_pricing_backfill_targets')
   assert.match(targets, /\bevent_snapshot\s+JSONB\s+NOT NULL\b/i)
+  assert.match(targets, /\bsnapshot_hash\s+TEXT\s+NOT NULL\b/i)
   assert.match(targets, /\bprocessed_at\s+TIMESTAMPTZ\b/i)
 
   const shadows = tableDefinition(migration, 'tokend_pricing_shadow_sessions')
@@ -564,18 +615,38 @@ function testServerEstimatorAndRevisionContractAreComplete(): void {
 
   assert.match(upload, /active_catalog_version/i)
   assert.match(upload, /previous_catalog_version/i)
-  assert.match(upload, /status\s+IN\s*\('staging',\s*'reconciled'\)/i)
+  assert.match(upload, /status\s+IN\s*\('freezing',\s*'staging',\s*'reconciled'\)/i)
   assert.match(upload, /LOCK TABLE public\.tokend_usage_events IN ROW EXCLUSIVE MODE/i)
   const uploadFenceAt = upload.indexOf(
     'LOCK TABLE public.tokend_usage_events IN ROW EXCLUSIVE MODE',
   )
+  const ingestEpochReadAt = upload.indexOf('SELECT pricing_state.current_ingest_epoch')
   const catalogSnapshotAt = upload.indexOf('INTO v_catalog_versions')
   const baseInsertAt = upload.indexOf('INSERT INTO public.tokend_usage_events')
   assert.ok(
     uploadFenceAt >= 0
-      && catalogSnapshotAt > uploadFenceAt
+      && ingestEpochReadAt > uploadFenceAt
+      && catalogSnapshotAt > ingestEpochReadAt
       && baseInsertAt > catalogSnapshotAt,
-    'upload must fence before reading catalog versions and mutating base rows',
+    'upload must fence before reading the ingest epoch, catalog versions, and mutating base rows',
+  )
+  assert.match(
+    upload,
+    /pricing_ingest_epoch\s*\n\s*\)\s*VALUES\s*\([\s\S]*?v_ingest_epoch\s*\n\s*\)/i,
+  )
+  const ingestCounter = upload.match(
+    /IF v_inserted > 0 THEN([\s\S]*?INSERT INTO public\.tokend_pricing_ingest_epochs[\s\S]*?)END IF;/i,
+  )
+  assert.ok(ingestCounter, 'only newly inserted events may advance the epoch counter')
+  assert.match(ingestCounter[1], /event_count[\s\S]*?v_inserted/i)
+  assert.match(
+    ingestCounter[1],
+    /event_count\s*=\s*public\.tokend_pricing_ingest_epochs\.event_count\s*\+\s*EXCLUDED\.event_count/i,
+  )
+  assert.doesNotMatch(
+    upload.match(/IF v_row_count = 0 THEN([\s\S]*?)END IF;/i)?.[1] ?? '',
+    /pricing_ingest_epoch|tokend_pricing_ingest_epochs/i,
+    'duplicate uploads must not move an event or increment an ingest epoch',
   )
   assert.match(upload, /array_agg\(DISTINCT target\.catalog_version ORDER BY target\.catalog_version\)/i)
   assert.match(upload, /FOREACH v_catalog_version IN ARRAY v_catalog_versions/i)
@@ -591,24 +662,19 @@ function testPreflightIsAggregateOnlyWithExactKeys(): void {
   const migration = readUploadMigration()
   const preflight = functionDefinition(migration, 'tokend_pricing_preflight')
   const expectedKeys = [
-    'eventCount', 'eligibleEventCount', 'eligibleZeroCostEventCount', 'zeroCostByModel',
-    'legacyPriceRowCount', 'statusCounts', 'unpricedEventCount', 'unpricedShare',
-    'postSnapshotEventCount', 'membersOver2xCount', 'activeRunStatus',
+    'authoritative', 'source', 'legacyPriceRowCount', 'rolloutFixtureCount', 'activeRunStatus',
     'activeReconciliationHash', 'rolloutFixtureCount', 'activeCatalogVersion',
     'activeRunId', 'previousCatalogVersion', 'previousRunId',
   ]
-  const topLevelReturn = preflight.match(/RETURN json_build_object\(([\s\S]*?)\n\s*\);\s*\nEND/i)
-  assert.ok(topLevelReturn, 'preflight must return one final JSON object')
+  const topLevelReturn = preflight.match(/SELECT json_build_object\(([\s\S]*?)\)\s+FROM/i)
+  assert.ok(topLevelReturn, 'intermediate preflight must return one SQL JSON object')
   for (const key of expectedKeys) {
-    assert.equal((topLevelReturn[1].match(new RegExp(`'${key}'`, 'g')) ?? []).length, 1, key)
+    assert.ok((topLevelReturn[1].match(new RegExp(`'${key}'`, 'g')) ?? []).length >= 1, key)
   }
-  assert.match(preflight, /total_tokens\s*>\s*0/i)
+  assert.match(preflight, /'authoritative'\s*,\s*FALSE/i)
+  assert.match(preflight, /'source'\s*,\s*'intermediate_schema'/i)
   assert.match(preflight, /member_code\s+LIKE\s+'ROLL%'/i)
-  assert.match(preflight, />\s*2\s*\*/i)
-  assert.match(preflight, /revision\.computed_at\s*>=\s*v_snapshot_at/i)
-  assert.match(preflight, /revision\.backfill_run_id\s+IS NULL/i)
-  assert.match(preflight, /tokend_pricing_backfill_targets[\s\S]{0,320}NOT EXISTS|NOT EXISTS[\s\S]{0,320}tokend_pricing_backfill_targets/i)
-  assert.doesNotMatch(preflight, /usage_event\.timestamp_ms\s*>=/i)
+  assert.doesNotMatch(preflight, /tokend_usage_events|tokend_event_cost_revisions|tokend_effective_usage_events/i)
   assert.doesNotMatch(preflight, /json_build_object\([\s\S]*?'(?:memberCode|token|phone|sessionId|eventId)'/i)
 }
 
@@ -884,7 +950,9 @@ function testSummaryUsesTheV14SingleScanExecutionShape(): void {
 }
 
 const BACKFILL_ADMIN_SIGNATURES = [
-  ['tokend_pricing_create_backfill', 'p_catalog_version TEXT', 'TEXT'],
+  ['tokend_pricing_create_backfill', 'p_catalog_version TEXT, p_create_request_id UUID', 'TEXT, UUID'],
+  ['tokend_pricing_freeze_batch', 'p_run_id UUID, p_limit INTEGER DEFAULT 5000', 'UUID, INTEGER'],
+  ['tokend_pricing_finalize_backfill', 'p_run_id UUID', 'UUID'],
   [
     'tokend_pricing_backfill_batch',
     "p_run_id UUID, p_after_member TEXT DEFAULT '', p_after_event TEXT DEFAULT '', p_limit INTEGER DEFAULT 10000",
@@ -894,6 +962,7 @@ const BACKFILL_ADMIN_SIGNATURES = [
   ['tokend_pricing_activate', 'p_run_id UUID', 'UUID'],
   ['tokend_pricing_rollback', 'p_run_id UUID', 'UUID'],
   ['tokend_pricing_get_backfill', 'p_run_id UUID', 'UUID'],
+  ['tokend_pricing_health', '', ''],
 ] as const
 
 function testBackfillMigrationDefinesExactAdminSurfaceAndAcls(): void {
@@ -941,16 +1010,28 @@ function testBackfillMigrationDefinesExactAdminSurfaceAndAcls(): void {
     definitions.length,
     '004 must not create overloads',
   )
+
+  for (const helper of [
+    'tokend_pricing_compute_target_hash\\(UUID\\)',
+    'tokend_pricing_compute_reconciliation_hash\\(UUID, TEXT\\)',
+  ]) {
+    assert.match(
+      migration,
+      new RegExp(`REVOKE ALL ON FUNCTION public\\.${helper} FROM PUBLIC, anon, authenticated, service_role`, 'i'),
+    )
+    assert.doesNotMatch(
+      migration,
+      new RegExp(`GRANT EXECUTE ON FUNCTION public\\.${helper}`, 'i'),
+    )
+  }
 }
 
-function testBackfillMigrationFreezesAnAtomicDeterministicTargetSet(): void {
+function testBackfillMigrationUsesAShortEpochFenceAndBoundedFreeze(): void {
   const migration = readBackfillMigration()
   assert.doesNotMatch(migration, /chr\s*\(\s*0\s*\)/i, 'PostgreSQL text cannot contain NUL separators')
-  assert.match(
-    migration,
-    /ALTER TABLE public\.tokend_usage_events\s+ALTER COLUMN uploaded_at\s+SET DEFAULT clock_timestamp\(\)/i,
-  )
+  assert.doesNotMatch(migration, /ALTER TABLE public\.tokend_usage_events/i)
   for (const column of [
+    'create_request_id UUID',
     'target_hash TEXT',
     'base_catalog_version TEXT',
     'base_backfill_run_id UUID',
@@ -966,6 +1047,15 @@ function testBackfillMigrationFreezesAnAtomicDeterministicTargetSet(): void {
 
   const create = functionDefinition(migration, 'tokend_pricing_create_backfill')
   assert.match(create, /pg_advisory_xact_lock/i)
+  assert.match(create, /p_create_request_id\s+IS\s+NULL/i)
+  assert.match(create, /WHERE\s+create_request_id\s*=\s*p_create_request_id/i)
+  assert.ok(
+    create.indexOf('WHERE create_request_id = p_create_request_id')
+      < create.indexOf('Pricing singleton state is missing'),
+    'request-id replay must resolve before mutable base-state validation',
+  )
+  assert.match(create, /catalog_version\s+IS\s+DISTINCT\s+FROM\s+p_catalog_version/i)
+  assert.match(create, /create_request_id[\s\S]*p_create_request_id/i)
   assert.match(create, /LOCK TABLE public\.tokend_usage_events IN SHARE MODE/i)
   assert.ok(
     create.indexOf('LOCK TABLE public.tokend_usage_events IN SHARE MODE')
@@ -973,39 +1063,72 @@ function testBackfillMigrationFreezesAnAtomicDeterministicTargetSet(): void {
     'snapshot time must be captured only after the upload fence',
   )
   assert.match(create, /tokend_pricing_catalogs/i)
-  assert.match(create, /status\s+IN\s*\('staging',\s*'reconciled'\)/i)
+  assert.match(create, /status\s+IN\s*\('freezing',\s*'staging',\s*'reconciled'\)/i)
   assert.match(create, /tokend_pricing_state[\s\S]*FOR UPDATE/i)
+  assert.match(create, /v_target_ingest_epoch\s*:=\s*v_state\.current_ingest_epoch/i)
+  assert.match(create, /current_ingest_epoch\s*=\s*current_ingest_epoch\s*\+\s*1/i)
+  assert.match(create, /target_ingest_epoch/i)
+  assert.match(create, /freeze_upper_event_id/i)
+  assert.match(create, /freeze_upper_member_code/i)
+  assert.match(create, /ORDER BY\s+usage_event\.id\s+DESC\s*,\s*usage_event\.member_code\s+DESC\s+LIMIT\s+1/i)
+  assert.match(create, /'status'\s*,\s*'freezing'/i)
   assert.match(create, /active_catalog_version/i)
   assert.match(create, /active_backfill_run_id/i)
   assert.match(create, /p_catalog_version\s+IS NOT DISTINCT FROM\s+v_state\.active_catalog_version/i)
-  assert.match(create, /total_tokens\s*>\s*0/i)
-  assert.match(
-    create,
-    /COALESCE\(usage_event\.uploaded_at,\s*'-infinity'::TIMESTAMPTZ\)\s*<\s*v_snapshot_at/i,
-  )
-  assert.match(create, /pricing_status\s+IS DISTINCT FROM\s+'reported'/i)
-  assert.match(create, /pricing_status\s+IN\s*\('legacy'\)|pricing_status\s+IS NULL/i)
-  for (const cost of [
-    'input_cost', 'output_cost', 'reasoning_cost', 'cache_read_cost',
-    'cache_write_cost', 'total_cost', 'unallocated_cost',
-  ]) assert.match(create, new RegExp(`COALESCE\\([^)]*${cost}[^)]*,\\s*0\\)\\s*<>\\s*0`, 'i'))
-  assert.match(create, /INSERT INTO public\.tokend_pricing_backfill_targets/i)
+  assert.doesNotMatch(create, /tokend_effective_usage_events|total_tokens\s*>\s*0/i)
+  assert.doesNotMatch(create, /INSERT INTO public\.tokend_pricing_backfill_targets/i)
+  assert.doesNotMatch(create, /string_agg|tokend_price_event/i)
+
+  const freeze = functionDefinition(migration, 'tokend_pricing_freeze_batch')
+  assert.match(freeze, /status\s*<>\s*'freezing'|status\s+IS DISTINCT FROM\s+'freezing'/i)
+  assert.match(freeze, /p_limit\s*<\s*1\s+OR\s+p_limit\s*>\s*5000/i)
+  assert.match(freeze, /WITH\s+raw_page\s+AS\s+MATERIALIZED/i)
+  assert.match(freeze, /ROW\(usage_event\.id,\s*usage_event\.member_code\)\s*>\s*ROW\(/i)
+  assert.match(freeze, /raw_page\.pricing_ingest_epoch\s*<=\s*v_run\.target_ingest_epoch/i)
+  assert.match(freeze, /freeze_upper_event_id/i)
+  assert.match(freeze, /freeze_upper_member_code/i)
+  assert.match(freeze, /ORDER BY\s+usage_event\.id\s*,\s*usage_event\.member_code/i)
+  assert.match(freeze, /LIMIT\s+p_limit/i)
+  assert.match(freeze, /INSERT INTO public\.tokend_pricing_backfill_targets/i)
+  assert.match(freeze, /snapshot_hash/i)
+  assert.match(freeze, /encode\(\s*sha256\(/i)
+  assert.match(freeze, /freeze_cursor_event_id/i)
+  assert.match(freeze, /freeze_cursor_member_code/i)
+  assert.match(freeze, /frozen_count\s*=\s*frozen_count\s*\+/i)
+  assert.match(freeze, /freeze_complete/i)
+  assert.doesNotMatch(freeze, /uploaded_at\s*[<>]=?\s*v_run\.snapshot_at/i)
+  assert.doesNotMatch(freeze, /tokend_price_event/i)
   for (const key of [
     'inputTokens', 'outputTokens', 'reasoningTokens', 'cacheReadTokens', 'cacheWriteTokens',
-    'model', 'timestampMs', 'tokenSemantics', 'sessionId', 'sessionKey', 'agent', 'provider',
-    'channel', 'stopReason', 'project', 'beforeInputCost', 'beforeOutputCost',
-    'beforeReasoningCost', 'beforeCacheReadCost', 'beforeCacheWriteCost',
-    'beforeUnallocatedCost', 'beforeTotalCost', 'beforePricingStatus',
-  ]) assert.match(create, new RegExp(`'${key}'\\s*,`, 'i'), `snapshot key ${key}`)
-  assert.doesNotMatch(create, /tokend_price_event/i)
-  assert.match(create, /encode\(\s*sha256\([\s\S]*string_agg\([\s\S]*ORDER BY[\s\S]*'hex'/i)
-  const targetHash = create.match(/v_target_hash\s*:=([\s\S]*?);/i)
-  assert.ok(targetHash, 'create must assign a frozen target hash')
-  assert.doesNotMatch(targetHash[1], /created_at|computed_at|clock_timestamp|now\(\)/i)
+    'model', 'timestampMs', 'tokenSemantics', 'sessionId', 'beforeTotalCost',
+  ]) assert.match(freeze, new RegExp(`'${key}'\\s*,`, 'i'), `snapshot key ${key}`)
+  for (const omitted of [
+    'sessionKey', 'agent', 'provider', 'channel', 'stopReason', 'project',
+    'beforeInputCost', 'beforeOutputCost', 'beforeReasoningCost',
+    'beforeCacheReadCost', 'beforeCacheWriteCost', 'beforeUnallocatedCost',
+  ]) assert.doesNotMatch(freeze, new RegExp(`'${omitted}'\\s*,`, 'i'))
+  assert.match(freeze, /LEFT JOIN public\.tokend_event_cost_revisions AS base_revision/i)
+  assert.match(freeze, /base_revision\.version\s*=\s*v_run\.base_catalog_version/i)
+  assert.doesNotMatch(freeze, /tokend_effective_usage_events/i)
+
+  const finalize = functionDefinition(migration, 'tokend_pricing_finalize_backfill')
+  assert.match(finalize, /freeze_complete/i)
+  assert.match(finalize, /tokend_pricing_compute_target_hash\(p_run_id\)/i)
+  assert.match(finalize, /status\s*=\s*'staging'/i)
+  assert.match(finalize, /target_count\s*=\s*v_target_count/i)
+  assert.match(finalize, /target_hash\s*=\s*v_target_hash/i)
+  assert.match(finalize, /frozen_at\s*=\s*(?:COALESCE\(frozen_at,\s*)?clock_timestamp\(\)/i)
+  assert.doesNotMatch(finalize, /FROM public\.tokend_usage_events/i)
+
+  const targetHash = functionDefinition(migration, 'tokend_pricing_compute_target_hash')
+  assert.match(targetHash, /row_number\(\)\s+OVER\s*\([\s\S]*?ORDER BY/i)
+  assert.match(targetHash, /2048/i)
+  assert.match(targetHash, /snapshot_hash/i)
+  assert.doesNotMatch(targetHash, /event_snapshot/i)
   for (const total of [
     'target_count', 'input_tokens', 'output_tokens', 'reasoning_tokens',
     'cache_read_tokens', 'cache_write_tokens', 'before_total_cost', 'target_hash',
-  ]) assert.match(create, new RegExp(`\\b${total}\\b`, 'i'))
+  ]) assert.match(finalize, new RegExp(`\\b${total}\\b`, 'i'))
 }
 
 function testBackfillBatchUsesPersistedCursorAndOneLockedPendingWindow(): void {
@@ -1018,11 +1141,14 @@ function testBackfillBatchUsesPersistedCursorAndOneLockedPendingWindow(): void {
   assert.match(batch, /ROW\([^)]*p_after_member[^)]*p_after_event[^)]*\)\s*>\s*ROW\(/i)
   assert.match(batch, /ERRCODE\s*=\s*'55000'/i)
   assert.match(batch, /processed_at\s+IS NULL/i)
+  assert.match(batch, /WITH\s+batch_targets\s+AS\s+MATERIALIZED/i)
+  assert.match(batch, /priced_targets\s+AS\s+MATERIALIZED/i)
   assert.match(batch, /ROW\([^)]*member_code[^)]*event_id[^)]*\)\s*>\s*ROW\(/i)
   assert.match(batch, /ORDER BY\s+(?:target\.)?member_code\s*,\s*(?:target\.)?event_id/i)
   assert.match(batch, /LIMIT\s+p_limit/i)
   assert.match(batch, /FOR UPDATE\b/i)
   assert.doesNotMatch(batch, /SKIP LOCKED/i)
+  assert.doesNotMatch(batch, /\bLOOP\b/i)
   assert.match(batch, /tokend_price_event\([^,]+event_snapshot[^,]*,\s*v_run\.catalog_version\)/i)
   assert.match(batch, /ON CONFLICT\s*\(version, member_code, event_id\)\s*DO UPDATE/i)
   assert.match(batch, /backfill_run_id\s*=\s*EXCLUDED\.backfill_run_id/i)
@@ -1033,6 +1159,14 @@ function testBackfillBatchUsesPersistedCursorAndOneLockedPendingWindow(): void {
     batch,
     /json_build_object\(\s*'ok'\s*,[\s\S]*'processed'\s*,[\s\S]*'revisionCount'\s*,[\s\S]*'remainingCount'\s*,[\s\S]*'nextMember'\s*,[\s\S]*'nextEvent'/i,
   )
+  assert.match(batch, /'processedCount'\s*,\s*v_revision_count/i)
+  assert.equal((batch.match(/INSERT INTO public\.tokend_event_cost_revisions/gi) ?? []).length, 1)
+  assert.equal((batch.match(/UPDATE public\.tokend_pricing_backfill_targets/gi) ?? []).length, 1)
+  assert.match(batch, /priced_count\s*=\s*priced_count\s*\+\s*v_processed/i)
+  assert.match(batch, /v_revision_count\s*:=\s*v_run\.priced_count\s*\+\s*v_processed/i)
+  assert.match(batch, /v_remaining_count\s*:=\s*GREATEST\(v_run\.target_count\s*-\s*v_revision_count,\s*0\)/i)
+  assert.doesNotMatch(batch, /SELECT\s+count\(\*\)[\s\S]*FROM public\.tokend_event_cost_revisions/i)
+  assert.doesNotMatch(batch, /SELECT\s+count\(\*\)[\s\S]*FROM public\.tokend_pricing_backfill_targets/i)
 }
 
 function testReconcileAndPairedStateAreLockedAuditableAndStatic(): void {
@@ -1059,10 +1193,11 @@ function testReconcileAndPairedStateAreLockedAuditableAndStatic(): void {
   ]) assert.match(reconcile, new RegExp(`\\b${metric}\\b`, 'i'), `member reconciliation metric ${metric}`)
   assert.match(reconcile, /status\s*=\s*'reconciled'/i)
   assert.match(reconcile, /reconciled_at\s*=\s*(?:COALESCE\(reconciled_at,\s*)?clock_timestamp\(\)\)?/i)
-  const hash = reconcile.match(/v_reconciliation_hash\s*:=([\s\S]*?);/i)
-  assert.ok(hash, 'reconcile must assign a deterministic hash')
-  assert.doesNotMatch(hash[1], /computed_at|created_at|processed_at|uploaded_at|clock_timestamp|now\(\)/i)
-  assert.match(hash[1], /revision\.backfill_run_id\s*=\s*p_run_id/i)
+  assert.match(
+    reconcile,
+    /v_reconciliation_hash\s*:=\s*public\.tokend_pricing_compute_reconciliation_hash\(\s*p_run_id,\s*v_run\.catalog_version\s*\)/i,
+  )
+  assert.doesNotMatch(reconcile, /string_agg/i)
   const reconcileGate = reconcile.match(/IF\s+v_missing_revision_count\s*=\s*0([\s\S]*?)THEN/i)
   assert.ok(reconcileGate, 'reconcile must have explicit static-data gates')
   assert.doesNotMatch(reconcileGate[1], /post_snapshot_event_count/i)
@@ -1096,6 +1231,11 @@ function testReconcileAndPairedStateAreLockedAuditableAndStatic(): void {
   assert.match(activate, /active_catalog_version\s*=\s*v_run\.catalog_version/i)
   assert.match(activate, /active_backfill_run_id\s*=\s*p_run_id/i)
   assert.match(activate, /status\s*=\s*'active'/i)
+  assert.match(
+    activate,
+    /v_current_hash\s*:=\s*public\.tokend_pricing_compute_reconciliation_hash\(\s*p_run_id,\s*v_run\.catalog_version\s*\)/i,
+  )
+  assert.doesNotMatch(activate, /string_agg/i)
   assert.doesNotMatch(activate, /'activated'/i)
   assert.match(activate, /status\s*=\s*'rolled_back'[\s\S]*status\s*=\s*'active'|status\s+(?:NOT\s+)?IN\s*\('reconciled',\s*'rolled_back'\)/i)
   const activationGate = activate.match(/IF\s+v_target_count\s+IS DISTINCT FROM\s+v_run\.target_count([\s\S]*?)THEN/i)
@@ -1129,31 +1269,68 @@ function testBackfillGetAndPreflightHaveExactAggregateOnlyContracts(): void {
     'remainingCount', 'postSnapshotEventCount', 'cursorMember', 'cursorEvent',
     'activeCatalogVersion', 'activeRunId',
   ]) assert.match(get, new RegExp(`'${key}'\\s*,`, 'i'), `get key ${key}`)
+  for (const key of ['frozenCount', 'freezeComplete']) {
+    assert.match(get, new RegExp(`'${key}'\\s*,`, 'i'), `get key ${key}`)
+  }
   for (const leaked of ['memberCode', 'eventId', 'sessionId', 'token', 'phone']) {
     assert.doesNotMatch(get, new RegExp(`'${leaked}'\\s*,`, 'i'))
   }
-  assert.match(get, /usage_event\.uploaded_at\s*>=\s*v_run\.snapshot_at/i)
-  assert.match(get, /NOT EXISTS[\s\S]*tokend_pricing_backfill_targets/i)
+  assert.match(get, /v_run\.priced_count/i)
+  assert.match(get, /FROM public\.tokend_pricing_ingest_epochs AS epoch_row/i)
+  assert.doesNotMatch(get, /FROM public\.tokend_usage_events|SELECT\s+count\(\*\)/i)
 
   const preflight = functionDefinition(migration, 'tokend_pricing_preflight')
-  assert.match(preflight, /FROM public\.tokend_effective_usage_events AS usage_event/i)
+  assert.equal(
+    (preflight.match(/FROM public\.tokend_effective_usage_events AS usage_event/gi) ?? []).length,
+    2,
+    'authoritative preflight may scan the effective relation only for global and bounded model aggregates',
+  )
   assert.match(preflight, /usage_event\.effective_total_cost/i)
   assert.match(preflight, /usage_event\.effective_pricing_status/i)
   assert.doesNotMatch(preflight, /usage_event\.(?:total_cost|pricing_status)\b/i)
+  for (const status of ['reported', 'estimated', 'zero_rate', 'unpriced', 'legacy']) {
+    assert.match(
+      preflight,
+      new RegExp(
+        `'${status}'\\s*,\\s*count\\(\\*\\)\\s+FILTER\\s*\\(\\s*WHERE\\s+usage_event\\.total_tokens\\s*>\\s*0\\s+AND\\s+usage_event\\.effective_pricing_status\\s*=\\s*'${status}'`,
+        'i',
+      ),
+      `authoritative statusCounts ${status} bucket must include only eligible events`,
+    )
+  }
+  assert.match(
+    preflight,
+    /'unset'\s*,\s*count\(\*\)\s+FILTER\s*\(\s*WHERE\s+usage_event\.total_tokens\s*>\s*0\s+AND\s+usage_event\.effective_pricing_status\s+IS\s+NULL/i,
+    'authoritative statusCounts unset bucket must include only eligible events',
+  )
   const expectedKeys = [
-    'eventCount', 'eligibleEventCount', 'eligibleZeroCostEventCount', 'zeroCostByModel',
+    'authoritative', 'source', 'eventCount', 'eligibleEventCount',
+    'eligibleZeroCostEventCount', 'zeroCostByModel', 'zeroCostByModelTruncated',
+    'zeroCostOtherEventCount',
     'legacyPriceRowCount', 'statusCounts', 'unpricedEventCount', 'unpricedShare',
-    'postSnapshotEventCount', 'membersOver2xCount', 'activeRunStatus',
+    'totalCost', 'postSnapshotEventCount', 'membersOver2xCount', 'activeRunStatus',
     'activeReconciliationHash', 'rolloutFixtureCount', 'activeCatalogVersion',
-    'activeRunId', 'previousCatalogVersion', 'previousRunId',
+    'catalogHash', 'activeRunId', 'previousCatalogVersion', 'previousRunId',
   ]
   const topLevelReturn = preflight.match(/RETURN json_build_object\(([\s\S]*?)\n\s*\);\s*\nEND/i)
   assert.ok(topLevelReturn)
   for (const key of expectedKeys) {
     assert.equal((topLevelReturn[1].match(new RegExp(`'${key}'`, 'g')) ?? []).length, 1, key)
   }
-  assert.match(preflight, /usage_event\.uploaded_at\s*>=\s*v_snapshot_at/i)
-  assert.match(preflight, /NOT EXISTS[\s\S]*tokend_pricing_backfill_targets/i)
+  assert.match(preflight, /'authoritative'\s*,\s*TRUE/i)
+  assert.match(
+    preflight,
+    /WHEN v_active_run_status = 'active' AND v_active_reconciliation_hash IS NOT NULL\s+THEN 'frozen_reconciled_run'\s+ELSE 'admin_aggregate'/i,
+  )
+  assert.match(preflight, /ORDER BY model_rollup\.event_count DESC, model_rollup\.model\s+LIMIT 100/i)
+  assert.doesNotMatch(preflight, /IF v_active_run_id IS NULL/i)
+  assert.match(
+    preflight,
+    /revision\.version IN \(v_active_catalog_version, v_previous_catalog_version\)/i,
+  )
+  assert.match(preflight, /post_snapshot_event_count/i)
+  assert.doesNotMatch(preflight, /usage_event\.uploaded_at\s*>=\s*v_snapshot_at/i)
+  assert.doesNotMatch(preflight, /NOT EXISTS[\s\S]*tokend_pricing_backfill_targets/i)
   assert.doesNotMatch(preflight, /revision\.computed_at\s*>=\s*v_snapshot_at/i)
   assert.doesNotMatch(preflight, /'(?:memberCode|eventId|sessionId|token|phone)'\s*,/i)
   assert.match(
@@ -1161,6 +1338,25 @@ function testBackfillGetAndPreflightHaveExactAggregateOnlyContracts(): void {
     /REVOKE ALL ON FUNCTION public\.tokend_pricing_preflight\(\) FROM PUBLIC, anon, authenticated, service_role/i,
   )
   assert.match(migration, /GRANT EXECUTE ON FUNCTION public\.tokend_pricing_preflight\(\) TO service_role/i)
+
+  const health = functionDefinition(migration, 'tokend_pricing_health')
+  const healthKeys = [
+    'activeCatalogVersion', 'activeRunId', 'previousCatalogVersion', 'previousRunId',
+    'activeRunStatus', 'activeReconciliationHash', 'postSnapshotEventCount',
+    'membersOver2xCount',
+  ]
+  const healthReturn = health.match(/RETURN json_build_object\(([\s\S]*?)\n\s*\);\s*\nEND/i)
+  assert.ok(healthReturn)
+  for (const key of healthKeys) {
+    assert.equal((healthReturn[1].match(new RegExp(`'${key}'`, 'g')) ?? []).length, 1, key)
+  }
+  assert.match(health, /FROM public\.tokend_pricing_state AS pricing_state/i)
+  assert.match(health, /LEFT JOIN public\.tokend_pricing_backfill_runs AS active_run/i)
+  assert.match(health, /FROM public\.tokend_pricing_ingest_epochs AS epoch_row/i)
+  assert.doesNotMatch(
+    health,
+    /tokend_(?:usage_events|effective_usage_events|event_cost_revisions|pricing_backfill_targets|pricing_shadow_sessions)/i,
+  )
 }
 
 function testPricingRollbackIsTransactionalSurgicalAndRestoresExactLegacyWrapper(): void {
@@ -1214,6 +1410,8 @@ function testPricingRollbackIsTransactionalSurgicalAndRestoresExactLegacyWrapper
     'tokend_upload_events_v2(text, jsonb, jsonb)',
     'tokend_price_event(jsonb, text)',
     'tokend_pricing_preflight()',
+    'tokend_pricing_compute_target_hash(uuid)',
+    'tokend_pricing_compute_reconciliation_hash(uuid, text)',
     ...BACKFILL_ADMIN_SIGNATURES.map(([name, , args]) => `${name}(${args.toLowerCase()})`),
     ...RPC_SIGNATURES.map(([name, , args]) => `${name}(${args.toLowerCase()})`),
   ].sort()
@@ -1269,10 +1467,10 @@ function testPgTapContractIsSelfContained(): void {
   const assertionPattern = /^SELECT (?:fk_ok|is|lives_ok|ok|results_eq|throws_ok)\(/gm
   assert.equal(plans.length, 1, 'pgTAP must declare exactly one continuous plan')
   assert.equal(finishes.length, 1, 'pgTAP must call finish exactly once')
-  assert.equal(Number(plans[0]?.[1]), 193, 'pgTAP must plan the full 193 assertions')
+  assert.equal(Number(plans[0]?.[1]), 197, 'pgTAP must plan the full 197 assertions')
   assert.equal(
     (pgTap.match(assertionPattern) ?? []).length,
-    193,
+    197,
     'continuous pgTAP plan must exactly match all assertions',
   )
   assert.doesNotMatch(pgTap, /^SELECT pass\(/gm)
@@ -1347,7 +1545,10 @@ function testPgTapContractIsSelfContained(): void {
     'session detail event token arithmetic widens before summing five buckets',
     'same timestamp metadata resolves by id descending in parent and detail',
     'session limits clamp negative and oversized anonymous requests',
-    'create freezes one deterministic target set without pricing',
+    'freeze and finalize publish one deterministic target set without pricing',
+    'create requires a nonnull idempotency request id',
+    'same create request returns the same run snapshot without a second row',
+    'same create request cannot be reused for another catalog',
     'create rejects a catalog that is already the current active catalog',
     'batch retries use the persisted cursor and never reprice processed targets',
     'reconcile reports late arrivals but gates only frozen static data',
@@ -1358,6 +1559,7 @@ function testPgTapContractIsSelfContained(): void {
     'already-rolled-back requests are idempotent only for the exact paired state',
     'orphan sessions and revision-only members both block reconciliation',
     'five real late arrivals stay outside the frozen reconciliation hash',
+    'zero-token telemetry does not enter authoritative preflight statusCounts',
     'activate rollback and reactivate preserve the frozen catalog run pair',
     'a competing active run cannot claim the current run idempotency path',
     'a truly stale active rollback cannot replace the current pair',
@@ -1373,6 +1575,7 @@ testSharedCatalogValidatorRejectsUnsafeInput()
 testMarkerReplacementIsSurgical()
 testMigrationEmbedsExactlyGeneratedCatalog()
 testMigrationIsAdditiveAndDefinesRequiredKeys()
+testLargeUsageTableDdlIsOneShortFailFastTailWindow()
 testMigrationUsesExactMoneyTypesAndAuditShape()
 testMigrationLocksDownCatalogAndTableAccess()
 testMigrationSeedsOnlyNullStatePointers()
@@ -1387,7 +1590,7 @@ testRpcAggregationContractIsConsistent()
 testSummaryChildrenAndSessionsUseTheFullEnvelopeContract()
 testSummaryUsesTheV14SingleScanExecutionShape()
 testBackfillMigrationDefinesExactAdminSurfaceAndAcls()
-testBackfillMigrationFreezesAnAtomicDeterministicTargetSet()
+testBackfillMigrationUsesAShortEpochFenceAndBoundedFreeze()
 testBackfillBatchUsesPersistedCursorAndOneLockedPendingWindow()
 testReconcileAndPairedStateAreLockedAuditableAndStatic()
 testBackfillGetAndPreflightHaveExactAggregateOnlyContracts()

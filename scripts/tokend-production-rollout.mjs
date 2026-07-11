@@ -49,19 +49,25 @@ export const LEGACY_RPC_NAMES = Object.freeze([
 
 export const ADMIN_RPC_NAMES = Object.freeze([
   'tokend_pricing_create_backfill',
+  'tokend_pricing_freeze_batch',
+  'tokend_pricing_finalize_backfill',
   'tokend_pricing_backfill_batch',
   'tokend_pricing_reconcile',
   'tokend_pricing_activate',
   'tokend_pricing_rollback',
   'tokend_pricing_get_backfill',
+  'tokend_pricing_health',
 ])
 export const ADMIN_RPC_SIGNATURES = Object.freeze({
-  tokend_pricing_create_backfill: 'TEXT',
+  tokend_pricing_create_backfill: 'TEXT, UUID',
+  tokend_pricing_freeze_batch: 'UUID, INTEGER',
+  tokend_pricing_finalize_backfill: 'UUID',
   tokend_pricing_backfill_batch: 'UUID, TEXT, TEXT, INTEGER',
   tokend_pricing_reconcile: 'UUID',
   tokend_pricing_activate: 'UUID',
   tokend_pricing_rollback: 'UUID',
   tokend_pricing_get_backfill: 'UUID',
+  tokend_pricing_health: '',
 })
 export const PREFLIGHT_RPC_NAME = 'tokend_pricing_preflight'
 
@@ -87,6 +93,7 @@ export const COMMAND_SPECS = Object.freeze({
   ),
   'verify-rpcs': spec(['state', 'out']),
   'backfill-create': spec(['catalog', 'state']),
+  'backfill-freeze': spec(['state', 'limit'], ['interrupt-after-batches'], ['limit', 'interrupt-after-batches']),
   'backfill-run': spec(['state', 'limit'], ['interrupt-after-batches'], ['limit', 'interrupt-after-batches']),
   'late-fixtures': spec(['state']),
   reconcile: spec(['state', 'out']),
@@ -164,7 +171,7 @@ export function parseCli(argv) {
   if (command === 'migration-gate' && options.allowEmptyHistory === true && options.phase !== 'pre') {
     fail('--allow-empty-history is only valid with --phase pre')
   }
-  if (command === 'backfill-run' && options.limit > 5000) fail('--limit must be at most 5000')
+  if (['backfill-freeze', 'backfill-run'].includes(command) && options.limit > 5000) fail('--limit must be at most 5000')
   if (command === 'sample' && options.count > 10000) fail('--count must be at most 10000')
   if (command === 'compare-samples' && options.maxErrorRateDelta > 1) fail('--max-error-rate-delta must be at most 1')
   if (command === 'compare-samples' && options.maxP95Seconds > 2) fail('--max-p95-seconds must be at most 2')
@@ -759,7 +766,7 @@ export function compareWrapperDefinitions(liveSql, reviewedSql) {
   }
 }
 
-const sensitiveKey = key => /(?:secret|prompt|payload|^raw|provider.*url)|^(?:authorization|apiKey|apikey|serviceKey|anonKey|token|memberToken|memberCode|memberId|eventId|sessionId|cursorMember|cursorEvent|nextMember|nextEvent|body|id|ids|members?|events?|sessions?|fixtures?|(?:member|event|session|fixture)Ids)$/i.test(key)
+const sensitiveKey = key => /(?:secret|prompt|payload|^raw|provider.*url|run.*ids?$)|^(?:authorization|apiKey|apikey|serviceKey|anonKey|token|memberToken|memberCode|memberId|eventId|sessionId|cursorMember|cursorEvent|nextMember|nextEvent|body|id|ids|members?|events?|sessions?|fixtures?|(?:member|event|session|fixture)Ids)$/i.test(key)
 
 export function sanitizeForOutput(value) {
   if (Array.isArray(value)) return value.map(sanitizeForOutput).filter(child => child !== undefined)
@@ -802,7 +809,7 @@ async function readJson(file, fs = nodeFs) {
 }
 
 const mutationCommands = new Set([
-  'fixture-create', 'fixture-reset', 'upload-smoke', 'backfill-create', 'backfill-run',
+  'fixture-create', 'fixture-reset', 'upload-smoke', 'backfill-create', 'backfill-freeze', 'backfill-run',
   'late-fixtures', 'reconcile', 'activation-rehearsal', 'rollback-active', 'monitor',
 ])
 const stickyAllowed = new Set(['verify-emergency', 'forward-recover', 'cleanup'])
@@ -1242,6 +1249,78 @@ export async function fetchAllPages({ fetch: fetchImpl, url, headers = {}, pageS
   return rows
 }
 
+const LEGACY_PREFLIGHT_SAMPLE_SIZE = 256
+const LEGACY_PREFLIGHT_PRICE_LIMIT = 1000
+
+async function fetchBoundedJsonRows({ fetch: fetchImpl, url, headers, limit }) {
+  const response = await fetchImpl(url, {
+    method: 'GET',
+    headers: { ...headers, Range: `0-${limit - 1}`, 'Range-Unit': 'items' },
+  })
+  if (!response.ok) fail(`HTTP request failed with status ${response.status}`)
+  let rows
+  try { rows = await response.json() } catch { fail('HTTP response was not valid JSON') }
+  if (!Array.isArray(rows) || rows.length > limit) fail('Bounded HTTP response exceeded its row limit')
+  return rows
+}
+
+async function collectLegacyBoundedPreflight({ fetch: fetchImpl, http, clock }) {
+  const base = http.base()
+  const headers = http.headers('service')
+  const countResponse = await fetchImpl(`${base}/rest/v1/tokend_usage_events?select=id`, {
+    method: 'HEAD',
+    headers: { ...headers, Range: '0-0', 'Range-Unit': 'items', Prefer: 'count=planned' },
+  })
+  if (!countResponse.ok) fail(`HTTP request failed with status ${countResponse.status}`)
+  const countRange = /^(?:\d+-\d+|\*)\/(\d+|\*)$/.exec(countResponse.headers.get('content-range') ?? '')
+  const estimatedEventCount = countRange?.[1] && countRange[1] !== '*' ? BigInt(countRange[1]).toString() : null
+  const select = 'id,member_code,model,total_tokens,total_cost'
+  const [firstRows, lastRows, legacyPriceRows] = await Promise.all([
+    fetchBoundedJsonRows({
+      fetch: fetchImpl,
+      url: `${base}/rest/v1/tokend_usage_events?select=${select}&order=id.asc,member_code.asc&limit=${LEGACY_PREFLIGHT_SAMPLE_SIZE}`,
+      headers,
+      limit: LEGACY_PREFLIGHT_SAMPLE_SIZE,
+    }),
+    fetchBoundedJsonRows({
+      fetch: fetchImpl,
+      url: `${base}/rest/v1/tokend_usage_events?select=${select}&order=id.desc,member_code.desc&limit=${LEGACY_PREFLIGHT_SAMPLE_SIZE}`,
+      headers,
+      limit: LEGACY_PREFLIGHT_SAMPLE_SIZE,
+    }),
+    fetchBoundedJsonRows({
+      fetch: fetchImpl,
+      url: `${base}/rest/v1/tokend_model_prices?select=model_id&limit=${LEGACY_PREFLIGHT_PRICE_LIMIT}`,
+      headers,
+      limit: LEGACY_PREFLIGHT_PRICE_LIMIT,
+    }),
+  ])
+  const sampled = []
+  const seen = new Set()
+  for (const row of [...firstRows, ...lastRows]) {
+    const identity = `${String(row?.id ?? '')}\u0000${String(row?.member_code ?? '')}`
+    if (seen.has(identity)) continue
+    seen.add(identity)
+    sampled.push(row)
+  }
+  const eligible = sampled.filter(row => Number(row?.total_tokens ?? 0) > 0)
+  return {
+    evidenceMode: 'legacy_bounded',
+    authoritative: false,
+    exactCountAttempted: false,
+    countMethod: 'planned',
+    estimatedEventCount,
+    sampledEventCount: sampled.length,
+    sampledEligibleEventCount: eligible.length,
+    sampledZeroCostEventCount: eligible.filter(row => Number(row?.total_cost ?? 0) === 0).length,
+    sampledTotalCost: sampled.reduce((sum, row) => sum + Number(row?.total_cost ?? 0), 0),
+    legacyPriceRowsObserved: legacyPriceRows.length,
+    legacyPriceRowsTruncated: legacyPriceRows.length === LEGACY_PREFLIGHT_PRICE_LIMIT,
+    maxRowsFetched: (2 * LEGACY_PREFLIGHT_SAMPLE_SIZE) + LEGACY_PREFLIGHT_PRICE_LIMIT,
+    timestamp: clock().toISOString(),
+  }
+}
+
 function transient(error) {
   if (String(error?.sqlstate ?? error?.code) === '55000') return false
   return error?.status === 429 || error?.status >= 500 || ['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT'].includes(error?.code)
@@ -1421,7 +1500,9 @@ function accessProbeBody(name) {
   if (name === 'tokend_get_session_detail') return { p_token: 'acl-probe-invalid', p_session_id: '__acl_probe__' }
   if (CLIENT_RPC_NAMES.includes(name) || LEGACY_RPC_NAMES.includes(name)) return { p_token: 'acl-probe-invalid' }
   if (name === PREFLIGHT_RPC_NAME) return {}
-  if (name === 'tokend_pricing_create_backfill') return { p_catalog_version: '__rollout_acl_probe__' }
+  if (name === 'tokend_pricing_health') return {}
+  if (name === 'tokend_pricing_create_backfill') return { p_catalog_version: '__rollout_acl_probe__', p_create_request_id: zeroUuid }
+  if (name === 'tokend_pricing_freeze_batch') return { p_run_id: zeroUuid, p_limit: 1 }
   if (name === 'tokend_pricing_backfill_batch') return { p_run_id: zeroUuid, p_after_member: '', p_after_event: '', p_limit: 1 }
   return { p_run_id: zeroUuid }
 }
@@ -1478,57 +1559,108 @@ function exactNonnegativeInteger(value, label) {
   return { text, number: integer <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(integer) : null }
 }
 
+function decimalCount(value, label) {
+  const exact = exactNonnegativeInteger(value, label)
+  return { text: exact.text, value: BigInt(exact.text) }
+}
+
+function assertNotAhead(localValue, databaseValue, label) {
+  const local = decimalCount(localValue ?? 0, `Local ${label}`)
+  const database = decimalCount(databaseValue, `Database ${label}`)
+  if (local.value > database.value) fail(`Local ${label} is ahead of authoritative database progress`)
+}
+
+function normalizeFreezeProgress(payload, label = 'Freeze') {
+  const scanned = decimalCount(payload?.scannedCount ?? 0, `${label} scannedCount`)
+  const captured = decimalCount(payload?.frozenCount ?? payload?.capturedCount ?? 0, `${label} frozenCount`)
+  const skipped = decimalCount(payload?.skippedCount ?? 0, `${label} skippedCount`)
+  if (captured.value + skipped.value !== scanned.value) fail(`${label} cumulative counts do not reconcile`)
+  return {
+    scanned: scanned.text,
+    captured: captured.text,
+    skipped: skipped.text,
+    complete: payload?.freezeComplete === true,
+  }
+}
+
+function freezeProgressOutput(freeze) {
+  return {
+    phase: 'freeze',
+    batch: Number(freeze.batches ?? 0),
+    scanned: freeze.scanned,
+    captured: freeze.captured,
+    skipped: freeze.skipped,
+    complete: freeze.complete === true,
+  }
+}
+
 function binaryTextCompare(left, right) {
   if (left === right) return 0
   return left > right ? 1 : -1
 }
 
 export async function runBackfillBatches({
-  state, limit, interruptAfterBatches, callBatch, saveState, sleep, cleanup,
+  state, limit, interruptAfterBatches, callBatch, saveState, sleep, cleanup, onProgress = async () => {},
 }) {
   assertCommandAllowed(state, 'backfill-run')
   let current = structuredClone(state)
+  const initial = current.backfill?.pricing
+  if (current.backfill?.phase !== 'pricing' || !initial) fail('Backfill pricing requires a finalized freeze')
+  if (initial.limit !== undefined && initial.limit !== null && Number(initial.limit) !== limit) {
+    fail('Backfill pricing must resume with the persisted limit')
+  }
   let batchesThisRun = 0
   try {
-    while (current.backfill?.remaining !== 0) {
-      const previousMember = String(current.backfill?.cursorMember ?? '')
-      const previousEvent = String(current.backfill?.cursorEvent ?? '')
-      const previousRemaining = exactNonnegativeInteger(
-        current.backfill?.remaining ?? Number.MAX_SAFE_INTEGER,
-        'Persisted backfill remainingCount',
-      ).number
-      if (previousRemaining === null) fail('Persisted backfill remainingCount exceeds the safe runner range')
+    while (decimalCount(current.backfill.pricing.remaining, 'Persisted backfill remainingCount').value !== 0n) {
+      const previous = current.backfill.pricing
+      const previousProcessed = decimalCount(previous.processed, 'Persisted backfill processedCount')
+      const previousRemaining = decimalCount(previous.remaining, 'Persisted backfill remainingCount')
+      const target = decimalCount(previous.target, 'Persisted backfill targetCount')
       const result = await retryTransient(
-        () => callBatch({ afterMember: previousMember, afterEvent: previousEvent, limit }),
+        () => callBatch({ limit }),
         { maxRetries: 3, sleep },
       )
       const processedExact = exactNonnegativeInteger(result.processed ?? 0, 'Backfill processed')
       if (processedExact.number === null || processedExact.number > limit) fail('Backfill processed must be a safe integer no greater than the requested limit')
-      const processed = processedExact.number
-      const nextMember = result.nextMember ?? previousMember
-      const nextEvent = result.nextEvent ?? previousEvent
-      const nextRemainingExact = exactNonnegativeInteger(result.remainingCount, 'Backfill remainingCount')
-      if (nextRemainingExact.number === null) fail('Backfill remainingCount exceeds the safe runner range')
-      const nextRemaining = nextRemainingExact.number
-      const tupleOrder = binaryTextCompare(String(nextMember), previousMember) || binaryTextCompare(String(nextEvent), previousEvent)
-      if ((processed > 0 && tupleOrder <= 0) || (processed === 0 && nextRemaining > 0)) fail('Backfill returned a nonmonotonic cursor')
-      if (nextRemaining > previousRemaining) fail('Backfill returned nonmonotonic remaining work')
+      const nextProcessed = decimalCount(result.processedCount, 'Backfill processedCount')
+      const revisionCount = decimalCount(result.revisionCount, 'Backfill revisionCount')
+      const nextRemaining = decimalCount(result.remainingCount, 'Backfill remainingCount')
+      if (nextProcessed.value < previousProcessed.value || nextRemaining.value > previousRemaining.value) {
+        fail('Backfill returned nonmonotonic progress')
+      }
+      if (nextProcessed.value !== revisionCount.value) fail('Backfill processedCount disagrees with revisionCount')
+      if (nextProcessed.value + nextRemaining.value !== target.value) fail('Backfill processed and remaining counts do not equal targetCount')
+      if (nextProcessed.value === previousProcessed.value && nextRemaining.value > 0n) fail('Backfill made no progress')
       current = {
         ...current,
         backfill: {
           ...(current.backfill ?? {}),
-          cursorMember: String(nextMember),
-          cursorEvent: String(nextEvent),
-          remaining: nextRemaining,
-          batches: Number(current.backfill?.batches ?? 0) + 1,
-          processed: Number(current.backfill?.processed ?? 0) + processed,
+          pricing: {
+            limit,
+            processed: nextProcessed.text,
+            target: target.text,
+            remaining: nextRemaining.text,
+            batches: Number(previous.batches ?? 0) + 1,
+            complete: nextRemaining.value === 0n,
+          },
         },
         transition: 'rollout-active',
       }
       await saveState(current)
       batchesThisRun += 1
-      if (interruptAfterBatches && batchesThisRun >= interruptAfterBatches && nextRemaining > 0) {
-        throw new ExitCodeError('Backfill intentionally interrupted after persisted cursor', 75, true)
+      const progress = {
+        phase: 'pricing',
+        batch: current.backfill.pricing.batches,
+        processed: nextProcessed.text,
+        target: target.text,
+        remaining: nextRemaining.text,
+        percent: target.value === 0n ? 100 : Number((nextProcessed.value * 10000n) / target.value) / 100,
+        complete: nextRemaining.value === 0n,
+      }
+      await onProgress(progress)
+      if (interruptAfterBatches && batchesThisRun >= interruptAfterBatches && nextRemaining.value > 0n) {
+        await onProgress({ ...progress, resumeRequired: true })
+        throw new ExitCodeError('Backfill intentionally interrupted after persisted progress', 75, true)
       }
     }
     return current
@@ -1538,18 +1670,80 @@ export async function runBackfillBatches({
   }
 }
 
-export async function runActivationRehearsal({ runId, callAdmin, inspectState }) {
-  const beforeState = await inspectState()
+export async function runActivationRehearsal({
+  runId, callAdmin, inspectState, checkpoint = async () => {}, resume = null,
+}) {
+  let progress = structuredClone(resume ?? {})
+  const persist = async (phase, values = {}) => {
+    progress = { ...progress, ...values, phase }
+    await checkpoint(progress)
+  }
+  let liveState = await inspectState()
+  assertEnvelope(liveState.envelope, 'live activation fixture summary')
+  if (!progress.beforeState) {
+    if (liveState.pointers?.activeRun === runId || liveState.pointers?.previousRun === runId) {
+      fail('Activation recovery requires the persisted pre-activation checkpoint')
+    }
+    await persist('before', { beforeState: liveState })
+  }
+  const beforeState = progress.beforeState
   assertEnvelope(beforeState.envelope, 'pre-activation fixture summary')
-  const first = await callAdmin('tokend_pricing_activate', { runId })
-  if (first.runId !== runId || first.status !== 'active') fail('Activation did not bind the requested run')
-  const firstState = await inspectState()
-  const rollback = await callAdmin('tokend_pricing_rollback', { runId })
-  if (rollback.runId !== runId || !['rolled_back', 'already_rolled_back'].includes(rollback.status)) fail('Paired rollback did not bind the requested run')
-  const rollbackState = await inspectState()
-  const second = await callAdmin('tokend_pricing_activate', { runId })
-  if (second.runId !== runId || second.status !== 'active') fail('Reactivation did not use the same run')
-  const secondState = await inspectState()
+
+  const isActive = state => state?.pointers?.activeRun === runId
+  const isRolledBack = state => state?.pointers?.previousRun === runId
+    && state?.pointers?.activeCatalog === beforeState.pointers?.activeCatalog
+    && state?.pointers?.activeRun === beforeState.pointers?.activeRun
+  const isBase = state => ['activeCatalog', 'previousCatalog', 'activeRun', 'previousRun']
+    .every(pointer => (state?.pointers?.[pointer] ?? null) === (beforeState.pointers?.[pointer] ?? null))
+
+  if (isActive(liveState)) {
+    if (['reactivating', 'reactivated'].includes(progress.phase)) {
+      await persist('reactivated', { secondState: liveState })
+    } else {
+      await persist('activated', { firstState: progress.firstState ?? liveState })
+    }
+  } else if (isRolledBack(liveState)) {
+    await persist('rolled_back', {
+      rollbackState: liveState,
+      secondState: null,
+      finalActivation: null,
+    })
+  } else if (!isBase(liveState)) {
+    fail('Live activation pointers do not match a recoverable rehearsal phase')
+  }
+
+  let first = progress.firstActivation ?? { runId, status: 'active', recovered: true }
+  if (!progress.firstState) {
+    await persist('activating')
+    first = await callAdmin('tokend_pricing_activate', { runId })
+    if (first.runId !== runId || first.status !== 'active') fail('Activation did not bind the requested run')
+    liveState = await inspectState()
+    if (!isActive(liveState)) fail('Activation did not publish the requested live pointers')
+    await persist('activated', { firstActivation: first, firstState: liveState })
+  }
+  const firstState = progress.firstState
+
+  let rollback = progress.rollback ?? { runId, status: 'rolled_back', recovered: true }
+  if (!progress.rollbackState) {
+    await persist('rolling_back')
+    rollback = await callAdmin('tokend_pricing_rollback', { runId })
+    if (rollback.runId !== runId || !['rolled_back', 'already_rolled_back'].includes(rollback.status)) fail('Paired rollback did not bind the requested run')
+    liveState = await inspectState()
+    if (!isRolledBack(liveState)) fail('Paired rollback did not restore the frozen base pointers')
+    await persist('rolled_back', { rollback, rollbackState: liveState })
+  }
+  const rollbackState = progress.rollbackState
+
+  let second = progress.finalActivation ?? { runId, status: 'active', recovered: true }
+  if (!progress.secondState) {
+    await persist('reactivating')
+    second = await callAdmin('tokend_pricing_activate', { runId })
+    if (second.runId !== runId || second.status !== 'active') fail('Reactivation did not use the same run')
+    liveState = await inspectState()
+    if (!isActive(liveState)) fail('Reactivation did not restore the requested live pointers')
+    await persist('reactivated', { finalActivation: second, secondState: liveState })
+  }
+  const secondState = progress.secondState
   for (const [label, state] of [['first activation', firstState], ['rollback', rollbackState], ['second activation', secondState]]) {
     assertEnvelope(state.envelope, `${label} fixture summary`)
   }
@@ -1598,13 +1792,15 @@ function validateMonitorSnapshot(snapshot, baselineGlobal, baselineRpc) {
       maxP95Seconds: 2,
     })
   }
-  const adjustedCount = Number(snapshot.global?.eventCount ?? 0) - Number(snapshot.global?.knownFixtureCount ?? 0)
-  if (adjustedCount < Number(baselineGlobal.eventCount ?? 0)) fail('Adjusted global event count regressed')
-  const coverageRank = { unpriced: 0, partial: 1, legacy: 2, zero_rate: 3, complete: 4, no_usage: 4 }
-  if (!Object.hasOwn(coverageRank, snapshot.global?.status) || !Object.hasOwn(coverageRank, baselineGlobal.status)
-    || coverageRank[snapshot.global.status] < coverageRank[baselineGlobal.status]) fail('Global coverage status regressed')
-  if (Number(snapshot.global?.unpricedShare ?? 0) > Number(baselineGlobal.maxUnpricedShare ?? 0)) fail('Global unpriced share exceeded baseline')
-  if (Number(snapshot.global?.membersOver2x ?? 0) > Number(baselineGlobal.membersOver2x ?? 0)) fail('membersOver2x exceeded baseline')
+  if (snapshot.global?.coverageAuthoritative !== false) {
+    const adjustedCount = Number(snapshot.global?.eligibleEventCount ?? 0) - Number(snapshot.global?.knownFixtureCount ?? 0)
+    if (adjustedCount < Number(baselineGlobal.eligibleEventCount ?? 0)) fail('Adjusted global eligible event count regressed')
+    const coverageRank = { unpriced: 0, partial: 1, legacy: 2, zero_rate: 3, complete: 4, no_usage: 4 }
+    if (!Object.hasOwn(coverageRank, snapshot.global?.status) || !Object.hasOwn(coverageRank, baselineGlobal.status)
+      || coverageRank[snapshot.global.status] < coverageRank[baselineGlobal.status]) fail('Global coverage status regressed')
+    if (Number(snapshot.global?.unpricedShare ?? 0) > Number(baselineGlobal.maxUnpricedShare ?? 0)) fail('Global unpriced share exceeded baseline')
+    if (Number(snapshot.global?.membersOver2x ?? 0) > Number(baselineGlobal.membersOver2x ?? 0)) fail('membersOver2x exceeded baseline')
+  }
   const postSnapshotEventCount = exactNonnegativeInteger(snapshot.global?.postSnapshotEventCount, 'Monitor postSnapshotEventCount').number
   const knownLateCount = exactNonnegativeInteger(snapshot.global?.knownLateCount, 'Monitor known late count').number
   if (postSnapshotEventCount === null || knownLateCount === null || postSnapshotEventCount < knownLateCount
@@ -1864,6 +2060,19 @@ function coverageFromCounts(eventCount, counts) {
   return 'complete'
 }
 
+function pricingPointers(payload = {}) {
+  return {
+    activeCatalog: payload.activeCatalogVersion ?? payload.activeCatalog ?? null,
+    activeRun: payload.activeRunId ?? payload.activeRun ?? null,
+    previousCatalog: payload.previousCatalogVersion ?? payload.previousCatalog ?? null,
+    previousRun: payload.previousRunId ?? payload.previousRun ?? null,
+  }
+}
+
+function pricingPointerBindingHash(payload) {
+  return sha256(JSON.stringify(pricingPointers(payload)))
+}
+
 function addCounts(left = {}, right = {}) {
   const result = { ...left }
   for (const [key, value] of Object.entries(right)) result[key] = Number(result[key] ?? 0) + Number(value ?? 0)
@@ -1892,10 +2101,7 @@ function childRows(payload, keys) {
 async function deleteFixtureData({ state, http, includeMember, preserveBackfill = false, timestamp }) {
   const memberCode = state.fixture?.memberCode
   if (!memberCode) {
-    if (!includeMember || preserveBackfill) return state
-    const next = { ...state }
-    delete next.backfill
-    return next
+    return state
   }
   const filter = `member_code=eq.${encodeURIComponent(memberCode)}`
   const optionalAdditive = async operation => {
@@ -1928,7 +2134,6 @@ async function deleteFixtureData({ state, http, includeMember, preserveBackfill 
     const remaining = await http.json(`tokend_members?select=member_code&${filter}`, { role: 'service', method: 'GET' })
     if (!Array.isArray(remaining) || remaining.length !== 0) fail('Fixture cleanup zero-row verification failed')
     delete next.fixture
-    if (!preserveBackfill) delete next.backfill
     return next
   }
   return { ...next, fixture: { ...state.fixture, resetAt: timestamp } }
@@ -2011,12 +2216,43 @@ async function fixtureMembersOver2xContribution(http, memberCode, activeCatalog,
 export function createRolloutRunner(dependencies = {}) {
   const env = dependencies.env ?? process.env
   const fs = dependencies.fs ?? nodeFs
-  const fetchImpl = dependencies.fetch ?? globalThis.fetch
+  const sourceFetch = dependencies.fetch ?? globalThis.fetch
+  const abortController = dependencies.abortController ?? new AbortController()
+  const fetchImpl = (input, init = {}) => sourceFetch(input, {
+    ...init,
+    signal: init.signal ?? abortController.signal,
+  })
   const clock = dependencies.clock ?? (() => new Date())
-  const sleep = dependencies.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)))
+  const sourceSleep = dependencies.sleep
+  const sleep = async ms => {
+    if (abortController.signal.aborted) throw Object.assign(new Error('Rollout aborted'), { name: 'AbortError' })
+    if (!sourceSleep) {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          abortController.signal.removeEventListener('abort', onAbort)
+          resolve()
+        }, ms)
+        const onAbort = () => {
+          clearTimeout(timer)
+          reject(Object.assign(new Error('Rollout aborted'), { name: 'AbortError' }))
+        }
+        abortController.signal.addEventListener('abort', onAbort, { once: true })
+      })
+    }
+    let rejectAbort
+    const aborted = new Promise((_resolve, reject) => { rejectAbort = reject })
+    const onAbort = () => rejectAbort(Object.assign(new Error('Rollout aborted'), { name: 'AbortError' }))
+    abortController.signal.addEventListener('abort', onAbort, { once: true })
+    try { return await Promise.race([sourceSleep(ms), aborted]) } finally {
+      abortController.signal.removeEventListener('abort', onAbort)
+    }
+  }
   const randomUUID = dependencies.randomUUID ?? nodeRandomUUID
+  const onProgress = dependencies.onProgress ?? (entry => {
+    process.stderr.write(`${JSON.stringify(sanitizeForOutput(entry))}\n`)
+  })
   const dumpLinkedSchema = dependencies.dumpLinkedSchema ?? productionDumpLinkedSchema
-  if (typeof fetchImpl !== 'function') fail('A fetch adapter is required')
+  if (typeof sourceFetch !== 'function') fail('A fetch adapter is required')
   const adapters = {
     fs,
     randomUUID,
@@ -2025,10 +2261,15 @@ export function createRolloutRunner(dependencies = {}) {
   const http = createHttpAdapter({ env, fetch: fetchImpl })
 
   const loadState = async file => {
-    try { return await readJson(file, fs) } catch (error) {
+    try {
+      const metadata = await fs.stat(file)
+      if ((metadata.mode & 0o077) !== 0) fail('Private rollout state must have 0600 permissions')
+    } catch (error) {
       if (error?.code === 'ENOENT') return {}
+      if (error instanceof ExitCodeError) throw error
       fail('Private rollout state could not be read')
     }
+    try { return await readJson(file, fs) } catch { fail('Private rollout state could not be read') }
   }
   const saveState = (file, state) => atomicWriteJson(file, state, adapters)
 
@@ -2080,57 +2321,49 @@ export function createRolloutRunner(dependencies = {}) {
     }
 
     if (command === 'preflight') {
-      const { SUPABASE_URL } = requireEnvironment(env, ['SUPABASE_URL', 'SUPABASE_SERVICE_KEY'])
-      const [rows, legacyPriceRows, adminProbe] = await Promise.all([fetchAllPages({
-        fetch: fetchImpl,
-        url: `${SUPABASE_URL.replace(/\/$/, '')}/rest/v1/tokend_usage_events?select=model,total_tokens,total_cost,member_code`,
-        headers: http.headers('service'),
-        pageSize: 1000,
-      }), fetchAllPages({
-        fetch: fetchImpl,
-        url: `${SUPABASE_URL.replace(/\/$/, '')}/rest/v1/tokend_model_prices?select=model_id,input_price,output_price,cache_read_price,cache_write_price`,
-        headers: http.headers('service'),
-        pageSize: 1000,
-      }), optionalPostgrestRpc(http, PREFLIGHT_RPC_NAME, {}, 'service')])
-      const adminPresent = adminProbe.present
-      const adminBaseline = adminProbe.value
-      const eligibleRows = rows.filter(row => Number(row.total_tokens ?? 0) > 0)
-      const zeroCostRows = eligibleRows.filter(row => Number(row.total_cost ?? 0) === 0)
-      const zeroCostRollup = new Map()
-      for (const row of zeroCostRows) {
-        const model = row.model ?? 'unknown'
-        const current = zeroCostRollup.get(model) ?? { model, eventCount: 0, totalTokens: 0 }
-        current.eventCount += 1
-        current.totalTokens += Number(row.total_tokens ?? 0)
-        zeroCostRollup.set(model, current)
+      requireEnvironment(env, ['SUPABASE_URL', 'SUPABASE_SERVICE_KEY'])
+      const adminProbe = await optionalPostgrestRpc(http, PREFLIGHT_RPC_NAME, {}, 'service')
+      if (!adminProbe.present) {
+        const bounded = await collectLegacyBoundedPreflight({ fetch: fetchImpl, http, clock })
+        return writeSanitized(options.out, bounded, adapters)
       }
-      const zeroCostByModel = [...zeroCostRollup.values()].sort((left, right) => right.eventCount - left.eventCount || left.model.localeCompare(right.model))
-      const statusCounts = { legacy: eligibleRows.length - zeroCostRows.length, unpriced: zeroCostRows.length }
-      const pointer = value => adminPresent ? (value ?? null) : 'not_present'
-      if (adminPresent && adminBaseline?.eventCount !== undefined && Number(adminBaseline.eventCount) !== rows.length) fail('Paginated event count disagrees with preflight')
-      if (adminPresent && adminBaseline?.legacyPriceRowCount !== undefined && Number(adminBaseline.legacyPriceRowCount) !== legacyPriceRows.length) fail('Paginated legacy price count disagrees with preflight')
-      if (adminPresent && adminBaseline?.eligibleEventCount !== undefined && Number(adminBaseline.eligibleEventCount) !== eligibleRows.length) fail('Paginated eligible event count disagrees with preflight')
-      const effectiveStatusCounts = adminBaseline?.statusCounts ?? statusCounts
-      const effectiveEligibleZeroCount = Number(adminBaseline?.eligibleZeroCostEventCount ?? zeroCostRows.length)
-      const effectiveUnpricedCount = Number(adminBaseline?.unpricedEventCount ?? zeroCostRows.length)
+      const adminBaseline = adminProbe.value
+      if (adminBaseline?.authoritative !== true) fail('Admin preflight is present but not authoritative')
+      if (adminBaseline.source !== 'frozen_reconciled_run') {
+        fail('Authoritative admin preflight source must be frozen_reconciled_run')
+      }
+      if (typeof adminBaseline?.catalogHash !== 'string' || adminBaseline.catalogHash.length === 0) {
+        fail('Authoritative admin preflight is missing catalog hash')
+      }
+      const eventCount = Number(adminBaseline?.eventCount ?? 0)
+      const eligibleEventCount = Number(adminBaseline?.eligibleEventCount ?? 0)
+      const effectiveStatusCounts = adminBaseline?.statusCounts ?? {}
+      const effectiveEligibleZeroCount = Number(adminBaseline?.eligibleZeroCostEventCount ?? 0)
+      const effectiveUnpricedCount = Number(adminBaseline?.unpricedEventCount ?? 0)
       const output = {
-        eventCount: rows.length,
-        eligibleEventCount: eligibleRows.length,
+        evidenceMode: 'admin_authoritative',
+        authoritative: true,
+        source: adminBaseline.source,
+        catalogHash: adminBaseline.catalogHash,
+        pointerBindingHash: pricingPointerBindingHash(adminBaseline),
+        exactCountAttempted: false,
+        eventCount,
+        eligibleEventCount,
         eligibleZeroCostEventCount: effectiveEligibleZeroCount,
-        totalCost: rows.reduce((sum, row) => sum + Number(row.total_cost ?? 0), 0),
+        totalCost: Number(adminBaseline?.totalCost ?? 0),
         unpricedEventCount: effectiveUnpricedCount,
-        unpricedShare: eligibleRows.length > 0 ? effectiveUnpricedCount / eligibleRows.length : 0,
-        maxUnpricedShare: eligibleRows.length > 0 ? effectiveUnpricedCount / eligibleRows.length : 0,
-        status: coverageFromCounts(eligibleRows.length, effectiveStatusCounts),
+        unpricedShare: eligibleEventCount > 0 ? effectiveUnpricedCount / eligibleEventCount : 0,
+        maxUnpricedShare: eligibleEventCount > 0 ? effectiveUnpricedCount / eligibleEventCount : 0,
+        status: coverageFromCounts(eligibleEventCount, effectiveStatusCounts),
         statusCounts: effectiveStatusCounts,
-        zeroCostByModel: adminPresent ? (adminBaseline?.zeroCostByModel ?? []) : zeroCostByModel,
-        legacyPriceRowCount: legacyPriceRows.length,
-        activeCatalogVersion: pointer(adminBaseline?.activeCatalogVersion),
-        activeRunId: pointer(adminBaseline?.activeRunId),
-        previousCatalogVersion: pointer(adminBaseline?.previousCatalogVersion),
-        previousRunId: pointer(adminBaseline?.previousRunId),
+        zeroCostByModel: adminBaseline?.zeroCostByModel ?? [],
+        legacyPriceRowCount: Number(adminBaseline?.legacyPriceRowCount ?? 0),
+        activeCatalogVersion: adminBaseline?.activeCatalogVersion ?? null,
+        activeRunId: adminBaseline?.activeRunId ?? null,
+        previousCatalogVersion: adminBaseline?.previousCatalogVersion ?? null,
+        previousRunId: adminBaseline?.previousRunId ?? null,
         membersOver2x: Number(adminBaseline?.membersOver2xCount ?? 0),
-        reconciliationHash: adminPresent ? (adminBaseline?.activeReconciliationHash ?? null) : 'not_present',
+        reconciliationHash: adminBaseline?.activeReconciliationHash ?? null,
         timestamp: clock().toISOString(),
       }
       return writeSanitized(options.out, output, adapters)
@@ -2173,22 +2406,48 @@ export function createRolloutRunner(dependencies = {}) {
 
     if (command === 'fixture-create') {
       if (state.fixture) return state
-      const suffix = randomUUID().replace(/-/g, '')
-      const fixture = {
+      const existingCandidate = state.fixtureCandidate
+      const suffix = existingCandidate?.suffix ?? randomUUID().replace(/-/g, '')
+      const fixture = existingCandidate ?? {
+        suffix,
         memberCode: `ROLL_${suffix}`,
         memberToken: `roll_${sha256(`${suffix}:${clock().toISOString()}`).slice(0, 32)}`,
+        phone: `tokend-rollout-${suffix}`,
         createdAt: clock().toISOString(),
       }
-      await http.json('tokend_members', {
-        role: 'service', method: 'POST',
-        body: [{
-          member_code: fixture.memberCode,
-          phone: `tokend-rollout-${suffix}`,
-          token: fixture.memberToken,
-        }],
-        extraHeaders: { Prefer: 'return=representation' },
-      })
+      if (!existingCandidate) {
+        await saveState(options.state, {
+          ...state,
+          fixtureCandidate: fixture,
+          transition: 'rollout-active',
+        })
+      }
+      let existingRows = []
+      if (existingCandidate) {
+        existingRows = await http.json(
+          `tokend_members?select=member_code,token&member_code=eq.${encodeURIComponent(fixture.memberCode)}&limit=2`,
+          { role: 'service', method: 'GET' },
+        )
+        if (!Array.isArray(existingRows) || existingRows.length > 1) fail('Fixture recovery did not find a unique rollout member')
+        if (existingRows.length === 1 && existingRows[0].token !== fixture.memberToken) {
+          fail('Fixture recovery token disagrees with the persisted candidate')
+        }
+      }
+      if (existingRows.length === 0) {
+        await http.json('tokend_members', {
+          role: 'service', method: 'POST',
+          body: [{
+            member_code: fixture.memberCode,
+            phone: fixture.phone,
+            token: fixture.memberToken,
+          }],
+          extraHeaders: { Prefer: 'return=representation' },
+        })
+      }
       const next = { ...state, fixture, transition: 'rollout-active' }
+      delete next.fixtureCandidate
+      delete next.fixture.suffix
+      delete next.fixture.phone
       await saveState(options.state, next)
       return next
     }
@@ -2261,74 +2520,320 @@ export function createRolloutRunner(dependencies = {}) {
     }
 
     if (command === 'backfill-create') {
-      const created = await http.rpc('tokend_pricing_create_backfill', { p_catalog_version: options.catalog }, 'service')
+      const existingAttempt = state.backfillCreateAttempt
+      if (existingAttempt?.catalogVersion && existingAttempt.catalogVersion !== options.catalog) {
+        fail('Backfill create recovery catalog disagrees with the requested catalog')
+      }
+      const attempt = existingAttempt ?? {
+        catalogVersion: options.catalog,
+        requestId: randomUUID(),
+        attemptedAt: clock().toISOString(),
+      }
+      if (!attempt.requestId) fail('Backfill create recovery request id is missing')
+      if (!existingAttempt) {
+        await saveState(options.state, {
+          ...state,
+          backfillCreateAttempt: attempt,
+          transition: 'rollout-active',
+        })
+      }
+
+      let created
+      let createdNew = false
+      if (state.backfill?.runId && state.backfill?.phase === 'freezing'
+        && state.catalogVersion === options.catalog) {
+        created = {
+          runId: state.backfill.runId,
+          status: 'freezing',
+          catalogVersion: options.catalog,
+          snapshotAt: state.backfill.snapshotAt,
+          baseCatalogVersion: state.backfill.basePointers?.activeCatalog ?? null,
+          baseRunId: state.backfill.basePointers?.activeRun ?? null,
+          previousCatalogVersion: state.backfill.basePointers?.previousCatalog ?? null,
+          previousRunId: state.backfill.basePointers?.previousRun ?? null,
+        }
+      }
+      if (!created) {
+        created = await http.rpc('tokend_pricing_create_backfill', {
+          p_catalog_version: options.catalog,
+          p_create_request_id: attempt.requestId,
+        }, 'service')
+        createdNew = !existingAttempt
+      }
       const runId = created?.runId ?? created?.run_id
       if (!runId) fail('Backfill create returned no run id')
-      const [catalogs, runRow, preflight] = await Promise.all([
-        http.json(`tokend_pricing_catalogs?select=hash&version=eq.${encodeURIComponent(options.catalog)}`, { role: 'service', method: 'GET' }),
-        fetchBackfillRunRow(http, runId),
-        http.rpc(PREFLIGHT_RPC_NAME, {}, 'service'),
-      ])
-      if (!Array.isArray(catalogs) || catalogs.length !== 1 || !catalogs[0].hash) fail('Backfill catalog hash lookup failed')
-      const basePointers = {
-        activeCatalog: preflight?.activeCatalogVersion ?? null,
-        activeRun: preflight?.activeRunId ?? null,
-        previousCatalog: preflight?.previousCatalogVersion ?? null,
-        previousRun: preflight?.previousRunId ?? null,
+      if (created?.status !== 'freezing' || created?.catalogVersion !== options.catalog
+        || typeof created?.snapshotAt !== 'string' || created.snapshotAt.length === 0) {
+        fail('Backfill create did not enter the freezing phase')
       }
-      const backfillSnapshot = snapshotFromBackfillRow(runRow, basePointers)
-      const createdTargetCount = exactNonnegativeInteger(created.targetCount, 'Backfill create targetCount').text
-      if (runRow.status !== 'staging' || runRow.catalog_version !== options.catalog
-        || created.status !== 'staging' || created.catalogVersion !== options.catalog
-        || created.snapshotAt !== backfillSnapshot.snapshotAt
-        || createdTargetCount !== backfillSnapshot.targetCount
-        || created.targetHash !== backfillSnapshot.targetHash
-        || (created.baseCatalogVersion ?? null) !== backfillSnapshot.baseCatalogVersion
-        || (created.baseRunId ?? null) !== backfillSnapshot.baseRunId
-        || basePointers.activeCatalog !== backfillSnapshot.baseCatalogVersion
-        || basePointers.activeRun !== backfillSnapshot.baseRunId) fail('Backfill create response disagrees with authoritative frozen run')
-      const remaining = exactNonnegativeInteger(backfillSnapshot.targetCount, 'Backfill targetCount').number
-      if (remaining === null) fail('Backfill targetCount exceeds the safe runner range')
-      const next = {
+      const checkpoint = {
         ...state,
+        backfillCreateAttempt: attempt,
         catalogVersion: options.catalog,
-        catalogHash: catalogs[0].hash,
-        targetHash: backfillSnapshot.targetHash,
-        backfillSnapshot,
         backfill: {
-          runId, cursorMember: '', cursorEvent: '',
-          remaining, batches: 0,
+          runId,
+          phase: 'freezing',
+          snapshotAt: created.snapshotAt,
+          basePointers: {
+            activeCatalog: created.baseCatalogVersion ?? null,
+            activeRun: created.baseRunId ?? null,
+            previousCatalog: created.previousCatalogVersion ?? null,
+            previousRun: created.previousRunId ?? null,
+          },
+          freeze: {
+            limit: null,
+            batches: 0,
+            scanned: '0',
+            captured: '0',
+            skipped: '0',
+            complete: false,
+          },
         },
         transition: 'rollout-active',
       }
+      await saveState(options.state, checkpoint)
+      const [catalogs, health] = await Promise.all([
+        http.json(
+          `tokend_pricing_catalogs?select=hash&version=eq.${encodeURIComponent(options.catalog)}`,
+          { role: 'service', method: 'GET' },
+        ),
+        http.rpc('tokend_pricing_health', {}, 'service'),
+      ])
+      if (!Array.isArray(catalogs) || catalogs.length !== 1 || !catalogs[0].hash) fail('Backfill catalog hash lookup failed')
+      if ((health?.activeCatalogVersion ?? null) !== (created.baseCatalogVersion ?? null)
+        || (health?.activeRunId ?? null) !== (created.baseRunId ?? null)) {
+        fail('Backfill create base pair disagrees with authoritative health')
+      }
+      const basePointers = {
+        activeCatalog: health?.activeCatalogVersion ?? null,
+        activeRun: health?.activeRunId ?? null,
+        previousCatalog: health?.previousCatalogVersion ?? null,
+        previousRun: health?.previousRunId ?? null,
+      }
+      const next = {
+        ...checkpoint,
+        catalogVersion: options.catalog,
+        catalogHash: catalogs[0].hash,
+        backfill: {
+          runId,
+          phase: 'freezing',
+          snapshotAt: created.snapshotAt,
+          basePointers,
+          freeze: {
+            limit: null,
+            batches: 0,
+            scanned: '0',
+            captured: '0',
+            skipped: '0',
+            complete: false,
+          },
+        },
+        transition: 'rollout-active',
+      }
+      delete next.backfillCreateAttempt
       await saveState(options.state, next)
-      return sanitizeForOutput({
-        status: runRow.status,
-        targetHash: backfillSnapshot.targetHash,
-        targetCount: backfillSnapshot.targetCount,
-        inputTokens: backfillSnapshot.inputTokens,
-        outputTokens: backfillSnapshot.outputTokens,
-        reasoningTokens: backfillSnapshot.reasoningTokens,
-        cacheReadTokens: backfillSnapshot.cacheReadTokens,
-        cacheWriteTokens: backfillSnapshot.cacheWriteTokens,
-      })
+      return { phase: 'freezing', status: 'freezing', created: createdNew }
+    }
+
+    if (command === 'backfill-freeze') {
+      const runId = state.backfill?.runId
+      if (!runId) fail('Backfill freeze state is missing')
+      const localFreeze = state.backfill?.freeze ?? {}
+      if (localFreeze.limit !== undefined && localFreeze.limit !== null && Number(localFreeze.limit) !== options.limit) {
+        fail('Backfill freeze must resume with the persisted limit')
+      }
+      const authoritative = await http.rpc('tokend_pricing_get_backfill', { p_run_id: runId }, 'service')
+      if (!['freezing', 'staging'].includes(authoritative?.status)) fail('Backfill freeze database phase is invalid')
+      const hydrated = normalizeFreezeProgress(authoritative, 'Authoritative freeze')
+      assertNotAhead(localFreeze.scanned ?? 0, hydrated.scanned, 'freeze scannedCount')
+      assertNotAhead(localFreeze.captured ?? 0, hydrated.captured, 'freeze frozenCount')
+      assertNotAhead(localFreeze.skipped ?? 0, hydrated.skipped, 'freeze skippedCount')
+      let current = {
+        ...state,
+        backfill: {
+          ...state.backfill,
+          phase: 'freezing',
+          freeze: {
+            limit: options.limit,
+            batches: Number(localFreeze.batches ?? 0),
+            ...hydrated,
+            updatedAt: clock().toISOString(),
+          },
+        },
+        transition: 'rollout-active',
+      }
+      await saveState(options.state, current)
+      let batchesThisRun = 0
+      while (current.backfill.freeze.complete !== true) {
+        const previous = current.backfill.freeze
+        const response = await retryTransient(
+          () => http.rpc('tokend_pricing_freeze_batch', { p_run_id: runId, p_limit: options.limit }, 'service'),
+          { maxRetries: 3, sleep },
+        )
+        const nextProgress = normalizeFreezeProgress(response)
+        const previousScanned = decimalCount(previous.scanned, 'Previous freeze scannedCount')
+        const previousCaptured = decimalCount(previous.captured, 'Previous freeze frozenCount')
+        const previousSkipped = decimalCount(previous.skipped, 'Previous freeze skippedCount')
+        const nextScanned = decimalCount(nextProgress.scanned, 'Next freeze scannedCount')
+        const nextCaptured = decimalCount(nextProgress.captured, 'Next freeze frozenCount')
+        const nextSkipped = decimalCount(nextProgress.skipped, 'Next freeze skippedCount')
+        if (nextScanned.value < previousScanned.value
+          || nextCaptured.value < previousCaptured.value
+          || nextSkipped.value < previousSkipped.value) fail('Backfill freeze returned nonmonotonic progress')
+        const scannedThisBatch = nextScanned.value - previousScanned.value
+        if (scannedThisBatch > BigInt(options.limit)) fail('Backfill freeze scanned more than the requested limit')
+        if (scannedThisBatch === 0n && nextProgress.complete !== true) fail('Backfill freeze made no progress')
+        if (response?.scanned !== undefined
+          && decimalCount(response.scanned, 'Freeze batch scanned').value > BigInt(options.limit)) {
+          fail('Backfill freeze batch scanned more than the requested limit')
+        }
+        current = {
+          ...current,
+          backfill: {
+            ...current.backfill,
+            freeze: {
+              limit: options.limit,
+              batches: Number(previous.batches ?? 0) + 1,
+              ...nextProgress,
+              updatedAt: clock().toISOString(),
+            },
+          },
+        }
+        await saveState(options.state, current)
+        batchesThisRun += 1
+        const progress = freezeProgressOutput(current.backfill.freeze)
+        await onProgress(progress)
+        if (options.interruptAfterBatches && batchesThisRun >= options.interruptAfterBatches
+          && current.backfill.freeze.complete !== true) {
+          await onProgress({ ...progress, resumeRequired: true })
+          throw new ExitCodeError('Backfill freeze intentionally interrupted after persisted progress', 75, true)
+        }
+      }
+
+      const finalized = await http.rpc('tokend_pricing_finalize_backfill', { p_run_id: runId }, 'service')
+      if (finalized?.status !== 'staging') fail('Backfill finalize did not enter staging')
+      if (finalized?.catalogVersion !== state.catalogVersion) fail('Backfill finalize catalog changed')
+      const targetCount = decimalCount(finalized?.targetCount, 'Finalized targetCount').text
+      if (targetCount !== current.backfill.freeze.captured) fail('Backfill finalize targetCount disagrees with frozenCount')
+      if (typeof finalized?.targetHash !== 'string' || finalized.targetHash.length === 0) fail('Backfill finalize returned no target hash')
+      const basePointers = {
+        activeCatalog: finalized.baseCatalogVersion ?? null,
+        activeRun: finalized.baseRunId ?? null,
+        previousCatalog: state.backfill?.basePointers?.previousCatalog ?? null,
+        previousRun: state.backfill?.basePointers?.previousRun ?? null,
+      }
+      const backfillSnapshot = {
+        snapshotAt: finalized.snapshotAt,
+        targetCount,
+        targetHash: finalized.targetHash,
+        baseCatalogVersion: finalized.baseCatalogVersion ?? null,
+        baseRunId: finalized.baseRunId ?? null,
+        inputTokens: decimalCount(finalized.inputTokens, 'Finalized inputTokens').text,
+        outputTokens: decimalCount(finalized.outputTokens, 'Finalized outputTokens').text,
+        reasoningTokens: decimalCount(finalized.reasoningTokens, 'Finalized reasoningTokens').text,
+        cacheReadTokens: decimalCount(finalized.cacheReadTokens, 'Finalized cacheReadTokens').text,
+        cacheWriteTokens: decimalCount(finalized.cacheWriteTokens, 'Finalized cacheWriteTokens').text,
+        basePointers,
+      }
+      current = {
+        ...current,
+        targetHash: finalized.targetHash,
+        backfillSnapshot,
+        backfill: {
+          ...current.backfill,
+          phase: 'pricing',
+          freeze: { ...current.backfill.freeze, complete: true },
+          pricing: {
+            limit: null,
+            batches: 0,
+            processed: '0',
+            target: targetCount,
+            remaining: targetCount,
+            complete: targetCount === '0',
+          },
+        },
+      }
+      await saveState(options.state, current)
+      return {
+        phase: 'freeze',
+        status: 'staging',
+        complete: true,
+        batchesThisRun,
+        scanned: current.backfill.freeze.scanned,
+        captured: current.backfill.freeze.captured,
+        skipped: current.backfill.freeze.skipped,
+        targetCount,
+      }
     }
 
     if (command === 'backfill-run') {
-      if (!state.backfill?.runId) fail('Backfill run state is missing')
-      return runBackfillBatches({
-        state,
+      const runId = state.backfill?.runId
+      const localPricing = state.backfill?.pricing
+      if (!runId || state.backfill?.phase !== 'pricing' || state.backfill?.freeze?.complete !== true || !localPricing) {
+        fail('Backfill pricing requires a finalized freeze')
+      }
+      if (localPricing.limit !== undefined && localPricing.limit !== null && Number(localPricing.limit) !== options.limit) {
+        fail('Backfill pricing must resume with the persisted limit')
+      }
+      const authoritative = await http.rpc('tokend_pricing_get_backfill', { p_run_id: runId }, 'service')
+      if (authoritative?.status !== 'staging' || authoritative?.freezeComplete !== true) {
+        fail('Backfill pricing database phase is invalid')
+      }
+      const target = decimalCount(authoritative.targetCount, 'Authoritative backfill targetCount')
+      const processed = decimalCount(authoritative.processedCount ?? authoritative.revisionCount, 'Authoritative backfill processedCount')
+      const revisionCount = decimalCount(authoritative.revisionCount, 'Authoritative backfill revisionCount')
+      const remaining = decimalCount(authoritative.remainingCount, 'Authoritative backfill remainingCount')
+      if (processed.value !== revisionCount.value || processed.value + remaining.value !== target.value) {
+        fail('Authoritative backfill counts do not reconcile')
+      }
+      assertNotAhead(localPricing.processed ?? 0, processed.text, 'backfill processedCount')
+      if (localPricing.target !== undefined
+        && decimalCount(localPricing.target, 'Local backfill targetCount').value !== target.value) {
+        fail('Local backfill targetCount disagrees with authoritative database progress')
+      }
+      const hydrated = {
+        ...state,
+        backfill: {
+          ...state.backfill,
+          pricing: {
+            limit: options.limit,
+            batches: Number(localPricing.batches ?? 0),
+            processed: processed.text,
+            target: target.text,
+            remaining: remaining.text,
+            complete: remaining.value === 0n,
+          },
+        },
+      }
+      await saveState(options.state, hydrated)
+      const startingBatches = hydrated.backfill.pricing.batches
+      const completed = await runBackfillBatches({
+        state: hydrated,
         limit: options.limit,
         interruptAfterBatches: options.interruptAfterBatches,
-        callBatch: async ({ afterMember, afterEvent, limit }) => http.rpc('tokend_pricing_backfill_batch', {
-          p_run_id: state.backfill.runId,
-          p_after_member: afterMember,
-          p_after_event: afterEvent,
+        callBatch: async ({ limit }) => http.rpc('tokend_pricing_backfill_batch', {
+          p_run_id: runId,
+          p_after_member: '',
+          p_after_event: '',
           p_limit: limit,
         }, 'service'),
         saveState: next => saveState(options.state, next),
         sleep,
+        onProgress,
       })
+      const finalPricing = completed.backfill.pricing
+      const finalProcessed = decimalCount(finalPricing.processed, 'Completed backfill processedCount')
+      const finalTarget = decimalCount(finalPricing.target, 'Completed backfill targetCount')
+      return {
+        phase: 'pricing',
+        status: authoritative.status,
+        complete: finalPricing.complete === true,
+        batchesThisRun: finalPricing.batches - startingBatches,
+        processed: finalProcessed.text,
+        target: finalTarget.text,
+        remaining: finalPricing.remaining,
+        percent: finalTarget.value === 0n ? 100 : Number((finalProcessed.value * 10000n) / finalTarget.value) / 100,
+      }
     }
 
     if (command === 'late-fixtures') {
@@ -2361,7 +2866,7 @@ export function createRolloutRunner(dependencies = {}) {
       if (!report?.reconciliationHash || repeated?.reconciliationHash !== report.reconciliationHash) fail('Repeated reconciliation hash is not stable')
       const [backfill, preflight, runRow, catalogs] = await Promise.all([
         http.rpc('tokend_pricing_get_backfill', { p_run_id: state.backfill?.runId }, 'service'),
-        http.rpc(PREFLIGHT_RPC_NAME, {}, 'service'),
+        http.rpc('tokend_pricing_health', {}, 'service'),
         fetchBackfillRunRow(http, state.backfill?.runId),
         http.json(`tokend_pricing_catalogs?select=hash&version=eq.${encodeURIComponent(state.catalogVersion)}`, { role: 'service', method: 'GET' }),
       ])
@@ -2403,10 +2908,16 @@ export function createRolloutRunner(dependencies = {}) {
       if (!state.fixture?.memberToken) fail('Activation rehearsal requires the isolated fixture')
       const result = await runActivationRehearsal({
         runId: state.backfill.runId,
+        resume: state.activationRehearsal ?? null,
+        checkpoint: activationRehearsal => saveState(options.state, {
+          ...state,
+          activationRehearsal,
+          transition: 'rollout-active',
+        }),
         callAdmin: (name, body) => http.rpc(name, { p_run_id: body.runId }, 'service'),
         inspectState: async () => {
           const [preflight, summary] = await Promise.all([
-            http.rpc(PREFLIGHT_RPC_NAME, {}, 'service'),
+            http.rpc('tokend_pricing_health', {}, 'service'),
             http.rpc('tokend_get_summary_v5', { p_token: state.fixture.memberToken, p_period: 'all', p_timezone: 'Asia/Shanghai' }, 'anon'),
           ])
           return {
@@ -2420,17 +2931,23 @@ export function createRolloutRunner(dependencies = {}) {
           }
         },
       })
-      const next = { ...state, pointers: result.pointers, activationTotals: result.totals, activationAt: clock().toISOString() }
+      const persisted = await loadState(options.state)
+      const next = {
+        ...persisted,
+        pointers: result.pointers,
+        activationTotals: result.totals,
+        activationAt: clock().toISOString(),
+      }
       await saveState(options.state, next)
       return writeSanitized(options.out, { passed: true, pointers: result.pointers, totals: result.totals }, adapters)
     }
 
     if (command === 'rollback-active') {
-      const runId = state.backfill?.runId
+      const runId = state.backfill?.runId ?? state.pointers?.activeRun
       if (!runId || !state.pointers) fail('Rollback requires the active run and four saved pointers')
       const rolledBack = await http.rpc('tokend_pricing_rollback', { p_run_id: runId }, 'service')
       if (rolledBack?.runId !== runId || !['rolled_back', 'already_rolled_back'].includes(rolledBack?.status)) fail('Rollback did not bind the same run')
-      const preflight = await http.rpc(PREFLIGHT_RPC_NAME, {}, 'service')
+      const preflight = await http.rpc('tokend_pricing_health', {}, 'service')
       const pointers = {
         activeCatalog: preflight.activeCatalogVersion,
         previousCatalog: preflight.previousCatalogVersion,
@@ -2525,6 +3042,24 @@ export function createRolloutRunner(dependencies = {}) {
       const [baselineGlobal, baselineRpc] = await Promise.all([
         readJson(options.globalBaseline, fs), readJson(options.rpcBaseline, fs),
       ])
+      if (baselineGlobal?.authoritative !== true) fail('Monitor requires an authoritative global baseline')
+      if (baselineGlobal.source !== 'frozen_reconciled_run') fail('Monitor baseline source must be frozen_reconciled_run')
+      if (!state.pointers || baselineGlobal.activeCatalogVersion !== (state.pointers.activeCatalog ?? null)) {
+        fail('Monitor baseline active catalog does not match private state')
+      }
+      if (!state.catalogHash || baselineGlobal.catalogHash !== state.catalogHash) {
+        fail('Monitor baseline catalog hash does not match private state')
+      }
+      if (!state.reconciliationHash || baselineGlobal.reconciliationHash !== state.reconciliationHash) {
+        fail('Monitor baseline reconciliation hash does not match private state')
+      }
+      if (baselineGlobal.pointerBindingHash !== pricingPointerBindingHash(state.pointers)) {
+        fail('Monitor baseline pointer binding does not match private state')
+      }
+      if (!Number.isSafeInteger(Number(baselineGlobal.eligibleEventCount))
+        || Number(baselineGlobal.eligibleEventCount) < 0) {
+        fail('Monitor baseline eligible event count is invalid')
+      }
       const token = state.fixture?.memberToken
       if (!token) fail('Monitor requires an isolated fixture')
       let fixtureStatusCounts = { ...(state.fixtureStatusCounts ?? {}) }
@@ -2577,6 +3112,8 @@ export function createRolloutRunner(dependencies = {}) {
         }
       }
       let knownLateCount = monitoredBatches.reduce((sum, batch) => sum + batch.events.length, 0)
+      const startingGlobal = await http.rpc(PREFLIGHT_RPC_NAME, {}, 'service')
+      if (startingGlobal?.authoritative !== true) fail('Monitor starting preflight is not authoritative')
       const result = await runMonitorLoop({
         durationSeconds: options.duration,
         intervalSeconds: options.interval,
@@ -2584,39 +3121,45 @@ export function createRolloutRunner(dependencies = {}) {
         baselineGlobal,
         baselineRpc: monitorRpcBaseline,
         collectSnapshot: async () => {
-          const [legacyRpc, vNextRpc, global] = await Promise.all([
+          const [legacyRpc, vNextRpc, health] = await Promise.all([
             sampleMonitorRpc('legacy', 'tokend_get_summary_v4'),
             sampleMonitorRpc('vNext', 'tokend_get_summary_v5'),
-            http.rpc(PREFLIGHT_RPC_NAME, {}, 'service'),
+            http.rpc('tokend_pricing_health', {}, 'service'),
           ])
+          const startingPostSnapshot = Number(startingGlobal.postSnapshotEventCount ?? 0)
+          const healthPostSnapshot = Number(health?.postSnapshotEventCount ?? startingPostSnapshot)
+          if (healthPostSnapshot < startingPostSnapshot) fail('Monitor health postSnapshotEventCount regressed')
+          const global = {
+            postSnapshotEventCount: healthPostSnapshot,
+            activeReconciliationHash: health?.activeReconciliationHash ?? startingGlobal.activeReconciliationHash,
+            activeCatalogVersion: health?.activeCatalogVersion ?? startingGlobal.activeCatalogVersion,
+            activeRunId: health?.activeRunId ?? startingGlobal.activeRunId,
+            previousCatalogVersion: health?.previousCatalogVersion ?? startingGlobal.previousCatalogVersion,
+            previousRunId: health?.previousRunId ?? startingGlobal.previousRunId,
+          }
           let fixtureHealth = { known: true, zero: true, unpriced: true, reported: true, legacy: true }
           for (const batch of monitoredBatches) {
             const health = await verifyLateRows(http, state.fixture.memberCode, batch.events, batch.catalogVersion)
             fixtureHealth = Object.fromEntries(Object.keys(fixtureHealth).map(key => [key, fixtureHealth[key] && health[key]]))
           }
-          const adjustedCount = Math.max(0, Number(global.eventCount ?? 0) - fixtureEventCount)
-          const adjustedCounts = subtractCounts(global.statusCounts, fixtureStatusCounts)
           const pointers = {
             activeCatalog: global.activeCatalogVersion ?? null,
             activeRun: global.activeRunId ?? null,
             previousCatalog: global.previousCatalogVersion ?? null,
             previousRun: global.previousRunId ?? null,
           }
-          const fixtureMembersOver2x = await fixtureMembersOver2xContribution(
-            http, state.fixture.memberCode, pointers.activeCatalog, pointers.previousCatalog,
-          )
-          if (Number(global.membersOver2xCount ?? 0) < fixtureMembersOver2x) fail('Fixture membersOver2x contribution exceeds the global count')
           return {
             legacyHealthy: true,
             vNextHealthy: true,
             legacyRpc,
             vNextRpc,
             global: {
-              eventCount: Number(global.eventCount ?? 0),
+              coverageAuthoritative: false,
+              eligibleEventCount: Number(baselineGlobal.eligibleEventCount ?? 0) + fixtureEventCount,
               knownFixtureCount: fixtureEventCount,
-              status: coverageFromCounts(adjustedCount, adjustedCounts),
-              unpricedShare: adjustedCount > 0 ? Number(adjustedCounts.unpriced ?? 0) / adjustedCount : 0,
-              membersOver2x: Number(global.membersOver2xCount ?? 0) - fixtureMembersOver2x,
+              status: baselineGlobal.status,
+              unpricedShare: Number(baselineGlobal.maxUnpricedShare ?? 0),
+              membersOver2x: Number(baselineGlobal.membersOver2x ?? 0),
               postSnapshotEventCount: Number(global.postSnapshotEventCount ?? 0),
               knownLateCount,
             },
@@ -2647,6 +3190,39 @@ export function createRolloutRunner(dependencies = {}) {
         },
         sleep,
       })
+      const endingGlobal = await http.rpc(PREFLIGHT_RPC_NAME, {}, 'service')
+      if (endingGlobal?.authoritative !== true) fail('Monitor ending preflight is not authoritative')
+      const lastSample = result.samples.at(-1)
+      if (!lastSample) fail('Monitor produced no health samples')
+      const finalAdjustedCount = Math.max(0, Number(endingGlobal.eligibleEventCount ?? 0) - fixtureEventCount)
+      const finalAdjustedCounts = subtractCounts(endingGlobal.statusCounts, fixtureStatusCounts)
+      const finalPointers = {
+        activeCatalog: endingGlobal.activeCatalogVersion ?? null,
+        activeRun: endingGlobal.activeRunId ?? null,
+        previousCatalog: endingGlobal.previousCatalogVersion ?? null,
+        previousRun: endingGlobal.previousRunId ?? null,
+      }
+      const finalFixtureMembersOver2x = await fixtureMembersOver2xContribution(
+        http, state.fixture.memberCode, finalPointers.activeCatalog, finalPointers.previousCatalog,
+      )
+      validateMonitorSnapshot({
+        legacyHealthy: true,
+        vNextHealthy: true,
+        legacyRpc: lastSample.legacyRpc,
+        vNextRpc: lastSample.vNextRpc,
+        global: {
+          eligibleEventCount: Number(endingGlobal.eligibleEventCount ?? 0),
+          knownFixtureCount: fixtureEventCount,
+          status: coverageFromCounts(finalAdjustedCount, finalAdjustedCounts),
+          unpricedShare: finalAdjustedCount > 0 ? Number(finalAdjustedCounts.unpriced ?? 0) / finalAdjustedCount : 0,
+          membersOver2x: Number(endingGlobal.membersOver2xCount ?? 0) - finalFixtureMembersOver2x,
+          postSnapshotEventCount: Number(endingGlobal.postSnapshotEventCount ?? 0),
+          knownLateCount,
+        },
+        fixtureHealth: lastSample.fixtureHealth,
+        reconciliationHash: endingGlobal.activeReconciliationHash ?? 'not_present',
+        pointers: finalPointers,
+      }, baselineGlobal, monitorRpcBaseline)
       return writeSanitized(options.out, result, adapters)
     }
 
@@ -2661,9 +3237,15 @@ export function createRolloutRunner(dependencies = {}) {
 
   return {
     execute,
+    abort() {
+      abortController.abort()
+    },
     async cleanupOnFailure(stateFile) {
       if (!stateFile) return
       const state = await loadState(stateFile)
+      if (state.backfillCreateAttempt || state.backfill?.runId || (
+        state.activationRehearsal?.phase && state.activationRehearsal.phase !== 'reactivated'
+      )) return
       const next = await deleteFixtureData({
         state, http, includeMember: true, preserveBackfill: true, timestamp: clock().toISOString(),
       })
@@ -2683,9 +3265,16 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
     if (reason) process.stderr.write(`${reason}\n`)
     process.exitCode = exitCode
   }
-  const signal = name => { void cleanupAndExit(`Rollout interrupted by ${name}`, 130) }
+  const signal = name => {
+    if (shuttingDown) return
+    shuttingDown = true
+    runner.abort()
+    process.stderr.write(`Rollout interrupted by ${name}\n`)
+    process.exitCode = 130
+  }
   const exception = error => {
     if (error?.intentional && error?.exitCode === 75) { process.exitCode = 75; return }
+    runner.abort()
     void cleanupAndExit('Rollout terminated by an unexpected error', 1)
   }
   process.once('SIGINT', () => signal('SIGINT'))
@@ -2694,8 +3283,10 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
   process.once('unhandledRejection', exception)
   try {
     const result = await runner.execute(parsed.command, parsed.options)
+    if (shuttingDown) return
     if (result !== undefined) process.stdout.write(`${JSON.stringify(sanitizeForOutput(result))}\n`)
   } catch (error) {
+    if (shuttingDown) return
     if (error?.intentional && error?.exitCode === 75) {
       process.exitCode = 75
       return

@@ -137,13 +137,18 @@ GRANT EXECUTE ON FUNCTION public.tokend_upload_events(TEXT, JSONB, JSONB) TO ano
 
 DROP FUNCTION IF EXISTS public.tokend_upload_events_v2(TEXT, JSONB, JSONB);
 
-DROP FUNCTION IF EXISTS public.tokend_pricing_create_backfill(TEXT);
+DROP FUNCTION IF EXISTS public.tokend_pricing_create_backfill(TEXT, UUID);
+DROP FUNCTION IF EXISTS public.tokend_pricing_freeze_batch(UUID, INTEGER);
+DROP FUNCTION IF EXISTS public.tokend_pricing_finalize_backfill(UUID);
 DROP FUNCTION IF EXISTS public.tokend_pricing_backfill_batch(UUID, TEXT, TEXT, INTEGER);
 DROP FUNCTION IF EXISTS public.tokend_pricing_reconcile(UUID);
 DROP FUNCTION IF EXISTS public.tokend_pricing_activate(UUID);
 DROP FUNCTION IF EXISTS public.tokend_pricing_rollback(UUID);
 DROP FUNCTION IF EXISTS public.tokend_pricing_get_backfill(UUID);
+DROP FUNCTION IF EXISTS public.tokend_pricing_health();
 DROP FUNCTION IF EXISTS public.tokend_pricing_preflight();
+DROP FUNCTION IF EXISTS public.tokend_pricing_compute_reconciliation_hash(UUID, TEXT);
+DROP FUNCTION IF EXISTS public.tokend_pricing_compute_target_hash(UUID);
 
 DROP FUNCTION IF EXISTS public.tokend_get_summary_v5(TEXT, TEXT, TEXT);
 DROP FUNCTION IF EXISTS public.tokend_get_daily_trend_v5(TEXT, TEXT, TEXT);

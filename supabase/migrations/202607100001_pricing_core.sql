@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS public.tokend_pricing_state (
 CREATE TABLE IF NOT EXISTS public.tokend_pricing_backfill_runs (
   run_id UUID NOT NULL,
   catalog_version TEXT NOT NULL,
+  create_request_id UUID,
   status TEXT NOT NULL,
   snapshot_at TIMESTAMPTZ NOT NULL,
   base_previous_catalog_version TEXT,
@@ -158,6 +159,9 @@ CREATE TABLE IF NOT EXISTS public.tokend_pricing_audit (
   payload JSONB NOT NULL DEFAULT '{}'::JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE public.tokend_pricing_backfill_runs
+  ADD COLUMN IF NOT EXISTS create_request_id UUID;
 
 DO $constraints$
 BEGIN
@@ -307,6 +311,15 @@ BEGIN
     ALTER TABLE public.tokend_pricing_backfill_runs
       ADD CONSTRAINT tokend_pricing_backfill_runs_catalog_fkey
       FOREIGN KEY (catalog_version) REFERENCES public.tokend_pricing_catalogs(version);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'tokend_pricing_backfill_runs_create_request_id_key'
+      AND conrelid = 'public.tokend_pricing_backfill_runs'::regclass
+  ) THEN
+    ALTER TABLE public.tokend_pricing_backfill_runs
+      ADD CONSTRAINT tokend_pricing_backfill_runs_create_request_id_key
+      UNIQUE (create_request_id);
   END IF;
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint

@@ -118,7 +118,7 @@ WHERE pronamespace = 'public'::regnamespace
 BEGIN;
 SET LOCAL search_path = public, extensions;
 
-SELECT plan(193);
+SELECT plan(197);
 
 SELECT is(
   (SELECT count(*)::INTEGER FROM public.tokend_pricing_catalogs),
@@ -1268,7 +1268,8 @@ SELECT is(
 
 UPDATE public.tokend_pricing_state
 SET active_catalog_version = NULL,
-    previous_catalog_version = NULL
+    previous_catalog_version = NULL,
+    current_ingest_epoch = 1
 WHERE singleton;
 
 SELECT is(
@@ -1349,12 +1350,13 @@ SELECT is(
 );
 
 INSERT INTO public.tokend_pricing_backfill_targets (
-  run_id, member_code, event_id, event_snapshot
+  run_id, member_code, event_id, event_snapshot, snapshot_hash
 ) VALUES (
   '00000000-0000-0000-0000-000000000001',
   'ROLL_UPLOAD',
   'estimate-1',
-  '{}'::JSONB
+  '{}'::JSONB,
+  repeat('a', 64)
 );
 
 INSERT INTO public.tokend_usage_events (
@@ -1391,14 +1393,16 @@ SELECT results_eq(
   $expected$
     VALUES
       ('activeCatalogVersion'::TEXT), ('activeReconciliationHash'::TEXT),
-      ('activeRunId'::TEXT), ('activeRunStatus'::TEXT),
+      ('activeRunId'::TEXT), ('activeRunStatus'::TEXT), ('authoritative'::TEXT),
+      ('catalogHash'::TEXT),
       ('eligibleEventCount'::TEXT), ('eligibleZeroCostEventCount'::TEXT),
       ('eventCount'::TEXT), ('legacyPriceRowCount'::TEXT),
       ('membersOver2xCount'::TEXT), ('postSnapshotEventCount'::TEXT),
       ('previousCatalogVersion'::TEXT), ('previousRunId'::TEXT),
-      ('rolloutFixtureCount'::TEXT), ('statusCounts'::TEXT),
-      ('unpricedEventCount'::TEXT), ('unpricedShare'::TEXT),
-      ('zeroCostByModel'::TEXT)
+      ('rolloutFixtureCount'::TEXT), ('source'::TEXT), ('statusCounts'::TEXT),
+      ('totalCost'::TEXT), ('unpricedEventCount'::TEXT), ('unpricedShare'::TEXT),
+      ('zeroCostByModel'::TEXT), ('zeroCostByModelTruncated'::TEXT),
+      ('zeroCostOtherEventCount'::TEXT)
   $expected$,
   'preflight returns exactly the aggregate-only key set'
 );
@@ -1425,10 +1429,26 @@ SELECT results_eq(
   $expected$
     VALUES (
       5::BIGINT, 4::BIGINT, 0::BIGINT, 0::BIGINT, 0::NUMERIC,
-      '{"reported":1,"estimated":2,"zero_rate":0,"unpriced":1,"legacy":1,"unset":0}'::JSONB
+      '{"reported":1,"estimated":2,"zero_rate":0,"unpriced":0,"legacy":1,"unset":0}'::JSONB
     )
   $expected$,
   'preflight event and pricing-status aggregates use effective costs and statuses'
+);
+
+SELECT results_eq(
+  $actual$
+    SELECT
+      (p->'statusCounts'->>'unpriced')::BIGINT,
+      (
+        SELECT COALESCE(sum(value::BIGINT), 0)::BIGINT
+        FROM jsonb_each_text(p->'statusCounts')
+      )
+    FROM (SELECT public.tokend_pricing_preflight()::JSONB AS p) AS preflight
+  $actual$,
+  $expected$
+    VALUES (0::BIGINT, 4::BIGINT)
+  $expected$,
+  'zero-token telemetry does not enter authoritative preflight statusCounts'
 );
 
 SELECT results_eq(
@@ -2475,7 +2495,16 @@ INSERT INTO public.tokend_usage_events (
     'unpriced', 'standard', 'disjoint', 0, 'reconciled', NULL);
 
 CREATE TEMP TABLE task8_null_uploaded_run AS
-SELECT public.tokend_pricing_create_backfill('2026-07-10')::JSONB AS payload;
+SELECT public.tokend_pricing_create_backfill(
+  '2026-07-10', '81000000-0000-0000-0000-000000000001'
+)::JSONB AS payload;
+
+SELECT public.tokend_pricing_freeze_batch(
+  (SELECT (payload->>'runId')::UUID FROM task8_null_uploaded_run), 5000
+);
+SELECT public.tokend_pricing_finalize_backfill(
+  (SELECT (payload->>'runId')::UUID FROM task8_null_uploaded_run)
+);
 
 SELECT ok(
   EXISTS (
@@ -2499,7 +2528,18 @@ CREATE TEMP TABLE task8_run_count_before AS
 SELECT count(*)::BIGINT AS value FROM public.tokend_pricing_backfill_runs;
 
 SELECT throws_ok(
-  $$ SELECT public.tokend_pricing_create_backfill('missing-catalog') $$,
+  $$ SELECT public.tokend_pricing_create_backfill(
+    '2026-07-10', NULL
+  ) $$,
+  '22023',
+  'Pricing backfill create request id is required',
+  'create requires a nonnull idempotency request id'
+);
+
+SELECT throws_ok(
+  $$ SELECT public.tokend_pricing_create_backfill(
+    'missing-catalog', '81000000-0000-0000-0000-000000000002'
+  ) $$,
   '55000',
   NULL,
   'invalid catalog leaves no partially visible backfill'
@@ -2512,21 +2552,54 @@ SELECT is(
 );
 
 SELECT throws_ok(
-  $$ SELECT public.tokend_pricing_create_backfill('2026-07-09') $$,
+  $$ SELECT public.tokend_pricing_create_backfill(
+    '2026-07-09', '81000000-0000-0000-0000-000000000003'
+  ) $$,
   '55000',
   NULL,
   'create rejects a catalog that is already the current active catalog'
 );
 
 CREATE TEMP TABLE task8_primary AS
-SELECT public.tokend_pricing_create_backfill('2026-07-10')::JSONB AS payload;
+SELECT public.tokend_pricing_create_backfill(
+  '2026-07-10', '81000000-0000-0000-0000-000000000004'
+)::JSONB AS payload;
+
+SELECT ok(
+  public.tokend_pricing_create_backfill(
+    '2026-07-10', '81000000-0000-0000-0000-000000000004'
+  )::JSONB = (SELECT payload FROM task8_primary)
+  AND (
+    SELECT count(*) = 1
+    FROM public.tokend_pricing_backfill_runs
+    WHERE create_request_id = '81000000-0000-0000-0000-000000000004'
+  ),
+  'same create request returns the same run snapshot without a second row'
+);
+
+SELECT throws_ok(
+  $$ SELECT public.tokend_pricing_create_backfill(
+    '2026-07-09', '81000000-0000-0000-0000-000000000004'
+  ) $$,
+  '55000',
+  'Pricing backfill create request 81000000-0000-0000-0000-000000000004 belongs to catalog 2026-07-10, not 2026-07-09',
+  'same create request cannot be reused for another catalog'
+);
+
+SELECT public.tokend_pricing_freeze_batch(
+  (SELECT (payload->>'runId')::UUID FROM task8_primary), 5000
+);
+UPDATE task8_primary
+SET payload = public.tokend_pricing_finalize_backfill(
+  (payload->>'runId')::UUID
+)::JSONB;
 
 SELECT ok(
   (SELECT payload->>'status' = 'staging'
       AND (payload->>'targetCount')::BIGINT = 4
       AND length(payload->>'targetHash') = 64
    FROM task8_primary),
-  'create freezes one deterministic target set without pricing'
+  'freeze and finalize publish one deterministic target set without pricing'
 );
 
 SELECT results_eq(
@@ -2549,8 +2622,7 @@ SELECT ok(
     SELECT count(*) = 4
       AND bool_and(event_snapshot ?& ARRAY[
         'inputTokens', 'outputTokens', 'reasoningTokens', 'cacheReadTokens', 'cacheWriteTokens',
-        'model', 'timestampMs', 'tokenSemantics', 'sessionId', 'beforeTotalCost',
-        'beforePricingStatus'
+        'model', 'timestampMs', 'tokenSemantics', 'sessionId', 'beforeTotalCost'
       ])
     FROM public.tokend_pricing_backfill_targets
     WHERE run_id = (SELECT (payload->>'runId')::UUID FROM task8_primary)
@@ -2559,11 +2631,13 @@ SELECT ok(
     SELECT 1 FROM public.tokend_event_cost_revisions
     WHERE backfill_run_id = (SELECT (payload->>'runId')::UUID FROM task8_primary)
   ),
-  'create captures immutable usage metadata and performs no pricing'
+  'freeze captures immutable minimal usage metadata and performs no pricing'
 );
 
 SELECT throws_ok(
-  $$ SELECT public.tokend_pricing_create_backfill('2026-07-10') $$,
+  $$ SELECT public.tokend_pricing_create_backfill(
+    '2026-07-10', '81000000-0000-0000-0000-000000000005'
+  ) $$,
   '55000',
   NULL,
   'a concurrent staging or reconciled run is rejected'
@@ -2991,7 +3065,7 @@ SELECT ok(
 SELECT is(
   (public.tokend_pricing_preflight()::JSONB->>'postSnapshotEventCount')::BIGINT,
   5::BIGINT,
-  'preflight and get use the same uploaded-at late-arrival definition'
+  'preflight and get use the same ingest-epoch late-arrival definition'
 );
 
 SELECT is(
@@ -3012,9 +3086,12 @@ SELECT results_eq(
   $actual$,
   $expected$
     SELECT key FROM (VALUES
-      ('activeCatalogVersion'::TEXT), ('activeRunId'), ('catalogVersion'), ('cursorEvent'),
-      ('cursorMember'), ('postSnapshotEventCount'), ('remainingCount'), ('revisionCount'),
-      ('runId'), ('snapshotAt'), ('status'), ('targetCount')
+      ('activeCatalogVersion'::TEXT), ('activeRunId'), ('baseCatalogVersion'), ('baseRunId'),
+      ('catalogVersion'), ('cursorEvent'), ('cursorMember'), ('freezeComplete'),
+      ('frozenCount'), ('postSnapshotEventCount'), ('previousCatalogVersion'),
+      ('previousRunId'), ('remainingCount'), ('revisionCount'), ('runId'),
+      ('scannedCount'), ('skippedCount'), ('snapshotAt'), ('status'), ('targetCount'),
+      ('targetHash'), ('targetIngestEpoch')
     ) AS keys(key) ORDER BY key
   $expected$,
   'get backfill exposes only the exact aggregate status keys'
@@ -3038,12 +3115,22 @@ INSERT INTO public.tokend_usage_events (
 );
 
 CREATE TEMP TABLE task8_orphan AS
-SELECT public.tokend_pricing_create_backfill('2026-07-09')::JSONB AS payload;
+SELECT public.tokend_pricing_create_backfill(
+  '2026-07-09', '81000000-0000-0000-0000-000000000006'
+)::JSONB AS payload;
+
+SELECT public.tokend_pricing_freeze_batch(
+  (SELECT (payload->>'runId')::UUID FROM task8_orphan), 5000
+);
+UPDATE task8_orphan
+SET payload = public.tokend_pricing_finalize_backfill(
+  (payload->>'runId')::UUID
+)::JSONB;
 
 SELECT is(
   (SELECT (payload->>'targetCount')::BIGINT FROM task8_orphan),
   1::BIGINT,
-  'a second run freezes only the controlled orphan target'
+  'a second finalized freeze contains only the controlled orphan target'
 );
 
 SELECT lives_ok(
@@ -3098,7 +3185,7 @@ SELECT results_eq(
     WHERE table_schema = 'public'
       AND table_name = 'tokend_pricing_backfill_runs'
       AND column_name IN (
-        'target_hash', 'base_catalog_version', 'base_backfill_run_id',
+        'create_request_id', 'target_hash', 'base_catalog_version', 'base_backfill_run_id',
         'reconciled_at', 'activated_at', 'rolled_back_at'
       )
     ORDER BY column_name
@@ -3108,11 +3195,12 @@ SELECT results_eq(
       ('activated_at'::TEXT COLLATE "C", 'timestamp with time zone'::TEXT COLLATE "C"),
       ('base_backfill_run_id'::TEXT COLLATE "C", 'uuid'::TEXT COLLATE "C"),
       ('base_catalog_version'::TEXT COLLATE "C", 'text'::TEXT COLLATE "C"),
+      ('create_request_id'::TEXT COLLATE "C", 'uuid'::TEXT COLLATE "C"),
       ('reconciled_at'::TEXT COLLATE "C", 'timestamp with time zone'::TEXT COLLATE "C"),
       ('rolled_back_at'::TEXT COLLATE "C", 'timestamp with time zone'::TEXT COLLATE "C"),
       ('target_hash'::TEXT COLLATE "C", 'text'::TEXT COLLATE "C")
   $expected$,
-  'backfill run schema has the exact six additive columns'
+  'backfill run schema has the exact seven rollout columns'
 );
 
 SELECT results_eq(
@@ -3126,9 +3214,11 @@ SELECT results_eq(
     FROM pg_proc AS proc
     WHERE proc.pronamespace = 'public'::regnamespace
       AND proc.proname = ANY (ARRAY[
-        'tokend_pricing_create_backfill', 'tokend_pricing_backfill_batch',
+        'tokend_pricing_create_backfill', 'tokend_pricing_freeze_batch',
+        'tokend_pricing_finalize_backfill', 'tokend_pricing_backfill_batch',
         'tokend_pricing_reconcile', 'tokend_pricing_activate',
-        'tokend_pricing_rollback', 'tokend_pricing_get_backfill'
+        'tokend_pricing_rollback', 'tokend_pricing_get_backfill',
+        'tokend_pricing_health'
       ])
     ORDER BY proc.proname
   $actual$,
@@ -3137,8 +3227,11 @@ SELECT results_eq(
       ('tokend_pricing_activate'::TEXT COLLATE "C", 'uuid'::TEXT COLLATE "C", 'p_run_id'::TEXT COLLATE "C", TRUE, TRUE, TRUE, TRUE),
       ('tokend_pricing_backfill_batch'::TEXT COLLATE "C", 'uuid, text, text, integer'::TEXT COLLATE "C",
         'p_run_id,p_after_member,p_after_event,p_limit'::TEXT COLLATE "C", TRUE, TRUE, TRUE, TRUE),
-      ('tokend_pricing_create_backfill'::TEXT COLLATE "C", 'text'::TEXT COLLATE "C", 'p_catalog_version'::TEXT COLLATE "C", TRUE, TRUE, TRUE, TRUE),
+      ('tokend_pricing_create_backfill'::TEXT COLLATE "C", 'text, uuid'::TEXT COLLATE "C", 'p_catalog_version,p_create_request_id'::TEXT COLLATE "C", TRUE, TRUE, TRUE, TRUE),
+      ('tokend_pricing_finalize_backfill'::TEXT COLLATE "C", 'uuid'::TEXT COLLATE "C", 'p_run_id'::TEXT COLLATE "C", TRUE, TRUE, TRUE, TRUE),
+      ('tokend_pricing_freeze_batch'::TEXT COLLATE "C", 'uuid, integer'::TEXT COLLATE "C", 'p_run_id,p_limit'::TEXT COLLATE "C", TRUE, TRUE, TRUE, TRUE),
       ('tokend_pricing_get_backfill'::TEXT COLLATE "C", 'uuid'::TEXT COLLATE "C", 'p_run_id'::TEXT COLLATE "C", TRUE, TRUE, TRUE, TRUE),
+      ('tokend_pricing_health'::TEXT COLLATE "C", ''::TEXT COLLATE "C", NULL::TEXT COLLATE "C", TRUE, TRUE, TRUE, TRUE),
       ('tokend_pricing_reconcile'::TEXT COLLATE "C", 'uuid'::TEXT COLLATE "C", 'p_run_id'::TEXT COLLATE "C", TRUE, TRUE, TRUE, TRUE),
       ('tokend_pricing_rollback'::TEXT COLLATE "C", 'uuid'::TEXT COLLATE "C", 'p_run_id'::TEXT COLLATE "C", TRUE, TRUE, TRUE, TRUE)
   $expected$,
@@ -3151,9 +3244,11 @@ SELECT is(
     FROM pg_proc AS proc
     WHERE proc.pronamespace = 'public'::regnamespace
       AND proc.proname = ANY (ARRAY[
-        'tokend_pricing_create_backfill', 'tokend_pricing_backfill_batch',
+        'tokend_pricing_create_backfill', 'tokend_pricing_freeze_batch',
+        'tokend_pricing_finalize_backfill', 'tokend_pricing_backfill_batch',
         'tokend_pricing_reconcile', 'tokend_pricing_activate',
-        'tokend_pricing_rollback', 'tokend_pricing_get_backfill'
+        'tokend_pricing_rollback', 'tokend_pricing_get_backfill',
+        'tokend_pricing_health'
       ])
       AND (
         has_function_privilege('anon', proc.oid, 'EXECUTE')
@@ -3196,10 +3291,11 @@ INSERT INTO public.tokend_pricing_backfill_runs (
 );
 
 INSERT INTO public.tokend_pricing_backfill_targets (
-  run_id, member_code, event_id, event_snapshot
+  run_id, member_code, event_id, event_snapshot, snapshot_hash
 ) VALUES (
   '90000000-0000-0000-0000-000000000001', 'RB_KEEP', 'rollback-retained',
-  '{"sessionId":"rollback-session","inputTokens":1,"outputTokens":0,"reasoningTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0}'::JSONB
+  '{"sessionId":"rollback-session","inputTokens":1,"outputTokens":0,"reasoningTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0}'::JSONB,
+  repeat('b', 64)
 );
 
 INSERT INTO public.tokend_event_cost_revisions (

@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS public.tokend_pricing_backfill_runs (
   frozen_at TIMESTAMPTZ,
   priced_count BIGINT NOT NULL DEFAULT 0,
   post_snapshot_event_count BIGINT NOT NULL DEFAULT 0,
+  members_over_2x_count BIGINT NOT NULL DEFAULT 0,
   cursor_member_code TEXT,
   cursor_event_id TEXT,
   reconciliation_hash TEXT,
@@ -318,6 +319,7 @@ BEGIN
         AND frozen_count >= 0
         AND priced_count >= 0
         AND post_snapshot_event_count >= 0
+        AND members_over_2x_count >= 0
         AND input_tokens >= 0
         AND output_tokens >= 0
         AND reasoning_tokens >= 0

@@ -238,10 +238,88 @@ finish_pgbench
 for migration in \
   supabase/migrations/202607100002_pricing_upload.sql \
   supabase/migrations/202607100003_pricing_rpcs.sql \
-  supabase/migrations/202607100004_pricing_backfill.sql
+  supabase/migrations/202607100004_pricing_backfill.sql \
+  supabase/migrations/202607100005_optimize_sessions_v2.sql
 do
-  run_file "$migration" --single-transaction >> "$evidence_dir/migrations-002-004.out" 2>&1
+  run_file "$migration" --single-transaction >> "$evidence_dir/migrations-002-005.out" 2>&1
 done
+
+echo "scale: sessions v2 sparse-member performance gate"
+run_sql "
+  INSERT INTO public.tokend_members (member_code, token)
+  VALUES ('SCALE_RPC', 'scale-rpc-token');
+  INSERT INTO public.tokend_usage_events (
+    id, member_code, timestamp_ms, session_id, session_key, agent, provider, model, channel,
+    input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, project
+  )
+  SELECT
+    'scale-rpc-event-' || series::TEXT,
+    'SCALE_RPC',
+    (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT - series,
+    'scale-rpc-session',
+    'scale-rpc-key',
+    'scale-rpc-agent',
+    'openai',
+    'gpt-5.6-sol',
+    'scale-rpc',
+    100, 20, 10, 5, 135, 'scale-rpc-project'
+  FROM generate_series(1, 3) AS series;" >/dev/null
+sessions_sparse_started="$(now_ms)"
+sessions_sparse_result="$(run_sql "
+  SET statement_timeout = '10s';
+  WITH response AS MATERIALIZED (
+    SELECT public.tokend_get_sessions_v2('scale-rpc-token', '7d', 50)::JSONB AS value
+  )
+  SELECT (value->>'ok') || '|' || jsonb_array_length(value->'sessions') || '|'
+    || (value->'sessions'->0->>'callCount')
+  FROM response")"
+sessions_sparse_ms=$(( $(now_ms) - sessions_sparse_started ))
+assert_eq "sessions v2 sparse result" "$sessions_sparse_result" "true|1|3"
+assert_le "sessions v2 sparse latency ms" "$sessions_sparse_ms" 10000
+run_sql "
+  DELETE FROM public.tokend_usage_events WHERE member_code = 'SCALE_RPC';
+  DELETE FROM public.tokend_members WHERE member_code = 'SCALE_RPC';" >/dev/null
+run_sql "
+  INSERT INTO public.tokend_usage_events (
+    id, member_code, timestamp_ms, session_id, session_key, agent, provider, model, channel,
+    input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, project
+  )
+  SELECT
+    'scale-rpc-touch-' || session.session_id,
+    'SCALE001',
+    (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT,
+    session.session_id,
+    'scale-key',
+    'scale-agent',
+    'openai',
+    'gpt-5.6-sol',
+    'scale',
+    100, 20, 10, 5, 135, 'pricing-scale'
+  FROM public.tokend_sessions AS session
+  WHERE session.member_code = 'SCALE001'
+    AND session.session_id ~ '^scale-session-[0-9]{7}$'
+  ORDER BY session.session_id DESC
+  LIMIT 200;" >/dev/null
+sessions_dense_started="$(now_ms)"
+sessions_dense_result="$(run_sql "
+  SET statement_timeout = '10s';
+  WITH response AS MATERIALIZED (
+    SELECT public.tokend_get_sessions_v2('scale-token', '7d', 200)::JSONB AS value
+  )
+  SELECT (value->>'ok') || '|' || jsonb_array_length(value->'sessions') || '|'
+    || (value->'sessions'->0->>'callCount')
+  FROM response")"
+sessions_dense_ms=$(( $(now_ms) - sessions_dense_started ))
+IFS='|' read -r sessions_dense_ok sessions_dense_count sessions_dense_calls <<< "$sessions_dense_result"
+assert_eq "sessions v2 dense ok" "$sessions_dense_ok" "true"
+if [[ "$sessions_dense_count" -lt 1 || "$sessions_dense_count" -gt 200 || "$sessions_dense_calls" -lt 1 ]]; then
+  echo "sessions v2 dense result is outside the bounded nonempty contract: $sessions_dense_result" >&2
+  exit 1
+fi
+assert_le "sessions v2 dense latency ms" "$sessions_dense_ms" 10000
+run_sql "
+  DELETE FROM public.tokend_usage_events
+  WHERE member_code = 'SCALE001' AND id LIKE 'scale-rpc-touch-%';" >/dev/null
 
 create_request_id="$(run_sql "SELECT gen_random_uuid()")"
 create_epoch_before="$(run_sql "SELECT current_ingest_epoch FROM public.tokend_pricing_state WHERE singleton")"
@@ -473,6 +551,8 @@ cat > "$evidence_dir/summary.json" <<JSON
   "migrationLockFailureMs": $migration_lock_failure_ms,
   "migrationUploadP95Ms": $migration_p95_ms,
   "migrationUploadMaxMs": $migration_max_ms,
+  "sessionsV2SparseMs": $sessions_sparse_ms,
+  "sessionsV2DenseMs": $sessions_dense_ms,
   "createMs": $create_ms,
   "createLockFailureMs": $create_lock_failure_ms,
   "freezeMs": $freeze_ms,

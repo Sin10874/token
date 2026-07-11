@@ -7,7 +7,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 export const MANAGED_MIGRATION_VERSIONS = Object.freeze([
-  '202607100001', '202607100002', '202607100003', '202607100004',
+  '202607100001', '202607100002', '202607100003', '202607100004', '202607100005',
 ])
 export const EMERGENCY_VERSION = '202607109999'
 export const RECOVERY_MIN_VERSION = '202607110001'
@@ -930,7 +930,7 @@ function orderedBoundVersions(state) {
     fail('Bound migrations violate production order')
   }
   if (Object.hasOwn(applied, EMERGENCY_VERSION) && managed.length !== MANAGED_MIGRATION_VERSIONS.length) {
-    fail('Emergency migration cannot precede managed migration 004')
+    fail('Emergency migration cannot precede all managed migrations')
   }
   if (recovery.length > 0 && !Object.hasOwn(applied, EMERGENCY_VERSION)) fail('Recovery migration requires bound emergency migration')
   if (recovery.length > 1) fail('Only one reviewed recovery migration may be bound')
@@ -1166,7 +1166,7 @@ export async function validateForwardRecovery({
     if (row.local !== row.remote) fail('Recovery migration local/remote mismatch')
     return row.local
   })
-  for (const version of MANAGED_MIGRATION_VERSIONS) if (!versions.includes(version)) fail('Recovery history must retain managed migration 001 through 004')
+  for (const version of MANAGED_MIGRATION_VERSIONS) if (!versions.includes(version)) fail('Recovery history must retain all managed migrations')
   if (!versions.includes(EMERGENCY_VERSION)) fail('999 emergency migration must remain in recovery history')
   if (!state.appliedMigrationHashes?.[EMERGENCY_VERSION]) fail('999 emergency migration must retain its applied hash')
   const version = migrationVersion(migrationFile)

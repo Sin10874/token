@@ -237,6 +237,13 @@ function readBackfillMigration(): string {
   )
 }
 
+function readSessionsHotfixMigration(): string {
+  return fs.readFileSync(
+    path.resolve(process.cwd(), 'supabase/migrations/202607100005_optimize_sessions_v2.sql'),
+    'utf8',
+  )
+}
+
 function readPricingRollback(): string {
   return fs.readFileSync(
     path.resolve(process.cwd(), 'supabase/rollback/20260710_restore_prepricing.sql'),
@@ -949,6 +956,43 @@ function testSummaryUsesTheV14SingleScanExecutionShape(): void {
   assert.match(summary, /COUNT\(\*\) FILTER \(WHERE message\.kind IN \('user', 'assistant'\) AND message\.timestamp_ms < v_from_ms\)/i)
 }
 
+function testSessionsHotfixUsesOneEffectiveScanAndPreservesTheRpcContract(): void {
+  const migration = readSessionsHotfixMigration()
+  const sessions = functionDefinition(migration, 'tokend_get_sessions_v2')
+
+  assert.equal(
+    (sessions.match(/FROM public\.tokend_effective_usage_events\b/gi) ?? []).length,
+    1,
+    'sessions v2 must evaluate the security-barrier effective relation only once',
+  )
+  assert.match(
+    sessions,
+    /selected_sessions AS MATERIALIZED\s*\([\s\S]*?FROM public\.tokend_usage_events[\s\S]*?member_code\s*=\s*v_code[\s\S]*?timestamp_ms\s*>=\s*v_from_ms/i,
+  )
+  assert.match(
+    sessions,
+    /GROUP BY session_id\s+ORDER BY MAX\(timestamp_ms\) DESC, session_id\s+LIMIT LEAST\(GREATEST\(COALESCE\(p_limit, 50\), 0\), 200\)/i,
+  )
+  assert.match(
+    sessions,
+    /source AS\s*\([\s\S]*?FROM public\.tokend_effective_usage_events[\s\S]*?member_code\s*=\s*v_code[\s\S]*?session_id\s*=\s*ANY\(ARRAY\(SELECT session_id FROM selected_sessions\)\)/i,
+  )
+  assert.match(sessions, /SECURITY DEFINER[\s\S]*?SET search_path = public, pg_temp/i)
+  assert.match(
+    migration,
+    /REVOKE ALL ON FUNCTION public\.tokend_get_sessions_v2\(TEXT, TEXT, INTEGER\) FROM PUBLIC, anon, authenticated, service_role;/i,
+  )
+  assert.match(
+    migration,
+    /GRANT EXECUTE ON FUNCTION public\.tokend_get_sessions_v2\(TEXT, TEXT, INTEGER\) TO anon, authenticated;/i,
+  )
+  assert.doesNotMatch(
+    migration,
+    /GRANT EXECUTE ON FUNCTION public\.tokend_get_sessions_v2\(TEXT, TEXT, INTEGER\) TO service_role/i,
+  )
+  assert.match(migration, /NOTIFY pgrst, 'reload schema';/i)
+}
+
 const BACKFILL_ADMIN_SIGNATURES = [
   ['tokend_pricing_create_backfill', 'p_catalog_version TEXT, p_create_request_id UUID', 'TEXT, UUID'],
   ['tokend_pricing_freeze_batch', 'p_run_id UUID, p_limit INTEGER DEFAULT 5000', 'UUID, INTEGER'],
@@ -1491,6 +1535,10 @@ function testPgTapContractIsSelfContained(): void {
     2,
   )
   assert.equal(
+    (pgTap.match(/^\\ir \.\.\/\.\.\/migrations\/202607100005_optimize_sessions_v2\.sql$/gm) ?? []).length,
+    2,
+  )
+  assert.equal(
     (pgTap.match(/^\\ir \.\.\/\.\.\/rollback\/20260710_restore_prepricing\.sql$/gm) ?? []).length,
     2,
   )
@@ -1589,6 +1637,7 @@ testEffectiveRelationHasOneAuditablePrecedenceRule()
 testRpcAggregationContractIsConsistent()
 testSummaryChildrenAndSessionsUseTheFullEnvelopeContract()
 testSummaryUsesTheV14SingleScanExecutionShape()
+testSessionsHotfixUsesOneEffectiveScanAndPreservesTheRpcContract()
 testBackfillMigrationDefinesExactAdminSurfaceAndAcls()
 testBackfillMigrationUsesAShortEpochFenceAndBoundedFreeze()
 testBackfillBatchUsesPersistedCursorAndOneLockedPendingWindow()

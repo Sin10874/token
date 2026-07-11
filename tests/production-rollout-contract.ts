@@ -1244,7 +1244,7 @@ test('forward recovery rejects every bypass and only one newly reviewed exact bi
   const rejected: Array<[string, Record<string, unknown>, RegExp]> = [
     ['missing emergency verification', { state: { ...baseState, emergencyVerified: false } }, /emergency verification/i],
     ['missing 999 history', { migrationList: exactMigrationList([...MANAGED_MIGRATION_VERSIONS, recoveryVersion]) }, /999.*history/i],
-    ['replay missing 001-004', { migrationList: exactMigrationList([EMERGENCY_VERSION, recoveryVersion]) }, /001.*004|managed migration/i],
+    ['replay missing managed migrations', { migrationList: exactMigrationList([EMERGENCY_VERSION, recoveryVersion]) }, /managed migration/i],
     ['low recovery version', {
       migrationFile: lowRecoveryFile,
       migrationList: exactMigrationList([...MANAGED_MIGRATION_VERSIONS, EMERGENCY_VERSION, '202607100998']),

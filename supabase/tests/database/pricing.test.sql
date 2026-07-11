@@ -114,6 +114,8 @@ WHERE pronamespace = 'public'::regnamespace
 \ir ../../migrations/202607100003_pricing_rpcs.sql
 \ir ../../migrations/202607100004_pricing_backfill.sql
 \ir ../../migrations/202607100004_pricing_backfill.sql
+\ir ../../migrations/202607100005_optimize_sessions_v2.sql
+\ir ../../migrations/202607100005_optimize_sessions_v2.sql
 
 BEGIN;
 SET LOCAL search_path = public, extensions;

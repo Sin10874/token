@@ -233,10 +233,30 @@ test('wrapper gate accepts any valid PostgreSQL dollar tag without changing the 
   assert.equal(compareWrapperDefinitions(unicodeTag, semanticMetadataWrapper).wrapperGatePassed, true)
 })
 
+test('wrapper parser separates adjacent quoted tokens without corrupting literal prefixes', () => {
+  const adjacent = semanticMetadataWrapper
+    .replace('public.tokend_upload_events', '"public"."tokend_upload_events"')
+    .replace('RETURNS JSON', 'RETURNS"json"')
+    .replace('LANGUAGE plpgsql', 'LANGUAGE"plpgsql"')
+    .replace('AS $semantic$', 'AS$semantic$')
+  assert.equal(compareWrapperDefinitions(adjacent, semanticMetadataWrapper).wrapperGatePassed, true)
+
+  const prefixed = semanticMetadataWrapper.replace(
+    "RETURN json_build_object('ok', true);",
+    "PERFORM E'line\\n'; PERFORM B'01'; PERFORM X'0f'; PERFORM N'national'; PERFORM U&'d\\0061t';\n  RETURN json_build_object('ok', true);",
+  )
+  const definition = extractExactUploadWrapper(prefixed).definition
+  for (const prefix of ["E'", "B'", "X'", "N'", "U&'"]) assert.match(definition, new RegExp(prefix.replace('&', '\\&')))
+})
+
 test('wrapper semantic hash rejects volatility, search_path, parameter name, and default drift', () => {
   const drifts = [
     semanticMetadataWrapper.replace('VOLATILE', 'IMMUTABLE'),
     semanticMetadataWrapper.replace('public, pg_temp', 'attacker, pg_temp'),
+    semanticMetadataWrapper.replace(
+      'SET search_path = public, pg_temp',
+      'SET search_path = public, pg_temp\nSET plpgsql.print_strict_params = on',
+    ),
     semanticMetadataWrapper.replace('p_sync_states JSONB', 'renamed_sync_states JSONB'),
     semanticMetadataWrapper.replace('p_sync_states JSONB', "p_sync_states JSONB DEFAULT '[]'::JSONB"),
   ]
@@ -406,6 +426,7 @@ test('wrapper parser rejects unreviewed settings post-create mutations and alter
     'ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO attacker;',
     'ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO attacker;',
     'ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA other, public GRANT EXECUTE ON FUNCTIONS TO attacker;',
+    'ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA U&"publ\\0069c" GRANT EXECUTE ON FUNCTIONS TO authenticator;',
   ]) {
     assert.throws(
       () => compareWrapperDefinitions(
@@ -425,12 +446,25 @@ test('wrapper parser rejects unreviewed settings post-create mutations and alter
     /definition hash mismatch/i,
   )
 
+  const adjacentQuotedUnsafeSearchPath = hardenedReviewedDefaultAclWrapper.replace(
+    'SET search_path = public, pg_temp',
+    'SET search_path = public, pg_temp\nSET"search_path"=attacker,pg_temp',
+  )
+  assert.throws(
+    () => compareWrapperDefinitions(pgDumpDefaultAclWrapper, adjacentQuotedUnsafeSearchPath),
+    /definition hash mismatch/i,
+  )
+
   const unsafeSuffixes = [
     'ALTER FUNCTION public.tokend_upload_events(TEXT, JSONB, JSONB) SET search_path = attacker;',
     'DROP FUNCTION public.tokend_upload_events(TEXT, JSONB, JSONB);',
     'GRANT EXECUTE ON ROUTINE public.tokend_upload_events(TEXT, JSONB, JSONB) TO attacker;',
     'GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO attacker;',
     'GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA other, public TO attacker;',
+    'GRANT EXECUTE ON ALL ROUTINES IN SCHEMA"public" TO service_role;',
+    'GRANT EXECUTE ON FUNCTION U&"publ\\0069c".U&"tokend_upload_event\\0073"(TEXT, JSONB, JSONB) TO service_role;',
+    'ALTER FUNCTION U&"publ\\0069c".U&"tokend_upload_event\\0073"(TEXT, JSONB, JSONB) OWNER TO service_role;',
+    'DROP FUNCTION U&"publ\\0069c".U&"tokend_upload_event\\0073"(TEXT, JSONB, JSONB);',
   ]
   for (const suffix of unsafeSuffixes) {
     assert.throws(
@@ -496,9 +530,14 @@ test('wrapper parser rejects unreviewed settings post-create mutations and alter
 test('wrapper semantic hash rejects cost rows support and transform metadata drift', () => {
   for (const clause of [
     'COST 999',
+    'COST .5',
+    'COST.5',
     'ROWS 999',
+    'ROWS.5',
     'SUPPORT public.wrapper_support',
+    'SUPPORT"pg_catalog"."textlike_support"',
     'TRANSFORM FOR TYPE public.wrapper_type',
+    'TRANSFORM FOR TYPE"public"."wrapper_type"',
   ]) {
     assert.throws(
       () => compareWrapperDefinitions(
@@ -508,6 +547,18 @@ test('wrapper semantic hash rejects cost rows support and transform metadata dri
       /definition hash mismatch/i,
     )
   }
+
+  const twoTransforms = hardenedReviewedDefaultAclWrapper.replace(
+    'LANGUAGE plpgsql',
+    'LANGUAGE plpgsql TRANSFORM FOR TYPE public.first_type, FOR TYPE public.second_type',
+  )
+  assert.throws(
+    () => compareWrapperDefinitions(
+      twoTransforms,
+      twoTransforms.replace('public.second_type', 'attacker.second_type'),
+    ),
+    /definition hash mismatch/i,
+  )
 })
 
 test('wrapper gate still rejects function body drift after semantic pg_dump normalization', () => {
@@ -1741,6 +1792,39 @@ test('backfill creation freezes authoritative snapshot metadata and reconcile pr
   assert.equal(reconciledState.reconciliationHash, 'stable-reconciliation-hash')
   assert.deepEqual(reconciledState.backfillSnapshot, createdState.backfillSnapshot)
 
+  const blockedStatePath = path.join(dir, 'blocked-reconcile.json')
+  await atomicWriteJson(blockedStatePath, createdState, { fs: nodeFs, randomUUID })
+  const blockedRunner = createRolloutRunner({
+    env: { SUPABASE_URL: 'https://project.supabase.co', SUPABASE_SERVICE_KEY: 'svc', SUPABASE_ANON_KEY: 'anon' },
+    fetch: async input => {
+      const url = String(input)
+      if (url.endsWith('/rpc/tokend_pricing_reconcile')) return jsonResponse({
+        ...reconciliation,
+        unexplainedMemberCount: 1,
+      })
+      if (url.endsWith('/rpc/tokend_pricing_get_backfill')) return jsonResponse({
+        runId, status: 'staging', catalogVersion: '2026-07-10', snapshotAt: runRow.snapshot_at,
+        targetCount: '4', revisionCount: '4', remainingCount: '0',
+      })
+      if (url.endsWith(`/rpc/${PREFLIGHT_RPC_NAME}`)) return jsonResponse({
+        activeCatalogVersion: runRow.base_catalog_version,
+        activeRunId: runRow.base_backfill_run_id,
+        previousCatalogVersion: null,
+        previousRunId: null,
+      })
+      if (url.includes('/tokend_pricing_backfill_runs?')) return jsonResponse([{
+        ...runRow, status: 'staging', reconciliation_hash: null,
+      }])
+      if (url.includes('/tokend_pricing_catalogs?')) return jsonResponse([{ hash: 'catalog-hash' }])
+      return jsonResponse({ code: 'unexpected' }, 500)
+    },
+    fs: nodeFs, clock: () => new Date('2026-07-10T00:00:00Z'), sleep: async () => {}, randomUUID,
+  })
+  await assert.rejects(
+    blockedRunner.execute('reconcile', { state: blockedStatePath, out: path.join(dir, 'blocked.json') }),
+    /unexplainedMemberCount.*1/i,
+  )
+
   const unsafeRunner = createRolloutRunner({
     env: { SUPABASE_URL: 'https://project.supabase.co', SUPABASE_SERVICE_KEY: 'svc', SUPABASE_ANON_KEY: 'anon' },
     fetch: async input => {
@@ -2047,6 +2131,48 @@ test('fixture creation preserves gates and smoke uses exact upload bodies plus a
   assert.ok(calls.slice(beforeLate).some(call => call.url.includes('/tokend_usage_events?') && call.url.includes('late-')))
   assert.ok(calls.slice(beforeLate).some(call => call.url.includes('/tokend_event_cost_revisions?') && call.url.includes('late-') && call.url.includes('version=eq.catalog-v1')))
   assert.doesNotMatch(JSON.stringify(state), /service-secret|anon-secret/)
+})
+
+test('failure cleanup removes fixture data but preserves resumable backfill state', async () => {
+  const dir = await tempDir()
+  const statePath = path.join(dir, 'cleanup-preserves-backfill.json')
+  const backfill = {
+    runId: '00000000-0000-0000-0000-000000000123',
+    cursorMember: 'cursor-member', cursorEvent: 'cursor-event', remaining: 0, batches: 4,
+  }
+  const backfillSnapshot = { snapshotAt: '2026-07-10T00:00:00Z', targetCount: '7', targetHash: 'target-hash' }
+  await atomicWriteJson(statePath, {
+    wrapperGatePassed: true,
+    fixture: { memberCode: 'ROLL_cleanup', memberToken: 'fixture-secret' },
+    backfill,
+    backfillSnapshot,
+  }, { fs: nodeFs, randomUUID })
+  const runner = createRolloutRunner({
+    env: { SUPABASE_URL: 'https://project.supabase.co', SUPABASE_SERVICE_KEY: 'svc', SUPABASE_ANON_KEY: 'anon' },
+    fetch: async input => {
+      const url = String(input)
+      if (url.includes('/tokend_pricing_backfill_targets?')) return jsonResponse([])
+      return jsonResponse([])
+    },
+    fs: nodeFs, clock: () => new Date('2026-07-10T00:00:00Z'), sleep: async () => {}, randomUUID,
+  })
+  await runner.cleanupOnFailure(statePath)
+  const cleaned = JSON.parse(await readFile(statePath, 'utf8'))
+  assert.equal(cleaned.fixture, undefined)
+  assert.deepEqual(cleaned.backfill, backfill)
+  assert.deepEqual(cleaned.backfillSnapshot, backfillSnapshot)
+
+  await atomicWriteJson(statePath, {
+    wrapperGatePassed: true,
+    fixture: { memberCode: 'ROLL_cleanup', memberToken: 'fixture-secret' },
+    backfill,
+    backfillSnapshot,
+  }, { fs: nodeFs, randomUUID })
+  await runner.execute('cleanup', { state: statePath })
+  const explicitlyCleaned = JSON.parse(await readFile(statePath, 'utf8'))
+  assert.equal(explicitlyCleaned.fixture, undefined)
+  assert.equal(explicitlyCleaned.backfill, undefined)
+  assert.deepEqual(explicitlyCleaned.backfillSnapshot, backfillSnapshot)
 })
 
 test('legacy-only smoke calls only the v12 wrapper and verifies one nonzero base row', async () => {

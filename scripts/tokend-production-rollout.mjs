@@ -246,6 +246,14 @@ function canonicalizeSql(statement) {
     pendingSpace = false
     output += value
   }
+  const separateAdjacentQuotedToken = quote => {
+    const literalPrefix = quote === "'"
+      ? /(?:[EeBbXxNn]|[Uu]&)$/.test(output)
+      : /[Uu]&$/.test(output)
+    if (!pendingSpace
+      && /[A-Za-z0-9_$\u0080-\uFFFF]$/u.test(output)
+      && !literalPrefix) pendingSpace = true
+  }
   while (index < source.length) {
     const char = source[index]
     const next = source[index + 1]
@@ -269,6 +277,7 @@ function canonicalizeSql(statement) {
       continue
     }
     if (char === "'" || char === '"') {
+      separateAdjacentQuotedToken(char)
       const quote = char
       let end = index + 1
       while (end < source.length) {
@@ -284,6 +293,7 @@ function canonicalizeSql(statement) {
     if (char === '$') {
       const tag = dollarTagAt(source, index)
       if (tag) {
+        separateAdjacentQuotedToken('$')
         const end = source.indexOf(tag, index + tag.length)
         if (end < 0) fail('Unbalanced dollar quote in SQL')
         const after = end + tag.length
@@ -323,6 +333,7 @@ function splitSqlList(text) {
 }
 
 const SQL_IDENTIFIER_SOURCE = '(?:"(?:[^"]|"")*"|[A-Za-z_\\u0080-\\uFFFF][A-Za-z0-9_$\\u0080-\\uFFFF]*)'
+const SQL_QUALIFIED_IDENTIFIER_SOURCE = `${SQL_IDENTIFIER_SOURCE}(?:\\s*\\.\\s*${SQL_IDENTIFIER_SOURCE})*`
 const SQL_TYPE_SOURCE = `${SQL_IDENTIFIER_SOURCE}(?:\\s*\\.\\s*${SQL_IDENTIFIER_SOURCE})?(?:\\s*\\[\\s*\\])*`
 const DOLLAR_TAG_SOURCE = '\\$(?:[A-Za-z_\\u0080-\\uFFFF][A-Za-z0-9_\\u0080-\\uFFFF]*)?\\$'
 
@@ -444,10 +455,10 @@ function normalizeSettingValue(value) {
 function parseFunctionSettings(header) {
   const settings = []
   const nextClause = '(?:SET|LANGUAGE|TRANSFORM|WINDOW|IMMUTABLE|STABLE|VOLATILE|LEAKPROOF|NOT\\s+LEAKPROOF|CALLED\\s+ON\\s+NULL\\s+INPUT|RETURNS\\s+NULL\\s+ON\\s+NULL\\s+INPUT|STRICT|EXTERNAL\\s+SECURITY|SECURITY|PARALLEL|COST|ROWS|SUPPORT)'
-  const pattern = new RegExp(`\\bSET\\s+(${SQL_IDENTIFIER_SOURCE})\\s*(?:FROM\\s+(CURRENT)\\s*|(?:TO\\s+|=\\s*)([\\s\\S]*?))(?=\\s+${nextClause}\\b|$)`, 'giu')
+  const pattern = new RegExp(`\\bSET\\s+(${SQL_QUALIFIED_IDENTIFIER_SOURCE})\\s*(?:FROM\\s+(CURRENT)\\s*|(?:TO\\s+|=\\s*)([\\s\\S]*?))(?=\\s+${nextClause}\\b|$)`, 'giu')
   for (const match of header.matchAll(pattern)) {
     settings.push({
-      name: parseSqlIdentifier(match[1]).name,
+      name: parseQualifiedIdentifier(match[1]),
       value: match[2] ? 'from current' : normalizeSettingValue(match[3]),
     })
   }
@@ -455,12 +466,39 @@ function parseFunctionSettings(header) {
 }
 
 function parseQualifiedIdentifier(value) {
-  return value.split(/\s*\.\s*/).map(part => parseSqlIdentifier(part).name).join('.')
+  const parts = []
+  let start = 0
+  let quoted = false
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] === '"') {
+      if (quoted && value[index + 1] === '"') { index += 1; continue }
+      quoted = !quoted
+      continue
+    }
+    if (!quoted && value[index] === '.') {
+      parts.push(value.slice(start, index))
+      start = index + 1
+    }
+  }
+  parts.push(value.slice(start))
+  return parts.map(part => parseSqlIdentifier(part).name).join('.')
 }
 
 function parseFunctionTransforms(header) {
-  const pattern = new RegExp(`\\bTRANSFORM\\s+FOR\\s+TYPE\\s+(${SQL_TYPE_SOURCE})`, 'giu')
-  return [...header.matchAll(pattern)].map(match => normalizeSqlType(match[1])).sort()
+  const transforms = []
+  const nextClause = '(?:SET|LANGUAGE|TRANSFORM|WINDOW|IMMUTABLE|STABLE|VOLATILE|LEAKPROOF|NOT\\s+LEAKPROOF|CALLED\\s+ON\\s+NULL\\s+INPUT|RETURNS\\s+NULL\\s+ON\\s+NULL\\s+INPUT|STRICT|EXTERNAL\\s+SECURITY|SECURITY|PARALLEL|COST|ROWS|SUPPORT)'
+  const clausePattern = new RegExp(`\\bTRANSFORM\\s+([\\s\\S]*?)(?=\\s+${nextClause}\\b|$)`, 'giu')
+  const itemPattern = new RegExp(`^FOR\\s+TYPE\\s+(${SQL_TYPE_SOURCE})$`, 'iu')
+  for (const clause of header.matchAll(clausePattern)) {
+    const items = splitSqlList(clause[1])
+    if (items.length === 0) fail('Exact wrapper transform metadata is incomplete')
+    for (const item of items) {
+      const parsed = itemPattern.exec(item.trim())
+      if (!parsed) fail('Exact wrapper transform metadata is incomplete')
+      transforms.push(normalizeSqlType(parsed[1]))
+    }
+  }
+  return transforms.sort()
 }
 
 function parseWrapperDefinition(statement, parameterText) {
@@ -471,8 +509,9 @@ function parseWrapperDefinition(statement, parameterText) {
   const security = /\bSECURITY\s+(DEFINER|INVOKER)\b/i.exec(header)
   const volatility = /\b(IMMUTABLE|STABLE|VOLATILE)\b/i.exec(header)
   const parallel = /\bPARALLEL\s+(UNSAFE|RESTRICTED|SAFE)\b/i.exec(header)
-  const cost = /\bCOST\s+([0-9]+(?:\.[0-9]+)?)/i.exec(header)
-  const rows = /\bROWS\s+([0-9]+(?:\.[0-9]+)?)/i.exec(header)
+  const numericClauseGap = '(?:\\s+|(?=[+.-]?(?:[0-9]|\\.[0-9])))'
+  const cost = new RegExp(`\\bCOST${numericClauseGap}([^\\s;]+)`, 'iu').exec(header)
+  const rows = new RegExp(`\\bROWS${numericClauseGap}([^\\s;]+)`, 'iu').exec(header)
   const support = new RegExp(`\\bSUPPORT\\s+(${SQL_IDENTIFIER_SOURCE}(?:\\s*\\.\\s*${SQL_IDENTIFIER_SOURCE})?)`, 'iu').exec(header)
   if (!returnType || !language || !body) fail('Exact wrapper definition metadata is incomplete')
   const semantic = {
@@ -521,6 +560,10 @@ export function extractExactUploadWrapper(sql) {
     && parseSqlIdentifier(name).name === 'tokend_upload_events'
     && signatureTypes(parameters).join(',') === 'text,jsonb,jsonb'
   for (const [statementIndex, statement] of statements.entries()) {
+    if (/[Uu]&"/.test(statement)
+      && /\b(?:FUNCTION|FUNCTIONS|ROUTINE|ROUTINES)\b/i.test(statement)) {
+      fail('Exact wrapper has an unreviewed Unicode-escaped function or ACL mutation')
+    }
     if (defaultFunctionAclPattern.test(statement)) {
       const schemaScope = defaultAclSchemaPattern.exec(statement)
       if (!schemaScope || splitSqlList(schemaScope[1]).some(
@@ -1531,7 +1574,7 @@ export async function runActivationRehearsal({ runId, callAdmin, inspectState })
 
 export function validateReconciliation(report, expected) {
   for (const counter of ['missingRevisionCount', 'duplicateRevisionCount', 'breakdownInvalidCount', 'unexplainedMemberCount']) {
-    if (Number(report[counter]) !== 0) fail(`Reconciliation ${counter} must be zero`)
+    if (Number(report[counter]) !== 0) fail(`Reconciliation ${counter} must be zero; received ${report[counter]}`)
   }
   if (Number(report.targetCount) !== Number(report.revisionCount)) fail('Reconciliation targetCount must equal revisionCount')
   if (typeof report.reconciliationHash !== 'string' || report.reconciliationHash.length === 0) fail('Reconciliation authoritative hash is missing')
@@ -1846,7 +1889,7 @@ function childRows(payload, keys) {
   return []
 }
 
-async function deleteFixtureData({ state, http, includeMember, timestamp }) {
+async function deleteFixtureData({ state, http, includeMember, preserveBackfill = false, timestamp }) {
   const memberCode = state.fixture?.memberCode
   if (!memberCode) return state
   const filter = `member_code=eq.${encodeURIComponent(memberCode)}`
@@ -1880,7 +1923,7 @@ async function deleteFixtureData({ state, http, includeMember, timestamp }) {
     const remaining = await http.json(`tokend_members?select=member_code&${filter}`, { role: 'service', method: 'GET' })
     if (!Array.isArray(remaining) || remaining.length !== 0) fail('Fixture cleanup zero-row verification failed')
     delete next.fixture
-    delete next.backfill
+    if (!preserveBackfill) delete next.backfill
     return next
   }
   return { ...next, fixture: { ...state.fixture, resetAt: timestamp } }
@@ -2318,6 +2361,14 @@ export function createRolloutRunner(dependencies = {}) {
         http.json(`tokend_pricing_catalogs?select=hash&version=eq.${encodeURIComponent(state.catalogVersion)}`, { role: 'service', method: 'GET' }),
       ])
       if (!Array.isArray(catalogs) || catalogs.length !== 1 || catalogs[0].hash !== state.catalogHash) fail('Reconciliation catalog hash changed after backfill creation')
+      const pointers = {
+        activeCatalog: preflight.activeCatalogVersion,
+        previousCatalog: preflight.previousCatalogVersion,
+        activeRun: preflight.activeRunId,
+        previousRun: preflight.previousRunId,
+      }
+      const authoritative = { ...report, catalogHash: catalogs[0].hash, pointers }
+      validateReconciliation(authoritative, { catalogHash: state.catalogHash, pointers })
       if (backfill?.status !== 'reconciled' || runRow.status !== 'reconciled') fail('Backfill did not persist reconciled status')
       assertSameBackfillSnapshot(snapshotFromBackfillRow(runRow, state.backfillSnapshot.basePointers), state.backfillSnapshot)
       if (runRow.reconciliation_hash !== report.reconciliationHash
@@ -2327,18 +2378,10 @@ export function createRolloutRunner(dependencies = {}) {
         || exactNonnegativeInteger(backfill.targetCount, 'Backfill status targetCount').text !== state.backfillSnapshot.targetCount
         || exactNonnegativeInteger(backfill.revisionCount, 'Backfill status revisionCount').text !== state.backfillSnapshot.targetCount
         || exactNonnegativeInteger(backfill.remainingCount, 'Backfill status remainingCount').text !== '0') fail('Backfill status disagrees with frozen snapshot')
-      const pointers = {
-        activeCatalog: preflight.activeCatalogVersion,
-        previousCatalog: preflight.previousCatalogVersion,
-        activeRun: preflight.activeRunId,
-        previousRun: preflight.previousRunId,
-      }
       if (['activeCatalog', 'activeRun', 'previousCatalog', 'previousRun']
         .some(key => (pointers[key] ?? null) !== (state.backfillSnapshot.basePointers?.[key] ?? null))) {
         fail('Base pricing pointers changed before activation')
       }
-      const authoritative = { ...report, catalogHash: catalogs[0].hash, pointers }
-      validateReconciliation(authoritative, { catalogHash: state.catalogHash, pointers })
       const next = {
         ...state,
         pointers,
@@ -2616,7 +2659,9 @@ export function createRolloutRunner(dependencies = {}) {
     async cleanupOnFailure(stateFile) {
       if (!stateFile) return
       const state = await loadState(stateFile)
-      const next = await deleteFixtureData({ state, http, includeMember: true, timestamp: clock().toISOString() })
+      const next = await deleteFixtureData({
+        state, http, includeMember: true, preserveBackfill: true, timestamp: clock().toISOString(),
+      })
       await saveState(stateFile, next)
     },
   }

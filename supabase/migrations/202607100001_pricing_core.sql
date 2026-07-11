@@ -1376,7 +1376,7 @@ SELECT public.tokend_install_pricing_catalog('2026-07-10', 'c08b7254af1f5e8d29d1
 -- Keep the ACCESS EXCLUSIVE window on the existing 1.3 GB event table at the
 -- very end of the migration. All additions are metadata-only on PostgreSQL 17;
 -- existing rows are deliberately not scanned during the release transaction.
-SET LOCAL lock_timeout = '2s';
+SET lock_timeout = '2s';
 
 ALTER TABLE public.tokend_usage_events
   ADD COLUMN IF NOT EXISTS pricing_status TEXT,
@@ -1463,5 +1463,7 @@ BEGIN
   END IF;
 END
 $usage_constraints$;
+
+RESET lock_timeout;
 
 NOTIFY pgrst, 'reload schema';

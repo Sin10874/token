@@ -177,6 +177,76 @@ GRANT ALL ON FUNCTION "public"."tokend_upload_events"("p_token" "text", "p_event
 GRANT ALL ON FUNCTION "public"."tokend_upload_events"("p_token" "text", "p_events" "jsonb", "p_sync_states" "jsonb") TO "service_role";
 `
 
+const semanticMetadataWrapper = `
+CREATE FUNCTION public.tokend_upload_events(
+  p_token TEXT,
+  p_events JSONB,
+  p_sync_states JSONB
+)
+RETURNS JSON
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $semantic$
+BEGIN
+  RETURN json_build_object('ok', true);
+END;
+$semantic$;
+`
+
+test('wrapper gate accepts any valid PostgreSQL dollar tag without changing the body hash', () => {
+  const unicodeTag = semanticMetadataWrapper.replaceAll('$semantic$', '$标签$')
+  assert.equal(compareWrapperDefinitions(unicodeTag, semanticMetadataWrapper).wrapperGatePassed, true)
+})
+
+test('wrapper semantic hash rejects volatility, search_path, parameter name, and default drift', () => {
+  const drifts = [
+    semanticMetadataWrapper.replace('VOLATILE', 'IMMUTABLE'),
+    semanticMetadataWrapper.replace('public, pg_temp', 'attacker, pg_temp'),
+    semanticMetadataWrapper.replace('p_sync_states JSONB', 'renamed_sync_states JSONB'),
+    semanticMetadataWrapper.replace('p_sync_states JSONB', "p_sync_states JSONB DEFAULT '[]'::JSONB"),
+  ]
+  for (const drifted of drifts) {
+    assert.throws(
+      () => compareWrapperDefinitions(drifted, semanticMetadataWrapper),
+      /definition hash mismatch/i,
+    )
+  }
+})
+
+test('wrapper identity keeps quoted schema, function, and type identifiers case-sensitive', () => {
+  const drifts = [
+    semanticMetadataWrapper.replace('public.tokend_upload_events', '"PUBLIC"."tokend_upload_events"'),
+    semanticMetadataWrapper.replace('public.tokend_upload_events', '"public"."TOKEND_UPLOAD_EVENTS"'),
+    semanticMetadataWrapper.replace('p_token TEXT', 'p_token "TEXT"'),
+  ]
+  for (const drifted of drifts) {
+    assert.throws(
+      () => compareWrapperDefinitions(drifted, semanticMetadataWrapper),
+      /exact wrapper.*missing|definition hash mismatch/i,
+    )
+  }
+})
+
+test('wrapper ACL keeps quoted role names distinct from the PUBLIC pseudo-role', () => {
+  const restricted = `${semanticMetadataWrapper}
+REVOKE EXECUTE ON FUNCTION public.tokend_upload_events(TEXT, JSONB, JSONB) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.tokend_upload_events(TEXT, JSONB, JSONB) TO anon;
+`
+  const quotedRole = restricted.replace('FROM PUBLIC;', 'FROM "Public";')
+  assert.throws(() => compareWrapperDefinitions(quotedRole, restricted), /ACL mismatch/i)
+})
+
+test('wrapper ACL rejects grant-option privilege expansion after PUBLIC execute is revoked', () => {
+  const restricted = `${semanticMetadataWrapper}
+REVOKE EXECUTE ON FUNCTION public.tokend_upload_events(TEXT, JSONB, JSONB) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.tokend_upload_events(TEXT, JSONB, JSONB) TO anon;
+`
+  const expanded = restricted.replace('TO anon;', 'TO anon WITH GRANT OPTION;')
+  assert.throws(() => compareWrapperDefinitions(expanded, restricted), /ACL mismatch/i)
+})
+
 test('balanced wrapper parser preserves dollar bodies and canonicalizes only SQL trivia', () => {
   const crlf = wrapperBody.replace(/\n/g, '\r\n')
   const spaced = wrapperBody

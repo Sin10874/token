@@ -171,7 +171,7 @@ export function sha256(value) {
 }
 
 function dollarTagAt(sql, index) {
-  const match = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(index))
+  const match = /^\$(?:[_\p{ID_Start}][_\p{ID_Continue}]*)?\$/u.exec(sql.slice(index))
   return match?.[0] ?? null
 }
 
@@ -313,19 +313,82 @@ function splitSqlList(text) {
   return parts
 }
 
-function unquoteSqlIdentifiers(value) {
-  return value.replace(/"((?:[^"]|"")*)"/g, (_match, identifier) => identifier.replace(/""/g, '"'))
+const SQL_IDENTIFIER_SOURCE = '(?:"(?:[^"]|"")*"|[A-Za-z_\\u0080-\\uFFFF][A-Za-z0-9_$\\u0080-\\uFFFF]*)'
+const SQL_TYPE_SOURCE = `${SQL_IDENTIFIER_SOURCE}(?:\\s*\\.\\s*${SQL_IDENTIFIER_SOURCE})?(?:\\s*\\[\\s*\\])*`
+const DOLLAR_TAG_SOURCE = '\\$(?:[A-Za-z_\\u0080-\\uFFFF][A-Za-z0-9_\\u0080-\\uFFFF]*)?\\$'
+
+function parseSqlIdentifier(value) {
+  const source = value.trim()
+  if (source.startsWith('"') && source.endsWith('"')) {
+    return { name: source.slice(1, -1).replace(/""/g, '"'), quoted: true }
+  }
+  return { name: source.toLowerCase(), quoted: false }
+}
+
+function splitParameterDefault(parameter) {
+  let quote = null
+  let depth = 0
+  for (let index = 0; index < parameter.length; index += 1) {
+    const char = parameter[index]
+    if (quote) {
+      if (char === quote && parameter[index + 1] === quote) { index += 1; continue }
+      if (char === quote) quote = null
+      continue
+    }
+    if (char === "'" || char === '"') { quote = char; continue }
+    if (char === '(' || char === '[') { depth += 1; continue }
+    if (char === ')' || char === ']') { depth -= 1; continue }
+    if (depth !== 0) continue
+    if (char === '=') {
+      return { declaration: parameter.slice(0, index).trim(), defaultExpression: parameter.slice(index + 1).trim() }
+    }
+    const keyword = /^DEFAULT\b/i.exec(parameter.slice(index))
+    if (keyword && (index === 0 || /\s/.test(parameter[index - 1]))) {
+      return {
+        declaration: parameter.slice(0, index).trim(),
+        defaultExpression: parameter.slice(index + keyword[0].length).trim(),
+      }
+    }
+  }
+  return { declaration: parameter.trim(), defaultExpression: null }
+}
+
+function normalizeSqlType(value) {
+  const source = value.trim()
+  const match = new RegExp(`^(${SQL_IDENTIFIER_SOURCE})(?:\\s*\\.\\s*(${SQL_IDENTIFIER_SOURCE}))?((?:\\s*\\[\\s*\\])*)$`, 'u').exec(source)
+  if (!match) return canonicalizeSql(source).replace(/;$/, '')
+  const first = parseSqlIdentifier(match[1]).name
+  const second = match[2] ? parseSqlIdentifier(match[2]).name : null
+  const schema = second ? first : null
+  const type = second ?? first
+  const dimensions = (match[3].match(/\[/g) ?? []).length
+  const qualified = schema && schema !== 'pg_catalog' ? `${schema}.${type}` : type
+  return `${qualified}${'[]'.repeat(dimensions)}`
+}
+
+function parseSqlParameter(parameter) {
+  const { declaration: rawDeclaration, defaultExpression } = splitParameterDefault(parameter)
+  let declaration = rawDeclaration
+  let mode = 'in'
+  const modeMatch = /^(INOUT|IN|OUT|VARIADIC)\b\s*/i.exec(declaration)
+  if (modeMatch) {
+    mode = modeMatch[1].toLowerCase()
+    declaration = declaration.slice(modeMatch[0].length).trim()
+  }
+  const named = new RegExp(`^(${SQL_IDENTIFIER_SOURCE})\\s+([\\s\\S]+)$`, 'u').exec(declaration)
+  return {
+    name: named ? parseSqlIdentifier(named[1]).name : null,
+    mode,
+    type: normalizeSqlType(named ? named[2] : declaration),
+    defaultExpression: defaultExpression === null
+      ? null
+      : canonicalizeSql(defaultExpression).replace(/;$/, ''),
+  }
 }
 
 function signatureTypes(parameterText) {
   if (!parameterText.trim()) return []
-  return splitSqlList(parameterText).map(parameter => {
-    const withoutDefault = parameter.replace(/\s+DEFAULT[\s\S]*$/i, '')
-    const normalized = unquoteSqlIdentifiers(withoutDefault).trim().toLowerCase()
-      .replace(/\bpg_catalog\s*\.\s*/g, '')
-      .replace(/^(?:in|out|inout|variadic)\s+/i, '')
-    return normalized.split(/\s+/).at(-1)
-  })
+  return splitSqlList(parameterText).map(parameter => parseSqlParameter(parameter).type)
 }
 
 function sqlIdentifierPattern(identifier) {
@@ -338,33 +401,58 @@ function qualifiedPublicFunctionPattern(name) {
 }
 
 function normalizeSqlRole(role) {
-  const normalized = unquoteSqlIdentifiers(role.trim())
-  return /^public$/i.test(normalized) ? 'PUBLIC' : normalized
+  const parsed = parseSqlIdentifier(role)
+  if (!parsed.quoted && parsed.name === 'public') return 'PUBLIC'
+  if (parsed.quoted && parsed.name.toLowerCase() === 'public') return `"${parsed.name.replace(/"/g, '""')}"`
+  return parsed.name
 }
 
 const WRAPPER_SIGNATURE = 'public.tokend_upload_events(text,jsonb,jsonb)'
-
-function normalizeSqlType(value) {
-  return unquoteSqlIdentifiers(value).trim().toLowerCase()
-    .replace(/\s+/g, '')
-    .replace(/^pg_catalog\./, '')
-}
 
 function normalizeFunctionBody(value) {
   return value.replace(/\r\n?/g, '\n').trim()
 }
 
+function normalizeSettingValue(value) {
+  return splitSqlList(value).map(rawValue => {
+    const item = rawValue.trim()
+    if (/^'(?:[^']|'')*'$/.test(item)) return item.slice(1, -1).replace(/''/g, "'")
+    if (new RegExp(`^${SQL_IDENTIFIER_SOURCE}$`, 'u').test(item)) return parseSqlIdentifier(item).name
+    return canonicalizeSql(item).replace(/;$/, '')
+  }).join(',')
+}
+
+function parseFunctionSettings(header) {
+  const settings = []
+  const nextClause = '(?:SET|LANGUAGE|TRANSFORM|WINDOW|IMMUTABLE|STABLE|VOLATILE|LEAKPROOF|NOT\\s+LEAKPROOF|CALLED\\s+ON\\s+NULL\\s+INPUT|RETURNS\\s+NULL\\s+ON\\s+NULL\\s+INPUT|STRICT|EXTERNAL\\s+SECURITY|SECURITY|PARALLEL|COST|ROWS|SUPPORT)'
+  const pattern = new RegExp(`\\bSET\\s+(${SQL_IDENTIFIER_SOURCE})\\s+(?:TO\\s+|=\\s*)([\\s\\S]*?)(?=\\s+${nextClause}\\b|$)`, 'giu')
+  for (const match of header.matchAll(pattern)) {
+    settings.push({ name: parseSqlIdentifier(match[1]).name, value: normalizeSettingValue(match[2]) })
+  }
+  return settings.sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)))
+}
+
 function parseWrapperDefinition(statement, parameterText) {
-  const returnType = /\bRETURNS\s+((?:"(?:""|[^"])*"|[A-Za-z_][A-Za-z0-9_$]*)(?:\s*\.\s*(?:"(?:""|[^"])*"|[A-Za-z_][A-Za-z0-9_$]*))?(?:\s*\[\s*\])*)/i.exec(statement)
-  const language = /\bLANGUAGE\s+("(?:""|[^"])*"|[A-Za-z_][A-Za-z0-9_$]*)/i.exec(statement)
-  const security = /\bSECURITY\s+(DEFINER|INVOKER)\b/i.exec(statement)
-  const body = /\bAS\s+(\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$)([\s\S]*?)\1\s*;?$/i.exec(statement)
+  const body = new RegExp(`\\bAS\\s+(${DOLLAR_TAG_SOURCE})([\\s\\S]*?)\\1\\s*;?$`, 'iu').exec(statement)
+  const header = body ? statement.slice(0, body.index) : statement
+  const returnType = new RegExp(`\\bRETURNS\\s+(${SQL_TYPE_SOURCE})`, 'iu').exec(header)
+  const language = new RegExp(`\\bLANGUAGE\\s+(${SQL_IDENTIFIER_SOURCE})`, 'iu').exec(header)
+  const security = /\bSECURITY\s+(DEFINER|INVOKER)\b/i.exec(header)
+  const volatility = /\b(IMMUTABLE|STABLE|VOLATILE)\b/i.exec(header)
+  const parallel = /\bPARALLEL\s+(UNSAFE|RESTRICTED|SAFE)\b/i.exec(header)
   if (!returnType || !language || !body) fail('Exact wrapper definition metadata is incomplete')
   const semantic = {
     signature: `public.tokend_upload_events(${signatureTypes(parameterText).join(',')})`,
+    parameters: splitSqlList(parameterText).map(parseSqlParameter),
     returnType: normalizeSqlType(returnType[1]),
-    language: unquoteSqlIdentifiers(language[1]).toLowerCase(),
+    language: parseSqlIdentifier(language[1]).name,
+    volatility: volatility?.[1].toLowerCase() ?? 'volatile',
     securityDefiner: security?.[1].toUpperCase() === 'DEFINER',
+    settings: parseFunctionSettings(header),
+    strict: /\bSTRICT\b|\bRETURNS\s+NULL\s+ON\s+NULL\s+INPUT\b/i.test(header),
+    leakproof: /\bLEAKPROOF\b/i.test(header) && !/\bNOT\s+LEAKPROOF\b/i.test(header),
+    parallel: parallel?.[1].toLowerCase() ?? 'unsafe',
+    window: /\bWINDOW\b/i.test(header),
     body: normalizeFunctionBody(body[2]),
   }
   return { semantic, hash: sha256(JSON.stringify(semantic)) }
@@ -376,25 +464,47 @@ export function extractExactUploadWrapper(sql) {
   const wrappers = []
   const aclTuples = []
   let publicExecute = true
-  const namedGrants = new Set()
-  const functionPattern = qualifiedPublicFunctionPattern('tokend_upload_events')
-  const definitionPattern = new RegExp(`^CREATE(?: OR REPLACE)? FUNCTION\\s+${functionPattern}\\s*\\(([\\s\\S]*?)\\)\\s*RETURNS\\b`, 'i')
-  const aclPattern = new RegExp(`^(GRANT\\s+(?:ALL(?: PRIVILEGES)?|EXECUTE)|REVOKE\\s+(?:ALL(?: PRIVILEGES)?|EXECUTE))\\s+ON\\s+FUNCTION\\s+${functionPattern}\\s*\\(([^)]*)\\)\\s+(TO|FROM)\\s+([\\s\\S]*?)(?:\\s+WITH GRANT OPTION|\\s+(?:CASCADE|RESTRICT))?;?$`, 'i')
+  let publicGrantOption = false
+  const namedGrants = new Map()
+  const definitionPattern = new RegExp(`^CREATE(?: OR REPLACE)? FUNCTION\\s+(${SQL_IDENTIFIER_SOURCE})\\s*\\.\\s*(${SQL_IDENTIFIER_SOURCE})\\s*\\(([\\s\\S]*?)\\)\\s*RETURNS\\b`, 'iu')
+  const aclPattern = new RegExp(`^(GRANT|REVOKE)\\s+(GRANT\\s+OPTION\\s+FOR\\s+)?(?:ALL(?:\\s+PRIVILEGES)?|EXECUTE)\\s+ON\\s+FUNCTION\\s+(${SQL_IDENTIFIER_SOURCE})\\s*\\.\\s*(${SQL_IDENTIFIER_SOURCE})\\s*\\(([^)]*)\\)\\s+(TO|FROM)\\s+([^;]+);?$`, 'iu')
   for (const statement of statements) {
     const header = definitionPattern.exec(statement)
-    if (header && signatureTypes(header[1]).join(',') === 'text,jsonb,jsonb') {
-      wrappers.push({ statement, parameterText: header[1] })
+    if (header
+      && parseSqlIdentifier(header[1]).name === 'public'
+      && parseSqlIdentifier(header[2]).name === 'tokend_upload_events'
+      && signatureTypes(header[3]).join(',') === 'text,jsonb,jsonb') {
+      wrappers.push({ statement, parameterText: header[3] })
     }
     const acl = aclPattern.exec(statement)
-    if (acl && signatureTypes(acl[2]).join(',') === 'text,jsonb,jsonb') {
-      const action = acl[1].toUpperCase().startsWith('GRANT') ? 'GRANT' : 'REVOKE'
-      for (const rawRole of splitSqlList(acl[4])) {
+    if (acl
+      && parseSqlIdentifier(acl[3]).name === 'public'
+      && parseSqlIdentifier(acl[4]).name === 'tokend_upload_events'
+      && signatureTypes(acl[5]).join(',') === 'text,jsonb,jsonb') {
+      const action = acl[1].toUpperCase()
+      if ((action === 'GRANT' && acl[6].toUpperCase() !== 'TO') || (action === 'REVOKE' && acl[6].toUpperCase() !== 'FROM')) continue
+      const grantOptionOnly = action === 'REVOKE' && Boolean(acl[2])
+      let roleList = acl[7].trim()
+      const withGrantOption = action === 'GRANT' && /\s+WITH\s+GRANT\s+OPTION$/i.test(roleList)
+      if (withGrantOption) roleList = roleList.replace(/\s+WITH\s+GRANT\s+OPTION$/i, '').trim()
+      if (action === 'REVOKE') roleList = roleList.replace(/\s+(?:CASCADE|RESTRICT)$/i, '').trim()
+      for (const rawRole of splitSqlList(roleList)) {
         const role = normalizeSqlRole(rawRole)
-        aclTuples.push(`${action}:${role}`)
+        aclTuples.push(`${grantOptionOnly ? 'REVOKE_GRANT_OPTION' : action}:${role}`)
         if (role === 'PUBLIC') {
-          publicExecute = action === 'GRANT'
+          if (action === 'GRANT') {
+            publicExecute = true
+            publicGrantOption ||= withGrantOption
+          } else if (grantOptionOnly) {
+            publicGrantOption = false
+          } else {
+            publicExecute = false
+            publicGrantOption = false
+          }
         } else if (action === 'GRANT') {
-          namedGrants.add(role)
+          namedGrants.set(role, Boolean(namedGrants.get(role)) || withGrantOption)
+        } else if (grantOptionOnly) {
+          if (namedGrants.has(role)) namedGrants.set(role, false)
         } else {
           namedGrants.delete(role)
         }
@@ -405,9 +515,13 @@ export function extractExactUploadWrapper(sql) {
   if (wrappers.length !== 1) fail('Exact wrapper definition is ambiguous')
   const definition = wrappers[0].statement
   const parsed = parseWrapperDefinition(definition, wrappers[0].parameterText)
-  const effectiveAcl = publicExecute
-    ? { publicExecute: true, namedGrants: [] }
-    : { publicExecute: false, namedGrants: [...namedGrants].sort() }
+  const exactNamedGrants = [...namedGrants.entries()]
+    .map(([role, grantOption]) => ({ role, grantOption }))
+    .sort((left, right) => left.role.localeCompare(right.role))
+  const effectiveNamedGrants = publicExecute
+    ? (publicGrantOption ? [] : exactNamedGrants.filter(grant => grant.grantOption))
+    : exactNamedGrants
+  const effectiveAcl = { publicExecute, publicGrantOption, namedGrants: effectiveNamedGrants }
   return {
     signature: WRAPPER_SIGNATURE,
     definition,
@@ -427,7 +541,9 @@ export function compareWrapperDefinitions(liveSql, reviewedSql) {
     wrapperGatePassed: true,
     wrapperHash: live.hash,
     aclHash: live.aclHash,
-    roleNames: live.effectiveAcl.publicExecute ? ['PUBLIC'] : live.effectiveAcl.namedGrants,
+    roleNames: live.effectiveAcl.publicExecute
+      ? ['PUBLIC', ...live.effectiveAcl.namedGrants.map(grant => grant.role)]
+      : live.effectiveAcl.namedGrants.map(grant => grant.role),
   }
 }
 

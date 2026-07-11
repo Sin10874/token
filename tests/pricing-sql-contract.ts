@@ -1177,10 +1177,29 @@ function testPricingRollbackIsTransactionalSurgicalAndRestoresExactLegacyWrapper
   const legacyBody = legacy.match(/CREATE OR REPLACE FUNCTION tokend_upload_events\([\s\S]*?\n\$\$;/i)
   const rollbackBody = rollback.match(/CREATE FUNCTION public\.tokend_upload_events\([\s\S]*?\n\$\$;/i)
   assert.ok(legacyBody && rollbackBody)
+  const normalizedHardenedBody = rollbackBody[0]
+    .replace(/\nSET search_path\s*=\s*public\s*,\s*pg_temp\s*/i, '\n')
+    .replace(/\bpublic\.(tokend_(?:members|model_prices|usage_events|sync_state))\b/g, '$1')
   assert.equal(
-    rollbackBody[0].replace('CREATE FUNCTION public.', 'CREATE OR REPLACE FUNCTION '),
+    normalizedHardenedBody.replace('CREATE FUNCTION public.', 'CREATE OR REPLACE FUNCTION '),
     legacyBody[0],
-    'rollback wrapper body must byte-match v12 apart from DROP plus CREATE form',
+    'rollback wrapper business body must byte-match v12 apart from reviewed security hardening',
+  )
+  assert.match(rollbackBody[0], /SECURITY DEFINER\s+SET search_path\s*=\s*public\s*,\s*pg_temp/i)
+  for (const relation of ['tokend_members', 'tokend_model_prices']) {
+    assert.match(rollbackBody[0], new RegExp(`FROM\\s+public\\.${relation}\\b`, 'i'))
+  }
+  for (const relation of ['tokend_usage_events', 'tokend_sync_state']) {
+    assert.match(rollbackBody[0], new RegExp(`INSERT\\s+INTO\\s+public\\.${relation}\\b`, 'i'))
+  }
+  assert.match(rollbackBody[0], /public\.tokend_usage_events\.project/i)
+  assert.match(
+    rollback,
+    /REVOKE ALL ON FUNCTION public\.tokend_upload_events\(TEXT, JSONB, JSONB\) FROM PUBLIC, anon, authenticated, service_role;/i,
+  )
+  assert.match(
+    rollback,
+    /GRANT EXECUTE ON FUNCTION public\.tokend_upload_events\(TEXT, JSONB, JSONB\) TO anon, authenticated;/i,
   )
   assert.match(
     rollback,

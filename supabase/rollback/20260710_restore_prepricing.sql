@@ -10,13 +10,14 @@ CREATE FUNCTION public.tokend_upload_events(
 RETURNS JSON
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_code  TEXT;
   v_count INTEGER;
 BEGIN
   SELECT member_code INTO v_code
-    FROM tokend_members
+    FROM public.tokend_members
    WHERE token = p_token
    LIMIT 1;
 
@@ -39,7 +40,7 @@ BEGIN
       pr.cache_write_price, pr.per_tokens
     FROM deduped d
     LEFT JOIN LATERAL (
-      SELECT p.* FROM tokend_model_prices p
+      SELECT p.* FROM public.tokend_model_prices p
       WHERE p.model_id = d.x->>'model'
          OR (d.x->>'model' ~ '-\d{8,}$'
              AND p.model_id = regexp_replace(d.x->>'model', '-\d{8,}$', ''))
@@ -48,7 +49,7 @@ BEGIN
     ) pr ON TRUE
   ),
   ins AS (
-    INSERT INTO tokend_usage_events (
+    INSERT INTO public.tokend_usage_events (
       id, member_code, timestamp_ms, session_id, session_key,
       agent, provider, model, channel,
       input_tokens, output_tokens, reasoning_tokens,
@@ -100,7 +101,7 @@ BEGIN
       LEFT(d.x->>'project', 256)
     FROM enriched d
     ON CONFLICT (id, member_code) DO UPDATE SET
-      project = COALESCE(EXCLUDED.project, tokend_usage_events.project)
+      project = COALESCE(EXCLUDED.project, public.tokend_usage_events.project)
     RETURNING 1
   )
   SELECT COUNT(*) INTO v_count FROM ins;
@@ -110,7 +111,7 @@ BEGIN
     FROM jsonb_array_elements(p_sync_states) AS s
     ORDER BY s->>'sourcePathHash'
   )
-  INSERT INTO tokend_sync_state (
+  INSERT INTO public.tokend_sync_state (
     member_code, source_path_hash, last_processed_lines,
     parser_version, last_sync_at
   )
@@ -130,6 +131,9 @@ BEGIN
   RETURN json_build_object('ok', true, 'inserted', v_count);
 END;
 $$;
+
+REVOKE ALL ON FUNCTION public.tokend_upload_events(TEXT, JSONB, JSONB) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.tokend_upload_events(TEXT, JSONB, JSONB) TO anon, authenticated;
 
 DROP FUNCTION IF EXISTS public.tokend_upload_events_v2(TEXT, JSONB, JSONB);
 

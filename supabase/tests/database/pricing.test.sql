@@ -3248,11 +3248,38 @@ SELECT ok(
 
 SELECT ok(
   (
-    SELECT proc.prosecdef AND proc.proacl IS NULL
+    SELECT proc.prosecdef
+      AND proc.proconfig = ARRAY['search_path=public, pg_temp']::TEXT[]
     FROM pg_proc AS proc
     WHERE proc.oid = 'public.tokend_upload_events(text,jsonb,jsonb)'::regprocedure
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM pg_proc AS proc
+    CROSS JOIN LATERAL aclexplode(
+      COALESCE(proc.proacl, acldefault('f', proc.proowner))
+    ) AS privilege
+    WHERE proc.oid = 'public.tokend_upload_events(text,jsonb,jsonb)'::regprocedure
+      AND privilege.privilege_type = 'EXECUTE'
+      AND (
+        privilege.grantee = 0
+        OR privilege.grantee = 'service_role'::regrole
+        OR (
+          privilege.grantee IN ('anon'::regrole, 'authenticated'::regrole)
+          AND privilege.is_grantable
+        )
+      )
+  )
+  AND has_function_privilege(
+    'anon', 'public.tokend_upload_events(text,jsonb,jsonb)', 'EXECUTE'
+  )
+  AND has_function_privilege(
+    'authenticated', 'public.tokend_upload_events(text,jsonb,jsonb)', 'EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    'service_role', 'public.tokend_upload_events(text,jsonb,jsonb)', 'EXECUTE'
   ),
-  'restored legacy wrapper uses SECURITY DEFINER with default function ACL'
+  'restored legacy wrapper fixes search_path and grants only anon authenticated without grant option'
 );
 
 SELECT results_eq(

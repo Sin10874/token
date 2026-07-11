@@ -417,6 +417,16 @@ function normalizeSqlRole(role) {
 }
 
 const WRAPPER_SIGNATURE = 'public.tokend_upload_events(text,jsonb,jsonb)'
+const LEGACY_WRAPPER_GRANTS = ['anon', 'authenticated', 'service_role']
+const HARDENED_WRAPPER_GRANTS = ['anon', 'authenticated']
+const LEGACY_WRAPPER_ACL_TUPLES = LEGACY_WRAPPER_GRANTS.map(role => `GRANT:${role}`).sort()
+const HARDENED_WRAPPER_ACL_TUPLES = [
+  'REVOKE:PUBLIC', 'REVOKE:anon', 'REVOKE:authenticated', 'REVOKE:service_role',
+  'GRANT:anon', 'GRANT:authenticated',
+].sort()
+const LEGACY_WRAPPER_RELATIONS = [
+  'tokend_members', 'tokend_model_prices', 'tokend_usage_events', 'tokend_sync_state',
+]
 
 function normalizeFunctionBody(value) {
   return value.replace(/\r\n?/g, '\n').trim()
@@ -434,11 +444,23 @@ function normalizeSettingValue(value) {
 function parseFunctionSettings(header) {
   const settings = []
   const nextClause = '(?:SET|LANGUAGE|TRANSFORM|WINDOW|IMMUTABLE|STABLE|VOLATILE|LEAKPROOF|NOT\\s+LEAKPROOF|CALLED\\s+ON\\s+NULL\\s+INPUT|RETURNS\\s+NULL\\s+ON\\s+NULL\\s+INPUT|STRICT|EXTERNAL\\s+SECURITY|SECURITY|PARALLEL|COST|ROWS|SUPPORT)'
-  const pattern = new RegExp(`\\bSET\\s+(${SQL_IDENTIFIER_SOURCE})\\s+(?:TO\\s+|=\\s*)([\\s\\S]*?)(?=\\s+${nextClause}\\b|$)`, 'giu')
+  const pattern = new RegExp(`\\bSET\\s+(${SQL_IDENTIFIER_SOURCE})\\s*(?:FROM\\s+(CURRENT)\\s*|(?:TO\\s+|=\\s*)([\\s\\S]*?))(?=\\s+${nextClause}\\b|$)`, 'giu')
   for (const match of header.matchAll(pattern)) {
-    settings.push({ name: parseSqlIdentifier(match[1]).name, value: normalizeSettingValue(match[2]) })
+    settings.push({
+      name: parseSqlIdentifier(match[1]).name,
+      value: match[2] ? 'from current' : normalizeSettingValue(match[3]),
+    })
   }
   return settings.sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)))
+}
+
+function parseQualifiedIdentifier(value) {
+  return value.split(/\s*\.\s*/).map(part => parseSqlIdentifier(part).name).join('.')
+}
+
+function parseFunctionTransforms(header) {
+  const pattern = new RegExp(`\\bTRANSFORM\\s+FOR\\s+TYPE\\s+(${SQL_TYPE_SOURCE})`, 'giu')
+  return [...header.matchAll(pattern)].map(match => normalizeSqlType(match[1])).sort()
 }
 
 function parseWrapperDefinition(statement, parameterText) {
@@ -449,6 +471,9 @@ function parseWrapperDefinition(statement, parameterText) {
   const security = /\bSECURITY\s+(DEFINER|INVOKER)\b/i.exec(header)
   const volatility = /\b(IMMUTABLE|STABLE|VOLATILE)\b/i.exec(header)
   const parallel = /\bPARALLEL\s+(UNSAFE|RESTRICTED|SAFE)\b/i.exec(header)
+  const cost = /\bCOST\s+([0-9]+(?:\.[0-9]+)?)/i.exec(header)
+  const rows = /\bROWS\s+([0-9]+(?:\.[0-9]+)?)/i.exec(header)
+  const support = new RegExp(`\\bSUPPORT\\s+(${SQL_IDENTIFIER_SOURCE}(?:\\s*\\.\\s*${SQL_IDENTIFIER_SOURCE})?)`, 'iu').exec(header)
   if (!returnType || !language || !body) fail('Exact wrapper definition metadata is incomplete')
   const semantic = {
     signature: `public.tokend_upload_events(${signatureTypes(parameterText).join(',')})`,
@@ -462,6 +487,10 @@ function parseWrapperDefinition(statement, parameterText) {
     leakproof: /\bLEAKPROOF\b/i.test(header) && !/\bNOT\s+LEAKPROOF\b/i.test(header),
     parallel: parallel?.[1].toLowerCase() ?? 'unsafe',
     window: /\bWINDOW\b/i.test(header),
+    cost: cost?.[1] ?? null,
+    rows: rows?.[1] ?? null,
+    support: support ? parseQualifiedIdentifier(support[1]) : null,
+    transforms: parseFunctionTransforms(header),
     body: normalizeFunctionBody(body[2]),
   }
   return { semantic, hash: sha256(JSON.stringify(semantic)) }
@@ -474,27 +503,70 @@ export function extractExactUploadWrapper(sql) {
   const aclTuples = []
   let publicExecute = true
   let publicGrantOption = false
+  let grantOptionGranted = false
   const namedGrants = new Map()
+  const wrapperDrops = []
+  const wrapperOwners = []
+  const wrapperAclStatements = []
+  const defaultFunctionAclStatements = []
   const definitionPattern = new RegExp(`^CREATE(?: OR REPLACE)? FUNCTION\\s+(${SQL_IDENTIFIER_SOURCE})\\s*\\.\\s*(${SQL_IDENTIFIER_SOURCE})\\s*\\(([\\s\\S]*?)\\)\\s*RETURNS\\b`, 'iu')
-  const aclPattern = new RegExp(`^(GRANT|REVOKE)\\s+(GRANT\\s+OPTION\\s+FOR\\s+)?(?:ALL(?:\\s+PRIVILEGES)?|EXECUTE)\\s+ON\\s+FUNCTION\\s+(${SQL_IDENTIFIER_SOURCE})\\s*\\.\\s*(${SQL_IDENTIFIER_SOURCE})\\s*\\(([^)]*)\\)\\s+(TO|FROM)\\s+([^;]+);?$`, 'iu')
-  for (const statement of statements) {
-    const header = definitionPattern.exec(statement)
-    if (header
-      && parseSqlIdentifier(header[1]).name === 'public'
-      && parseSqlIdentifier(header[2]).name === 'tokend_upload_events'
-      && signatureTypes(header[3]).join(',') === 'text,jsonb,jsonb') {
-      wrappers.push({ statement, parameterText: header[3] })
+  const aclPattern = new RegExp(`^(GRANT|REVOKE)\\s+(GRANT\\s+OPTION\\s+FOR\\s+)?(?:ALL(?:\\s+PRIVILEGES)?|EXECUTE)\\s+ON\\s+(?:FUNCTION|ROUTINE)\\s+(${SQL_IDENTIFIER_SOURCE})\\s*\\.\\s*(${SQL_IDENTIFIER_SOURCE})\\s*\\(([^)]*)\\)\\s+(TO|FROM)\\s+([^;]+);?$`, 'iu')
+  const alterPattern = new RegExp(`^ALTER\\s+(?:FUNCTION|ROUTINE)\\s+(${SQL_IDENTIFIER_SOURCE})\\s*\\.\\s*(${SQL_IDENTIFIER_SOURCE})\\s*\\(([^)]*)\\)\\s+([\\s\\S]+?);?$`, 'iu')
+  const dropPattern = new RegExp(`^DROP\\s+(?:FUNCTION|ROUTINE)\\s+(?:IF\\s+EXISTS\\s+)?(${SQL_IDENTIFIER_SOURCE})\\s*\\.\\s*(${SQL_IDENTIFIER_SOURCE})\\s*\\(([^)]*)\\)(?:\\s+(?:CASCADE|RESTRICT))?;?$`, 'iu')
+  const allFunctionsAclPattern = /^(?:GRANT|REVOKE)\b[\s\S]*?\bON\s+ALL\s+(?:FUNCTIONS|ROUTINES)\s+IN\s+SCHEMA\s+([\s\S]*?)\s+(?:TO|FROM)\b/iu
+  const defaultFunctionAclPattern = /^ALTER\s+DEFAULT\s+PRIVILEGES\b[\s\S]*?\b(?:GRANT|REVOKE)\b[\s\S]*?\bON\s+(?:FUNCTIONS|ROUTINES)\b/iu
+  const defaultAclSchemaPattern = /\bIN\s+SCHEMA\s+([\s\S]*?)\s+(?=GRANT|REVOKE)\b/iu
+  const mentionsWrapper = statement => /(?:^|[^A-Za-z0-9_$])(?:"tokend_upload_events"|tokend_upload_events)(?![A-Za-z0-9_$])/i.test(statement)
+  const isExactIdentity = (schema, name, parameters) => parseSqlIdentifier(schema).name === 'public'
+    && parseSqlIdentifier(name).name === 'tokend_upload_events'
+    && signatureTypes(parameters).join(',') === 'text,jsonb,jsonb'
+  for (const [statementIndex, statement] of statements.entries()) {
+    if (defaultFunctionAclPattern.test(statement)) {
+      const schemaScope = defaultAclSchemaPattern.exec(statement)
+      if (!schemaScope || splitSqlList(schemaScope[1]).some(
+        schema => parseSqlIdentifier(schema).name === 'public',
+      )) {
+        defaultFunctionAclStatements.push(statementIndex)
+      }
     }
+    const schemaAcl = allFunctionsAclPattern.exec(statement)
+    if (schemaAcl && splitSqlList(schemaAcl[1]).some(
+      schema => parseSqlIdentifier(schema).name === 'public',
+    )) {
+      fail('Exact wrapper has an unreviewed ACL mutation')
+    }
+    const header = definitionPattern.exec(statement)
+    if (header && isExactIdentity(header[1], header[2], header[3])) {
+      wrappers.push({ statement, parameterText: header[3], statementIndex })
+    }
+
+    const altered = alterPattern.exec(statement)
+    if (altered && isExactIdentity(altered[1], altered[2], altered[3])) {
+      const owner = new RegExp(`^OWNER\\s+TO\\s+(${SQL_IDENTIFIER_SOURCE});?$`, 'iu').exec(altered[4])
+      if (!owner || parseSqlIdentifier(owner[1]).name !== 'postgres') {
+        fail('Exact wrapper has an unreviewed post-create mutation')
+      }
+      wrapperOwners.push(statementIndex)
+    } else if (/^ALTER\s+(?:FUNCTION|ROUTINE)\b/i.test(statement) && mentionsWrapper(statement)) {
+      fail('Exact wrapper has an unreviewed post-create mutation')
+    }
+
+    const dropped = dropPattern.exec(statement)
+    if (dropped && isExactIdentity(dropped[1], dropped[2], dropped[3])) {
+      wrapperDrops.push(statementIndex)
+    } else if (/^DROP\s+(?:FUNCTION|ROUTINE)\b/i.test(statement) && mentionsWrapper(statement)) {
+      fail('Exact wrapper has an unreviewed drop mutation')
+    }
+
     const acl = aclPattern.exec(statement)
-    if (acl
-      && parseSqlIdentifier(acl[3]).name === 'public'
-      && parseSqlIdentifier(acl[4]).name === 'tokend_upload_events'
-      && signatureTypes(acl[5]).join(',') === 'text,jsonb,jsonb') {
+    if (acl && isExactIdentity(acl[3], acl[4], acl[5])) {
+      wrapperAclStatements.push(statementIndex)
       const action = acl[1].toUpperCase()
       if ((action === 'GRANT' && acl[6].toUpperCase() !== 'TO') || (action === 'REVOKE' && acl[6].toUpperCase() !== 'FROM')) continue
       const grantOptionOnly = action === 'REVOKE' && Boolean(acl[2])
       let roleList = acl[7].trim()
       const withGrantOption = action === 'GRANT' && /\s+WITH\s+GRANT\s+OPTION$/i.test(roleList)
+      grantOptionGranted ||= withGrantOption
       if (withGrantOption) roleList = roleList.replace(/\s+WITH\s+GRANT\s+OPTION$/i, '').trim()
       if (action === 'REVOKE') roleList = roleList.replace(/\s+(?:CASCADE|RESTRICT)$/i, '').trim()
       for (const rawRole of splitSqlList(roleList)) {
@@ -518,10 +590,24 @@ export function extractExactUploadWrapper(sql) {
           namedGrants.delete(role)
         }
       }
+    } else if (/^(?:GRANT|REVOKE)\b/i.test(statement) && mentionsWrapper(statement)) {
+      fail('Exact wrapper has an unreviewed ACL mutation')
     }
   }
   if (wrappers.length === 0) fail('Exact wrapper definition missing')
   if (wrappers.length !== 1) fail('Exact wrapper definition is ambiguous')
+  if (wrapperOwners.length > 1 || wrapperOwners.some(index => index < wrappers[0].statementIndex)) {
+    fail('Exact wrapper has an unreviewed owner mutation')
+  }
+  if (wrapperDrops.length > 1 || wrapperDrops.some(index => index > wrappers[0].statementIndex)) {
+    fail('Exact wrapper has an unreviewed drop mutation')
+  }
+  if (wrapperAclStatements.some(index => index < wrappers[0].statementIndex)) {
+    fail('Exact wrapper has an unreviewed ACL mutation')
+  }
+  if (defaultFunctionAclStatements.some(index => index < wrappers[0].statementIndex)) {
+    fail('Exact wrapper has an unreviewed default ACL mutation')
+  }
   const definition = wrappers[0].statement
   const parsed = parseWrapperDefinition(definition, wrappers[0].parameterText)
   const exactNamedGrants = [...namedGrants.entries()]
@@ -534,25 +620,99 @@ export function extractExactUploadWrapper(sql) {
   return {
     signature: WRAPPER_SIGNATURE,
     definition,
+    semantic: parsed.semantic,
     hash: parsed.hash,
     aclTuples: aclTuples.sort(),
+    namedGrants: exactNamedGrants,
+    grantOptionGranted,
     effectiveAcl,
     aclHash: sha256(JSON.stringify(effectiveAcl)),
   }
 }
 
+function sameJson(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
+function qualifyLegacyWrapperRelations(body) {
+  const relationPattern = LEGACY_WRAPPER_RELATIONS.join('|')
+  return body.replace(
+    new RegExp(`(?<![A-Za-z0-9_$".])(${relationPattern})\\b`, 'g'),
+    'public.$1',
+  )
+}
+
+function isKnownLegacyHardeningDefinition(live, reviewed) {
+  if (!sameJson(live.semantic.settings, [])) return false
+  const expected = {
+    ...live.semantic,
+    settings: [{ name: 'search_path', value: 'public,pg_temp' }],
+    body: qualifyLegacyWrapperRelations(live.semantic.body),
+  }
+  return sameJson(reviewed.semantic, expected)
+}
+
+function hasExactNamedGrants(wrapper, roles) {
+  return sameJson(
+    wrapper.namedGrants,
+    [...roles].sort().map(role => ({ role, grantOption: false })),
+  )
+}
+
+function hasKnownLegacyAcl(wrapper) {
+  return wrapper.effectiveAcl.publicExecute
+    && !wrapper.effectiveAcl.publicGrantOption
+    && sameJson(wrapper.aclTuples, LEGACY_WRAPPER_ACL_TUPLES)
+    && hasExactNamedGrants(wrapper, LEGACY_WRAPPER_GRANTS)
+}
+
+function hasHardenedAcl(wrapper) {
+  return !wrapper.effectiveAcl.publicExecute
+    && !wrapper.effectiveAcl.publicGrantOption
+    && sameJson(wrapper.aclTuples, HARDENED_WRAPPER_ACL_TUPLES)
+    && hasExactNamedGrants(wrapper, HARDENED_WRAPPER_GRANTS)
+}
+
+function hasNoUnexpectedAclExpansion(wrapper) {
+  const allowed = new Set(['PUBLIC', ...LEGACY_WRAPPER_GRANTS])
+  return !wrapper.grantOptionGranted
+    && !wrapper.effectiveAcl.publicGrantOption
+    && wrapper.namedGrants.every(grant => allowed.has(grant.role) && !grant.grantOption)
+    && wrapper.aclTuples.every(tuple => allowed.has(tuple.slice(tuple.indexOf(':') + 1)))
+}
+
+function wrapperRoleNames(wrapper) {
+  return wrapper.effectiveAcl.publicExecute
+    ? ['PUBLIC', ...wrapper.effectiveAcl.namedGrants.map(grant => grant.role)]
+    : wrapper.effectiveAcl.namedGrants.map(grant => grant.role)
+}
+
 export function compareWrapperDefinitions(liveSql, reviewedSql) {
   const live = extractExactUploadWrapper(liveSql)
   const reviewed = extractExactUploadWrapper(reviewedSql)
-  if (live.hash !== reviewed.hash) fail('Wrapper definition hash mismatch')
-  if (live.aclHash !== reviewed.aclHash) fail('Wrapper ACL mismatch')
+  if (!hasNoUnexpectedAclExpansion(live) || !hasNoUnexpectedAclExpansion(reviewed)) {
+    fail('Wrapper ACL mismatch')
+  }
+  if (live.hash === reviewed.hash) {
+    if (live.aclHash !== reviewed.aclHash) fail('Wrapper ACL mismatch')
+    return {
+      wrapperGatePassed: true,
+      securityHardeningApplied: false,
+      wrapperHash: live.hash,
+      aclHash: live.aclHash,
+      roleNames: wrapperRoleNames(live),
+    }
+  }
+  if (!isKnownLegacyHardeningDefinition(live, reviewed)) fail('Wrapper definition hash mismatch')
+  if (!hasKnownLegacyAcl(live) || !hasHardenedAcl(reviewed)) {
+    fail('Wrapper security hardening ACL mismatch')
+  }
   return {
     wrapperGatePassed: true,
-    wrapperHash: live.hash,
-    aclHash: live.aclHash,
-    roleNames: live.effectiveAcl.publicExecute
-      ? ['PUBLIC', ...live.effectiveAcl.namedGrants.map(grant => grant.role)]
-      : live.effectiveAcl.namedGrants.map(grant => grant.role),
+    securityHardeningApplied: true,
+    wrapperHash: reviewed.hash,
+    aclHash: reviewed.aclHash,
+    roleNames: wrapperRoleNames(reviewed),
   }
 }
 

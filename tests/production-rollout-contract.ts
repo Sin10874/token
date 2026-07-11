@@ -183,6 +183,33 @@ GRANT ALL ON FUNCTION "public"."tokend_upload_events"("p_token" "text", "p_event
 GRANT ALL ON FUNCTION "public"."tokend_upload_events"("p_token" "text", "p_events" "jsonb", "p_sync_states" "jsonb") TO "service_role";
 `
 
+const hardenedReviewedDefaultAclWrapper = `${reviewedDefaultAclWrapper.replace(
+  'SECURITY DEFINER',
+  'SECURITY DEFINER\nSET search_path = public, pg_temp',
+)}
+REVOKE ALL ON FUNCTION public.tokend_upload_events(TEXT, JSONB, JSONB) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.tokend_upload_events(TEXT, JSONB, JSONB) TO anon, authenticated;
+`
+
+const legacyRelationWrapper = pgDumpDefaultAclWrapper.replace(
+  /BEGIN[\s\S]*?END;/,
+  `BEGIN
+  PERFORM 1 FROM tokend_members;
+  PERFORM 1 FROM tokend_model_prices;
+  PERFORM 1 FROM tokend_usage_events
+    WHERE tokend_usage_events.project IS NULL;
+  PERFORM 1 FROM tokend_sync_state;
+  RETURN json_build_object('ok', true);
+END;`,
+)
+const hardenedRelationWrapper = `${legacyRelationWrapper
+  .replace('SECURITY DEFINER', 'SECURITY DEFINER\nSET search_path = public, pg_temp')
+  .replace(/\b(tokend_(?:members|model_prices|usage_events|sync_state))\b/g, 'public.$1')
+  .replace(/^GRANT ALL ON FUNCTION .*$/gm, '')}
+REVOKE ALL ON FUNCTION public.tokend_upload_events(TEXT, JSONB, JSONB) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.tokend_upload_events(TEXT, JSONB, JSONB) TO anon, authenticated;
+`
+
 const semanticMetadataWrapper = `
 CREATE FUNCTION public.tokend_upload_events(
   p_token TEXT,
@@ -276,7 +303,211 @@ test('wrapper gate accepts semantic pg_dump quoting, dollar tags, and redundant 
   assert.equal(live.signature, 'public.tokend_upload_events(text,jsonb,jsonb)')
   assert.equal(live.hash, reviewed.hash)
   assert.equal(live.aclHash, reviewed.aclHash)
-  assert.equal(compareWrapperDefinitions(pgDumpDefaultAclWrapper, reviewedDefaultAclWrapper).wrapperGatePassed, true)
+  const comparison = compareWrapperDefinitions(pgDumpDefaultAclWrapper, reviewedDefaultAclWrapper)
+  assert.equal(comparison.wrapperGatePassed, true)
+  assert.equal(comparison.securityHardeningApplied, false)
+})
+
+test('wrapper gate permits only the known legacy default-PUBLIC wrapper to harden search_path and ACLs', () => {
+  const reviewed = extractExactUploadWrapper(hardenedReviewedDefaultAclWrapper)
+  const comparison = compareWrapperDefinitions(
+    pgDumpDefaultAclWrapper,
+    hardenedReviewedDefaultAclWrapper,
+  )
+  assert.equal(comparison.wrapperGatePassed, true)
+  assert.equal(comparison.securityHardeningApplied, true)
+  assert.equal(comparison.wrapperHash, reviewed.hash)
+  assert.equal(comparison.aclHash, reviewed.aclHash)
+  assert.deepEqual(comparison.roleNames, ['anon', 'authenticated'])
+  assert.equal(
+    compareWrapperDefinitions(hardenedReviewedDefaultAclWrapper, hardenedReviewedDefaultAclWrapper)
+      .securityHardeningApplied,
+    false,
+  )
+  assert.throws(
+    () => compareWrapperDefinitions(hardenedReviewedDefaultAclWrapper, pgDumpDefaultAclWrapper),
+    /definition hash mismatch/i,
+  )
+
+  const liveDrifts = [
+    pgDumpDefaultAclWrapper.replace(
+      'TO "anon";',
+      'TO "anon" WITH GRANT OPTION;',
+    ),
+    `${pgDumpDefaultAclWrapper}\nGRANT EXECUTE ON FUNCTION public.tokend_upload_events(TEXT, JSONB, JSONB) TO attacker;`,
+    pgDumpDefaultAclWrapper.replace(/^GRANT ALL ON FUNCTION .* TO "service_role";$/m, ''),
+    pgDumpDefaultAclWrapper.replace(
+      'SECURITY DEFINER',
+      'SECURITY DEFINER SET search_path = public, pg_temp',
+    ),
+  ]
+  for (const drifted of liveDrifts) {
+    assert.throws(
+      () => compareWrapperDefinitions(drifted, hardenedReviewedDefaultAclWrapper),
+      /hardening|definition hash mismatch|ACL mismatch/i,
+    )
+  }
+
+  const reviewedDrifts = [
+    hardenedReviewedDefaultAclWrapper.replace('public, pg_temp', 'attacker, pg_temp'),
+    hardenedReviewedDefaultAclWrapper.replace("'ok', true", "'ok', false"),
+    hardenedReviewedDefaultAclWrapper.replace('LANGUAGE plpgsql', 'LANGUAGE sql'),
+    hardenedReviewedDefaultAclWrapper.replace(
+      'TO anon, authenticated;',
+      'TO anon, authenticated WITH GRANT OPTION;',
+    ),
+    `${hardenedReviewedDefaultAclWrapper}\nGRANT EXECUTE ON FUNCTION public.tokend_upload_events(TEXT, JSONB, JSONB) TO attacker;`,
+    `${hardenedReviewedDefaultAclWrapper}\nGRANT EXECUTE ON FUNCTION public.tokend_upload_events(TEXT, JSONB, JSONB) TO service_role;`,
+  ]
+  for (const drifted of reviewedDrifts) {
+    assert.throws(
+      () => compareWrapperDefinitions(pgDumpDefaultAclWrapper, drifted),
+      /hardening|definition hash mismatch|ACL mismatch/i,
+    )
+  }
+})
+
+test('wrapper hardening qualifies only the four reviewed legacy relations exactly', () => {
+  const comparison = compareWrapperDefinitions(legacyRelationWrapper, hardenedRelationWrapper)
+  assert.equal(comparison.securityHardeningApplied, true)
+  assert.deepEqual(comparison.roleNames, ['anon', 'authenticated'])
+  for (const relation of ['tokend_members', 'tokend_model_prices', 'tokend_usage_events', 'tokend_sync_state']) {
+    assert.throws(
+      () => compareWrapperDefinitions(
+        legacyRelationWrapper,
+        hardenedRelationWrapper.replace(`public.${relation}`, relation),
+      ),
+      /definition hash mismatch/i,
+    )
+  }
+  assert.throws(
+    () => compareWrapperDefinitions(
+      legacyRelationWrapper,
+      hardenedRelationWrapper.replace(
+        "RETURN json_build_object('ok', true);",
+        "PERFORM 1 FROM public.attacker_table;\n  RETURN json_build_object('ok', true);",
+      ),
+    ),
+    /definition hash mismatch/i,
+  )
+})
+
+test('wrapper parser rejects unreviewed settings post-create mutations and alternate ACL syntax', () => {
+  const fromCurrent = reviewedDefaultAclWrapper.replace(
+    'SECURITY DEFINER',
+    'SECURITY DEFINER\nSET search_path FROM CURRENT',
+  )
+  assert.throws(
+    () => compareWrapperDefinitions(reviewedDefaultAclWrapper, fromCurrent),
+    /definition hash mismatch/i,
+  )
+
+  for (const unsafeDefaultAcl of [
+    'ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO attacker;',
+    'ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO attacker;',
+    'ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA other, public GRANT EXECUTE ON FUNCTIONS TO attacker;',
+  ]) {
+    assert.throws(
+      () => compareWrapperDefinitions(
+        pgDumpDefaultAclWrapper,
+        `${unsafeDefaultAcl}\n${hardenedReviewedDefaultAclWrapper}`,
+      ),
+      /wrapper.*ACL mutation/i,
+    )
+  }
+
+  const duplicateUnsafeSearchPath = hardenedReviewedDefaultAclWrapper.replace(
+    'SET search_path = public, pg_temp',
+    'SET search_path = public, pg_temp\nSET search_path=attacker,pg_temp',
+  )
+  assert.throws(
+    () => compareWrapperDefinitions(pgDumpDefaultAclWrapper, duplicateUnsafeSearchPath),
+    /definition hash mismatch/i,
+  )
+
+  const unsafeSuffixes = [
+    'ALTER FUNCTION public.tokend_upload_events(TEXT, JSONB, JSONB) SET search_path = attacker;',
+    'DROP FUNCTION public.tokend_upload_events(TEXT, JSONB, JSONB);',
+    'GRANT EXECUTE ON ROUTINE public.tokend_upload_events(TEXT, JSONB, JSONB) TO attacker;',
+    'GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO attacker;',
+    'GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA other, public TO attacker;',
+  ]
+  for (const suffix of unsafeSuffixes) {
+    assert.throws(
+      () => compareWrapperDefinitions(wrapperBody, `${wrapperBody}\n${suffix}`),
+      /wrapper.*mutation|ACL mismatch|definition hash mismatch/i,
+    )
+  }
+  assert.throws(
+    () => compareWrapperDefinitions(
+      wrapperBody,
+      `ALTER FUNCTION public.tokend_upload_events(TEXT, JSONB, JSONB) OWNER TO postgres;\n${wrapperBody}`,
+    ),
+    /wrapper.*mutation/i,
+  )
+  assert.equal(
+    compareWrapperDefinitions(
+      wrapperBody,
+      `${wrapperBody}\nGRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA other, "PUBLIC" TO attacker;`,
+    ).wrapperGatePassed,
+    true,
+  )
+
+  const hardenedAclBlock = hardenedReviewedDefaultAclWrapper
+    .split('\n')
+    .filter(line => /^(?:GRANT|REVOKE)\b/.test(line))
+    .join('\n')
+  const hardenedDefinitionOnly = hardenedReviewedDefaultAclWrapper
+    .split('\n')
+    .filter(line => !/^(?:GRANT|REVOKE)\b/.test(line))
+    .join('\n')
+  assert.throws(
+    () => compareWrapperDefinitions(
+      pgDumpDefaultAclWrapper,
+      `${hardenedAclBlock}\n${hardenedDefinitionOnly}`,
+    ),
+    /wrapper.*mutation/i,
+  )
+
+  assert.throws(
+    () => compareWrapperDefinitions(
+      pgDumpDefaultAclWrapper,
+      `${reviewedDefaultAclWrapper}\nGRANT EXECUTE ON ROUTINE public.tokend_upload_events(TEXT, JSONB, JSONB) TO attacker;`,
+    ),
+    /ACL mismatch/i,
+  )
+  assert.throws(
+    () => compareWrapperDefinitions(
+      pgDumpDefaultAclWrapper,
+      `${reviewedDefaultAclWrapper}\nGRANT EXECUTE ON FUNCTION public.tokend_upload_events(TEXT, JSONB, JSONB) TO attacker;`,
+    ),
+    /ACL mismatch/i,
+  )
+  const grantOptionWrapper = wrapperBody.replace(
+    'TO anon, authenticated;',
+    'TO anon, authenticated WITH GRANT OPTION;',
+  )
+  assert.throws(
+    () => compareWrapperDefinitions(grantOptionWrapper, grantOptionWrapper),
+    /ACL mismatch/i,
+  )
+})
+
+test('wrapper semantic hash rejects cost rows support and transform metadata drift', () => {
+  for (const clause of [
+    'COST 999',
+    'ROWS 999',
+    'SUPPORT public.wrapper_support',
+    'TRANSFORM FOR TYPE public.wrapper_type',
+  ]) {
+    assert.throws(
+      () => compareWrapperDefinitions(
+        hardenedReviewedDefaultAclWrapper,
+        hardenedReviewedDefaultAclWrapper.replace('LANGUAGE plpgsql', `LANGUAGE plpgsql ${clause}`),
+      ),
+      /definition hash mismatch/i,
+    )
+  }
 })
 
 test('wrapper gate still rejects function body drift after semantic pg_dump normalization', () => {
@@ -1693,14 +1924,14 @@ test('monitor keeps every late fixture batch, verifies its active catalog, and t
   }), /JSON error rate delta exceeded/i)
 })
 
-test('runner wrapper gate writes only hashes, roles, timestamp, and a preserved private gate state', async () => {
+test('runner wrapper gate writes only hashes roles hardening booleans and timestamp with a preserved private state', async () => {
   const dir = await tempDir()
   const live = path.join(dir, 'live.sql')
   const reviewed = path.join(dir, 'reviewed.sql')
   const statePath = path.join(dir, 'state.json')
   const outPath = path.join(dir, 'gate.json')
-  await writeFile(live, wrapperBody)
-  await writeFile(reviewed, wrapperBody.replace(/\n/g, '\r\n'))
+  await writeFile(live, pgDumpDefaultAclWrapper)
+  await writeFile(reviewed, hardenedReviewedDefaultAclWrapper.replace(/\n/g, '\r\n'))
   const runner = createRolloutRunner({
     env: {}, fetch: async () => { throw new Error('network must not be used') }, fs: nodeFs,
     clock: () => new Date('2026-07-10T00:00:00.000Z'), sleep: async () => {}, randomUUID: () => 'uuid',
@@ -1708,9 +1939,14 @@ test('runner wrapper gate writes only hashes, roles, timestamp, and a preserved 
   const output = await runner.execute('wrapper-gate', {
     liveSchema: live, rollbackSql: reviewed, state: statePath, out: outPath,
   })
-  assert.deepEqual(Object.keys(output).sort(), ['aclHash', 'roleNames', 'timestamp', 'wrapperGatePassed', 'wrapperHash'].sort())
+  assert.deepEqual(Object.keys(output).sort(), [
+    'aclHash', 'roleNames', 'securityHardeningApplied', 'timestamp', 'wrapperGatePassed', 'wrapperHash',
+  ].sort())
   assert.equal(output.wrapperGatePassed, true)
+  assert.equal(output.securityHardeningApplied, true)
+  assert.deepEqual(output.roleNames, ['anon', 'authenticated'])
   assert.equal((await stat(statePath)).mode & 0o777, 0o600)
+  assert.equal((await stat(outPath)).mode & 0o777, 0o600)
   const privateState = JSON.parse(await readFile(statePath, 'utf8'))
   assert.equal(privateState.wrapperGatePassed, true)
   assert.equal(privateState.wrapperHash, output.wrapperHash)

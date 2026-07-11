@@ -76,6 +76,8 @@ CREATE TABLE IF NOT EXISTS public.tokend_pricing_backfill_runs (
   catalog_version TEXT NOT NULL,
   status TEXT NOT NULL,
   snapshot_at TIMESTAMPTZ NOT NULL,
+  base_previous_catalog_version TEXT,
+  base_previous_backfill_run_id UUID,
   target_count BIGINT NOT NULL DEFAULT 0,
   input_tokens BIGINT NOT NULL DEFAULT 0,
   output_tokens BIGINT NOT NULL DEFAULT 0,
@@ -305,6 +307,26 @@ BEGIN
     ALTER TABLE public.tokend_pricing_backfill_runs
       ADD CONSTRAINT tokend_pricing_backfill_runs_catalog_fkey
       FOREIGN KEY (catalog_version) REFERENCES public.tokend_pricing_catalogs(version);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'tokend_pricing_backfill_runs_base_previous_catalog_fkey'
+      AND conrelid = 'public.tokend_pricing_backfill_runs'::regclass
+  ) THEN
+    ALTER TABLE public.tokend_pricing_backfill_runs
+      ADD CONSTRAINT tokend_pricing_backfill_runs_base_previous_catalog_fkey
+      FOREIGN KEY (base_previous_catalog_version)
+      REFERENCES public.tokend_pricing_catalogs(version);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'tokend_pricing_backfill_runs_base_previous_run_fkey'
+      AND conrelid = 'public.tokend_pricing_backfill_runs'::regclass
+  ) THEN
+    ALTER TABLE public.tokend_pricing_backfill_runs
+      ADD CONSTRAINT tokend_pricing_backfill_runs_base_previous_run_fkey
+      FOREIGN KEY (base_previous_backfill_run_id)
+      REFERENCES public.tokend_pricing_backfill_runs(run_id);
   END IF;
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint

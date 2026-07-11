@@ -305,202 +305,30 @@ $function$;
 
 CREATE OR REPLACE FUNCTION public.tokend_pricing_preflight()
 RETURNS JSON
-LANGUAGE plpgsql
+LANGUAGE sql
 SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $function$
-DECLARE
-  v_event_count BIGINT := 0;
-  v_eligible_event_count BIGINT := 0;
-  v_eligible_zero_cost_count BIGINT := 0;
-  v_zero_cost_by_model JSON := '[]'::JSON;
-  v_legacy_price_row_count BIGINT := 0;
-  v_status_counts JSON;
-  v_unpriced_event_count BIGINT := 0;
-  v_unpriced_share NUMERIC := 0;
-  v_post_snapshot_event_count BIGINT := 0;
-  v_members_over_2x_count BIGINT := 0;
-  v_active_catalog_version TEXT;
-  v_previous_catalog_version TEXT;
-  v_active_run_id UUID;
-  v_previous_run_id UUID;
-  v_active_run_status TEXT;
-  v_active_reconciliation_hash TEXT;
-  v_snapshot_at TIMESTAMPTZ;
-  v_snapshot_run_id UUID;
-  v_snapshot_catalog_version TEXT;
-  v_rollout_fixture_count BIGINT := 0;
-BEGIN
-  SELECT
-    pricing_state.active_catalog_version,
-    pricing_state.previous_catalog_version,
-    pricing_state.active_backfill_run_id,
-    pricing_state.previous_backfill_run_id,
-    active_run.status,
-    active_run.reconciliation_hash,
-    active_run.snapshot_at,
-    active_run.run_id,
-    active_run.catalog_version
-  INTO
-    v_active_catalog_version,
-    v_previous_catalog_version,
-    v_active_run_id,
-    v_previous_run_id,
-    v_active_run_status,
-    v_active_reconciliation_hash,
-    v_snapshot_at,
-    v_snapshot_run_id,
-    v_snapshot_catalog_version
+  SELECT json_build_object(
+    'authoritative', FALSE,
+    'source', 'intermediate_schema',
+    'legacyPriceRowCount', (SELECT count(*)::BIGINT FROM public.tokend_model_prices),
+    'rolloutFixtureCount', (
+      SELECT count(*)::BIGINT
+      FROM public.tokend_members
+      WHERE member_code LIKE 'ROLL%'
+    ),
+    'activeRunStatus', active_run.status,
+    'activeReconciliationHash', active_run.reconciliation_hash,
+    'activeCatalogVersion', pricing_state.active_catalog_version,
+    'activeRunId', pricing_state.active_backfill_run_id,
+    'previousCatalogVersion', pricing_state.previous_catalog_version,
+    'previousRunId', pricing_state.previous_backfill_run_id
+  )
   FROM public.tokend_pricing_state AS pricing_state
   LEFT JOIN public.tokend_pricing_backfill_runs AS active_run
     ON active_run.run_id = pricing_state.active_backfill_run_id
   WHERE pricing_state.singleton;
-
-  IF v_snapshot_at IS NULL THEN
-    SELECT run.snapshot_at, run.run_id, run.catalog_version
-    INTO v_snapshot_at, v_snapshot_run_id, v_snapshot_catalog_version
-    FROM public.tokend_pricing_backfill_runs AS run
-    WHERE run.status IN ('staging', 'reconciled')
-      AND run.snapshot_at <= clock_timestamp()
-    ORDER BY run.snapshot_at DESC, run.created_at DESC, run.run_id DESC
-    LIMIT 1;
-  END IF;
-
-  SELECT
-    count(*)::BIGINT,
-    count(*) FILTER (WHERE usage_event.total_tokens > 0)::BIGINT,
-    count(*) FILTER (
-      WHERE usage_event.total_tokens > 0
-        AND COALESCE(usage_event.total_cost, 0) = 0
-    )::BIGINT,
-    count(*) FILTER (
-      WHERE usage_event.pricing_status = 'unpriced'
-        AND usage_event.total_tokens > 0
-    )::BIGINT
-  INTO
-    v_event_count,
-    v_eligible_event_count,
-    v_eligible_zero_cost_count,
-    v_unpriced_event_count
-  FROM public.tokend_usage_events AS usage_event;
-
-  SELECT COALESCE(
-    json_agg(
-      json_build_object(
-        'model', model_rollup.model,
-        'eventCount', model_rollup.event_count,
-        'totalTokens', model_rollup.total_tokens
-      )
-      ORDER BY model_rollup.event_count DESC, model_rollup.model
-    ),
-    '[]'::JSON
-  )
-  INTO v_zero_cost_by_model
-  FROM (
-    SELECT
-      COALESCE(usage_event.model, 'unknown') AS model,
-      count(*)::BIGINT AS event_count,
-      COALESCE(sum(usage_event.total_tokens), 0)::BIGINT AS total_tokens
-    FROM public.tokend_usage_events AS usage_event
-    WHERE usage_event.total_tokens > 0
-      AND COALESCE(usage_event.total_cost, 0) = 0
-    GROUP BY COALESCE(usage_event.model, 'unknown')
-  ) AS model_rollup;
-
-  SELECT count(*)::BIGINT
-  INTO v_legacy_price_row_count
-  FROM public.tokend_model_prices;
-
-  SELECT json_build_object(
-    'reported', count(*) FILTER (WHERE usage_event.pricing_status = 'reported'),
-    'estimated', count(*) FILTER (WHERE usage_event.pricing_status = 'estimated'),
-    'zero_rate', count(*) FILTER (WHERE usage_event.pricing_status = 'zero_rate'),
-    'unpriced', count(*) FILTER (WHERE usage_event.pricing_status = 'unpriced'),
-    'legacy', count(*) FILTER (WHERE usage_event.pricing_status = 'legacy'),
-    'unset', count(*) FILTER (WHERE usage_event.pricing_status IS NULL)
-  )
-  INTO v_status_counts
-  FROM public.tokend_usage_events AS usage_event;
-
-  v_unpriced_share := CASE
-    WHEN v_eligible_event_count = 0 THEN 0::NUMERIC
-    ELSE round(v_unpriced_event_count::NUMERIC / v_eligible_event_count::NUMERIC, 10)
-  END;
-
-  IF v_snapshot_at IS NOT NULL THEN
-    SELECT count(*)::BIGINT
-    INTO v_post_snapshot_event_count
-    FROM (
-      SELECT DISTINCT revision.member_code, revision.event_id
-      FROM public.tokend_event_cost_revisions AS revision
-      WHERE revision.version = v_snapshot_catalog_version
-        AND revision.backfill_run_id IS NULL
-        AND revision.computed_at >= v_snapshot_at
-        AND NOT EXISTS (
-          SELECT 1
-          FROM public.tokend_pricing_backfill_targets AS frozen_target
-          WHERE frozen_target.run_id = v_snapshot_run_id
-            AND frozen_target.member_code = revision.member_code
-            AND frozen_target.event_id = revision.event_id
-        )
-    ) AS live_revision;
-  END IF;
-
-  IF v_active_catalog_version IS NOT NULL
-    AND v_previous_catalog_version IS NOT NULL
-    AND v_active_catalog_version <> v_previous_catalog_version
-    AND EXISTS (
-      SELECT 1
-      FROM public.tokend_event_cost_revisions
-      WHERE version = v_active_catalog_version
-    )
-    AND EXISTS (
-      SELECT 1
-      FROM public.tokend_event_cost_revisions
-      WHERE version = v_previous_catalog_version
-    ) THEN
-    SELECT count(*)::BIGINT
-    INTO v_members_over_2x_count
-    FROM (
-      SELECT revision.member_code
-      FROM public.tokend_event_cost_revisions AS revision
-      WHERE revision.version IN (v_active_catalog_version, v_previous_catalog_version)
-      GROUP BY revision.member_code
-      HAVING count(*) FILTER (WHERE revision.version = v_active_catalog_version) > 0
-        AND count(*) FILTER (WHERE revision.version = v_previous_catalog_version) > 0
-        AND COALESCE(sum(revision.total_cost) FILTER (
-          WHERE revision.version = v_active_catalog_version
-        ), 0) > 2 * COALESCE(sum(revision.total_cost) FILTER (
-          WHERE revision.version = v_previous_catalog_version
-        ), 0)
-    ) AS member_rollup;
-  END IF;
-
-  SELECT count(*)::BIGINT
-  INTO v_rollout_fixture_count
-  FROM public.tokend_members
-  WHERE member_code LIKE 'ROLL%';
-
-  RETURN json_build_object(
-    'eventCount', v_event_count,
-    'eligibleEventCount', v_eligible_event_count,
-    'eligibleZeroCostEventCount', v_eligible_zero_cost_count,
-    'zeroCostByModel', v_zero_cost_by_model,
-    'legacyPriceRowCount', v_legacy_price_row_count,
-    'statusCounts', v_status_counts,
-    'unpricedEventCount', v_unpriced_event_count,
-    'unpricedShare', v_unpriced_share,
-    'postSnapshotEventCount', v_post_snapshot_event_count,
-    'membersOver2xCount', v_members_over_2x_count,
-    'activeRunStatus', v_active_run_status,
-    'activeReconciliationHash', v_active_reconciliation_hash,
-    'rolloutFixtureCount', v_rollout_fixture_count,
-    'activeCatalogVersion', v_active_catalog_version,
-    'activeRunId', v_active_run_id,
-    'previousCatalogVersion', v_previous_catalog_version,
-    'previousRunId', v_previous_run_id
-  );
-END
 $function$;
 
 CREATE OR REPLACE FUNCTION public.tokend_upload_events_v2(

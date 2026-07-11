@@ -264,6 +264,31 @@ run_sql "
     'scale-rpc',
     100, 20, 10, 5, 135, 'scale-rpc-project'
   FROM generate_series(1, 3) AS series;" >/dev/null
+rpc_concurrent_started="$(now_ms)"
+rpc_concurrent_pids=()
+(run_sql "SET statement_timeout = '10s'; SELECT public.tokend_get_summary_v5('scale-rpc-token', '7d', 'Asia/Shanghai')::JSONB->>'ok'" > "$evidence_dir/rpc-concurrent-summary.out") &
+rpc_concurrent_pids+=("$!")
+(run_sql "SET statement_timeout = '10s'; SELECT public.tokend_get_daily_trend_v5('scale-rpc-token', '7d', 'Asia/Shanghai')::JSONB->>'ok'" > "$evidence_dir/rpc-concurrent-daily.out") &
+rpc_concurrent_pids+=("$!")
+(run_sql "SET statement_timeout = '10s'; SELECT public.tokend_get_model_breakdown_v3('scale-rpc-token', '7d')::JSONB->>'ok'" > "$evidence_dir/rpc-concurrent-models.out") &
+rpc_concurrent_pids+=("$!")
+(run_sql "SET statement_timeout = '10s'; SELECT public.tokend_get_sessions_v2('scale-rpc-token', '7d', 50)::JSONB->>'ok'" > "$evidence_dir/rpc-concurrent-sessions.out") &
+rpc_concurrent_pids+=("$!")
+(run_sql "SET statement_timeout = '10s'; SELECT public.tokend_get_top_projects_v3('scale-rpc-token', '7d')::JSONB->>'ok'" > "$evidence_dir/rpc-concurrent-projects.out") &
+rpc_concurrent_pids+=("$!")
+rpc_concurrent_failed=0
+for pid in "${rpc_concurrent_pids[@]}"; do
+  if ! wait "$pid"; then rpc_concurrent_failed=1; fi
+done
+rpc_concurrent_ms=$(( $(now_ms) - rpc_concurrent_started ))
+if [[ "$rpc_concurrent_failed" -ne 0 ]]; then
+  echo "Concurrent sparse-member dashboard RPC gate failed" >&2
+  exit 1
+fi
+for result in "$evidence_dir"/rpc-concurrent-*.out; do
+  assert_eq "concurrent RPC result $(basename "$result")" "$(tr -d '[:space:]' < "$result")" "true"
+done
+assert_le "concurrent sparse-member dashboard RPC latency ms" "$rpc_concurrent_ms" 10000
 sessions_sparse_started="$(now_ms)"
 sessions_sparse_result="$(run_sql "
   SET statement_timeout = '10s';
@@ -553,6 +578,7 @@ cat > "$evidence_dir/summary.json" <<JSON
   "migrationUploadMaxMs": $migration_max_ms,
   "sessionsV2SparseMs": $sessions_sparse_ms,
   "sessionsV2DenseMs": $sessions_dense_ms,
+  "concurrentDashboardRpcMs": $rpc_concurrent_ms,
   "createMs": $create_ms,
   "createLockFailureMs": $create_lock_failure_ms,
   "freezeMs": $freeze_ms,

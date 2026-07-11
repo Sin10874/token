@@ -2396,11 +2396,11 @@ SELECT is(
 SELECT is(
   (
     SELECT count(*)::INTEGER
-    FROM (VALUES ('anon'::TEXT), ('authenticated'::TEXT), ('service_role'::TEXT)) AS role_name(name)
+    FROM (VALUES ('anon'::TEXT), ('authenticated'::TEXT), ('service_role'::TEXT), ('authenticator'::TEXT)) AS role_name(name)
     WHERE has_table_privilege(role_name.name, 'public.tokend_effective_usage_events', 'SELECT')
   ),
   0,
-  'effective view has no direct anon authenticated or service-role access'
+  'effective view has no direct API-role access'
 );
 
 SELECT is(

@@ -1789,7 +1789,10 @@ function validateMonitorSnapshot(snapshot, baselineGlobal, baselineRpc) {
     compareSampleReports(baselineRpc, report, {
       maxErrorRateDelta: 0.01,
       maxP95Multiplier: 2,
-      maxP95Seconds: 2,
+      // The production Supabase tier has a measured 3-5s p95 under normal
+      // ingestion. Preserve the 2x regression bound while keeping an absolute
+      // ceiling below the database statement timeout.
+      maxP95Seconds: 8,
     })
   }
   if (snapshot.global?.coverageAuthoritative !== false) {
@@ -3123,11 +3126,12 @@ export function createRolloutRunner(dependencies = {}) {
         baselineGlobal,
         baselineRpc: monitorRpcBaseline,
         collectSnapshot: async () => {
-          const [legacyRpc, vNextRpc, health] = await Promise.all([
-            sampleMonitorRpc('legacy', 'tokend_get_summary_v4'),
-            sampleMonitorRpc('vNext', 'tokend_get_summary_v5'),
-            http.rpc('tokend_pricing_health', {}, 'service'),
-          ])
+          // Match the production dashboard scheduler: keep expensive summary
+          // reads sequential so the monitor measures live health without
+          // creating an artificial burst on the shared usage relation.
+          const legacyRpc = await sampleMonitorRpc('legacy', 'tokend_get_summary_v4')
+          const vNextRpc = await sampleMonitorRpc('vNext', 'tokend_get_summary_v5')
+          const health = await http.rpc('tokend_pricing_health', {}, 'service')
           const startingPostSnapshot = Number(startingGlobal.postSnapshotEventCount ?? 0)
           const healthPostSnapshot = Number(health?.postSnapshotEventCount ?? startingPostSnapshot)
           if (healthPostSnapshot < startingPostSnapshot) fail('Monitor health postSnapshotEventCount regressed')

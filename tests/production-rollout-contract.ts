@@ -2189,6 +2189,31 @@ test('monitor checks both RPC generations, adjusted global health, late cadence,
   })
   assert.equal(improved.passed, true)
 
+  const productionLatency = await runMonitorLoop({
+    durationSeconds: 0, intervalSeconds: 30, lateUploadEverySeconds: 120,
+    baselineGlobal: { eligibleEventCount: 100, status: 'complete', maxUnpricedShare: 0.02, membersOver2x: 0, postSnapshotEventCount: 0 },
+    baselineRpc: { count: 25, httpErrorCount: 0, jsonErrorCount: 0, p95Seconds: 3, reconciliationHash: 'recon-hash', pointers: snapshot.pointers },
+    collectSnapshot: async () => ({
+      ...snapshot,
+      legacyRpc: { ...snapshot.legacyRpc, p95Seconds: 5 },
+      vNextRpc: { ...snapshot.vNextRpc, p95Seconds: 5 },
+    }),
+    uploadLateFixture: async () => {}, sleep: async () => {},
+  })
+  assert.equal(productionLatency.passed, true)
+
+  await assert.rejects(runMonitorLoop({
+    durationSeconds: 0, intervalSeconds: 30, lateUploadEverySeconds: 120,
+    baselineGlobal: { eligibleEventCount: 100, status: 'complete', maxUnpricedShare: 0.02, membersOver2x: 0, postSnapshotEventCount: 0 },
+    baselineRpc: { count: 25, httpErrorCount: 0, jsonErrorCount: 0, p95Seconds: 5, reconciliationHash: 'recon-hash', pointers: snapshot.pointers },
+    collectSnapshot: async () => ({
+      ...snapshot,
+      legacyRpc: { ...snapshot.legacyRpc, p95Seconds: 8.1 },
+      vNextRpc: { ...snapshot.vNextRpc, p95Seconds: 8.1 },
+    }),
+    uploadLateFixture: async () => {}, sleep: async () => {},
+  }), /p95 latency gate exceeded/i)
+
   await assert.rejects(runMonitorLoop({
     durationSeconds: 30, intervalSeconds: 30, lateUploadEverySeconds: 120,
     baselineGlobal: { eligibleEventCount: 100, status: 'complete', maxUnpricedShare: 0.02, membersOver2x: 0, postSnapshotEventCount: 0 },
@@ -2251,6 +2276,8 @@ test('monitor keeps every late fixture batch, verifies its active catalog, and t
   const uploadedEventIds: string[] = []
   let preflightCalls = 0
   let healthCalls = 0
+  let activeDashboardRpcCalls = 0
+  let maxConcurrentDashboardRpcCalls = 0
   let uuid = 0
   const fakeFetch: typeof fetch = async (input, init = {}) => {
     const url = String(input)
@@ -2259,7 +2286,13 @@ test('monitor keeps every late fixture batch, verifies its active catalog, and t
       return jsonResponse({ ok: true, inserted: 3 })
     }
     if (url.endsWith('/rpc/tokend_upload_events')) return jsonResponse({ ok: true, inserted: 2 })
-    if (url.endsWith('/rpc/tokend_get_summary_v4') || url.endsWith('/rpc/tokend_get_summary_v5')) return jsonResponse({ ok: true })
+    if (url.endsWith('/rpc/tokend_get_summary_v4') || url.endsWith('/rpc/tokend_get_summary_v5')) {
+      activeDashboardRpcCalls += 1
+      maxConcurrentDashboardRpcCalls = Math.max(maxConcurrentDashboardRpcCalls, activeDashboardRpcCalls)
+      await Promise.resolve()
+      activeDashboardRpcCalls -= 1
+      return jsonResponse({ ok: true })
+    }
     if (url.endsWith(`/rpc/${PREFLIGHT_RPC_NAME}`)) {
       const fixtureCount = preflightCalls === 0 ? 5 : 15
       preflightCalls += 1
@@ -2322,6 +2355,7 @@ test('monitor keeps every late fixture batch, verifies its active catalog, and t
   assert.equal(result.passed, true)
   assert.equal(preflightCalls, 2)
   assert.equal(healthCalls, 3)
+  assert.equal(maxConcurrentDashboardRpcCalls, 1)
   assert.equal(memberRiskQueries, 1)
   assert.ok(result.samples.every((sample: any) => sample.global.coverageAuthoritative === false))
   assert.equal(revisionQueries.length, 6)

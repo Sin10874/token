@@ -138,7 +138,7 @@ SELECT
     WHEN 2 THEN 'gpt-5.6-terra'
     ELSE 'gpt-5.6-luna'
   END,
-  'scale',
+  'scale-' || MOD(series.event_number, :scale_channels::BIGINT)::TEXT,
   100,
   20,
   0,

@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import type { RawUsageEvent } from '../server/ingestion/parser.ts'
 import {
   isMissingRpcError,
+  syncCloudPayload,
   stripEvent,
   uploadEventBatch,
   uploadSyncPayload,
@@ -410,6 +412,159 @@ async function testMessageBusinessFailureLeavesStateUncommitted() {
   )
 }
 
+async function testSyncCloudPayloadCommitsCursorOnlyAfterSessionRebuilds() {
+  const calls: Array<{ name: string; args: Record<string, unknown> }> = []
+  const syncStates = [{ sourcePathHash: 'session-order', lastProcessedLines: 12, parserVersion: 3 }]
+  const sessionIds = Array.from({ length: 101 }, (_, index) => `session-${index}`)
+
+  const result = await syncCloudPayload({
+    token: 'session-order-token',
+    events: [stripEvent(rawUsageEvent())],
+    messages: [],
+    syncStates,
+    sessionIds,
+    rpc: async (name, args) => {
+      calls.push({ name, args })
+      if (name === 'tokend_rebuild_sessions') {
+        return {
+          data: {
+            ok: true,
+            sessions_updated: (args.p_session_ids as string[]).length,
+          },
+          error: null,
+        }
+      }
+      return {
+        data: { ok: true, inserted: (args.p_events as unknown[]).length },
+        error: null,
+      }
+    },
+  })
+
+  assert.deepEqual(result, { eventsInserted: 1, sessionsUpdated: 101 })
+  assert.deepEqual(calls.map(call => call.name), [
+    'tokend_upload_events_v2',
+    'tokend_rebuild_sessions',
+    'tokend_rebuild_sessions',
+    'tokend_upload_events_v2',
+  ])
+  assert.deepEqual(calls[0].args.p_sync_states, [])
+  assert.deepEqual(calls[1].args.p_session_ids, sessionIds.slice(0, 100))
+  assert.deepEqual(calls[2].args.p_session_ids, sessionIds.slice(100))
+  assert.deepEqual(calls[3].args, {
+    p_token: 'session-order-token',
+    p_events: [],
+    p_sync_states: syncStates,
+  })
+}
+
+async function testSessionRebuildTransportErrorLeavesCursorUncommitted() {
+  const calls: Array<{ name: string; args: Record<string, unknown> }> = []
+  const syncStates = [{ sourcePathHash: 'rebuild-transport', lastProcessedLines: 7, parserVersion: 3 }]
+
+  await assert.rejects(
+    syncCloudPayload({
+      token: 'rebuild-transport-token',
+      events: [stripEvent(rawUsageEvent())],
+      messages: [],
+      syncStates,
+      sessionIds: ['transport-session'],
+      rpc: async (name: string, args: Record<string, unknown>) => {
+        calls.push({ name, args })
+        if (name === 'tokend_rebuild_sessions') {
+          return { data: null, error: { message: 'database timeout' } }
+        }
+        return { data: { ok: true, inserted: 1 }, error: null }
+      },
+    }),
+    /session rebuild.*database timeout/i,
+  )
+
+  assert.deepEqual(calls.map(call => call.name), [
+    'tokend_upload_events_v2',
+    'tokend_rebuild_sessions',
+  ])
+  assert.equal(
+    calls.some(call => Array.isArray(call.args.p_sync_states) && call.args.p_sync_states.length > 0),
+    false,
+  )
+}
+
+async function testSessionRebuildRequiresExplicitBusinessSuccess() {
+  for (const [label, rebuildData] of [
+    ['business failure', { ok: false, error: 'invalid_session_batch', sessions_updated: 1 }],
+    ['missing ok', { sessions_updated: 1 }],
+  ] as const) {
+    const calls: Array<{ name: string; args: Record<string, unknown> }> = []
+    await assert.rejects(
+      syncCloudPayload({
+        token: `rebuild-${label}-token`,
+        events: [stripEvent(rawUsageEvent())],
+        messages: [],
+        syncStates: [{ sourcePathHash: label, lastProcessedLines: 8, parserVersion: 3 }],
+        sessionIds: ['business-session'],
+        rpc: async (name: string, args: Record<string, unknown>) => {
+          calls.push({ name, args })
+          if (name === 'tokend_rebuild_sessions') {
+            return { data: rebuildData, error: null }
+          }
+          return { data: { ok: true, inserted: 1 }, error: null }
+        },
+      }),
+      /session rebuild/i,
+      label,
+    )
+    assert.deepEqual(calls.map(call => call.name), [
+      'tokend_upload_events_v2',
+      'tokend_rebuild_sessions',
+    ], label)
+    assert.equal(
+      calls.some(call => Array.isArray(call.args.p_sync_states) && call.args.p_sync_states.length > 0),
+      false,
+      label,
+    )
+  }
+}
+
+async function testSessionRebuildCountMismatchLeavesCursorUncommitted() {
+  const calls: Array<{ name: string; args: Record<string, unknown> }> = []
+
+  await assert.rejects(
+    syncCloudPayload({
+      token: 'rebuild-count-token',
+      events: [stripEvent(rawUsageEvent())],
+      messages: [],
+      syncStates: [{ sourcePathHash: 'rebuild-count', lastProcessedLines: 9, parserVersion: 3 }],
+      sessionIds: ['count-session-a', 'count-session-b'],
+      rpc: async (name: string, args: Record<string, unknown>) => {
+        calls.push({ name, args })
+        if (name === 'tokend_rebuild_sessions') {
+          return { data: { ok: true, sessions_updated: 1 }, error: null }
+        }
+        return { data: { ok: true, inserted: 1 }, error: null }
+      },
+    }),
+    /session rebuild.*expected 2.*received 1/i,
+  )
+
+  assert.deepEqual(calls.map(call => call.name), [
+    'tokend_upload_events_v2',
+    'tokend_rebuild_sessions',
+  ])
+  assert.equal(
+    calls.some(call => Array.isArray(call.args.p_sync_states) && call.args.p_sync_states.length > 0),
+    false,
+  )
+}
+
+function testRunCloudSyncUsesCursorSafePayloadOrchestrator() {
+  const source = readFileSync(new URL('../cli/sync.ts', import.meta.url), 'utf8')
+  const runCloudSync = source.slice(source.indexOf('export async function runCloudSync'))
+
+  assert.match(runCloudSync, /await syncCloudPayload\(\{[\s\S]*?sessionIds:/)
+  assert.doesNotMatch(runCloudSync, /supabase\.rpc\('tokend_rebuild_sessions'/)
+}
+
 async function main() {
   testStripEventUsesExactAllowlist()
   testStripEventNormalizesUnpricedProvenance()
@@ -422,6 +577,11 @@ async function main() {
   await testProductionLoopKeepsUnpricedAndAccumulatesInserted()
   await testFallbackPreservesMessageThenStateOrdering()
   await testMessageBusinessFailureLeavesStateUncommitted()
+  await testSyncCloudPayloadCommitsCursorOnlyAfterSessionRebuilds()
+  await testSessionRebuildTransportErrorLeavesCursorUncommitted()
+  await testSessionRebuildRequiresExplicitBusinessSuccess()
+  await testSessionRebuildCountMismatchLeavesCursorUncommitted()
+  testRunCloudSyncUsesCursorSafePayloadOrchestrator()
   console.log('cli sync contract tests passed')
 }
 

@@ -24,6 +24,7 @@ import { HermesImportedTotals, parseHermesSession } from '../server/ingestion/he
 import { PARSER_VERSIONS } from '../server/ingestion/parser-versions.js'
 
 const BATCH_SIZE = 2000
+const SESSION_BATCH_SIZE = 100
 
 interface SyncStats {
   filesProcessed: number
@@ -126,6 +127,10 @@ interface UploadSyncPayloadOptions {
   syncStates: SyncState[]
   rpc: SyncRpc
   batchSize?: number
+}
+
+interface SyncCloudPayloadOptions extends UploadSyncPayloadOptions {
+  sessionIds: string[]
 }
 
 interface HermesRemoteTotalsRow extends HermesImportedTotals {
@@ -284,6 +289,54 @@ export async function uploadSyncPayload({
   }
 
   return eventsInserted
+}
+
+export async function syncCloudPayload({
+  token,
+  events,
+  messages,
+  syncStates,
+  sessionIds,
+  rpc,
+  batchSize,
+}: SyncCloudPayloadOptions): Promise<{ eventsInserted: number; sessionsUpdated: number }> {
+  const eventsInserted = await uploadSyncPayload({
+    token,
+    events,
+    messages,
+    syncStates: [],
+    rpc,
+    batchSize,
+  })
+
+  let sessionsUpdated = 0
+  const uniqueSessionIds = Array.from(new Set(sessionIds))
+  for (let i = 0; i < uniqueSessionIds.length; i += SESSION_BATCH_SIZE) {
+    const batch = uniqueSessionIds.slice(i, i + SESSION_BATCH_SIZE)
+    const { data, error } = await rpc('tokend_rebuild_sessions', {
+      p_token: token,
+      p_session_ids: batch,
+    })
+    if (error) throw new Error(`Session rebuild failed: ${error.message}`)
+    if (data?.ok !== true) {
+      throw new Error(`Session rebuild failed: ${String(data?.error || 'unknown_error')}`)
+    }
+    const updated = data.sessions_updated
+    if (typeof updated !== 'number' || !Number.isSafeInteger(updated) || updated !== batch.length) {
+      throw new Error(`Session rebuild failed: expected ${batch.length} updates, received ${String(updated ?? 'missing')}`)
+    }
+    sessionsUpdated += updated
+  }
+
+  if (syncStates.length > 0) {
+    await uploadEventBatch(rpc, {
+      p_token: token,
+      p_events: [],
+      p_sync_states: syncStates,
+    })
+  }
+
+  return { eventsInserted, sessionsUpdated }
 }
 
 async function getRemoteHermesTotals(token: string, sessionIds: string[]): Promise<Map<string, HermesImportedTotals>> {
@@ -470,28 +523,17 @@ export async function runCloudSync(token: string): Promise<SyncStats> {
     }
   }
 
-  // 3. Upload payloads before committing sync cursors.
-  stats.eventsInserted += await uploadSyncPayload({
+  // 3. Upload events/messages, rebuild every affected session, then commit cursors.
+  const uploaded = await syncCloudPayload({
     token,
     events: allEvents,
     messages: allMessages,
     syncStates: allSyncStates,
+    sessionIds: Array.from(sessionIds),
     rpc: (name, args) => supabase.rpc(name, args),
   })
-
-  // 4. Rebuild sessions
-  if (sessionIds.size > 0) {
-    const ids = Array.from(sessionIds)
-    // Batch session rebuilds in groups of 100
-    for (let i = 0; i < ids.length; i += 100) {
-      const batch = ids.slice(i, i + 100)
-      const { data } = await supabase.rpc('tokend_rebuild_sessions', {
-        p_token: token,
-        p_session_ids: batch,
-      })
-      stats.sessionsUpdated += data?.sessions_updated || 0
-    }
-  }
+  stats.eventsInserted += uploaded.eventsInserted
+  stats.sessionsUpdated += uploaded.sessionsUpdated
 
   stats.duration = Date.now() - start
   return stats

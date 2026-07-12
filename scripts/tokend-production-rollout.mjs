@@ -8,6 +8,8 @@ import { pathToFileURL } from 'node:url'
 
 export const MANAGED_MIGRATION_VERSIONS = Object.freeze([
   '202607100001', '202607100002', '202607100003', '202607100004', '202607100005', '202607100006',
+  '202607100007', '202607100008', '202607100009', '202607100010', '202607100011', '202607100012',
+  '202607100013', '202607100014',
 ])
 export const EMERGENCY_VERSION = '202607109999'
 export const RECOVERY_MIN_VERSION = '202607110001'
@@ -1435,21 +1437,38 @@ function requireRows(payload, key) {
 }
 
 export async function collectRpcVerification({ token, liveAccess, adminExpected = true, callClient, callLegacy }) {
+  const namedCall = async (surface, call, name, body) => {
+    try {
+      return await call(name, body)
+    } catch (error) {
+      const wrapped = new ExitCodeError(`${surface} RPC ${name} failed: ${error?.message ?? String(error)}`)
+      wrapped.cause = error
+      for (const key of ['status', 'sqlstate', 'code']) {
+        const value = error?.[key]
+        if (typeof value === 'string' || (typeof value === 'number' && Number.isFinite(value))) {
+          wrapped[key] = value
+        }
+      }
+      throw wrapped
+    }
+  }
+  const client = (name, body) => namedCall('vNext', callClient, name, body)
+  const legacy = (name, body) => namedCall('legacy', callLegacy, name, body)
   const base = { p_token: token, p_period: '7d' }
   const clientRpcResults = {}
-  clientRpcResults.tokend_get_summary_v5 = await callClient('tokend_get_summary_v5', { ...base, p_timezone: 'Asia/Shanghai' })
-  clientRpcResults.tokend_get_daily_trend_v5 = await callClient('tokend_get_daily_trend_v5', { ...base, p_timezone: 'Asia/Shanghai' })
+  clientRpcResults.tokend_get_summary_v5 = await client('tokend_get_summary_v5', { ...base, p_timezone: 'Asia/Shanghai' })
+  clientRpcResults.tokend_get_daily_trend_v5 = await client('tokend_get_daily_trend_v5', { ...base, p_timezone: 'Asia/Shanghai' })
   const days = requireRows(clientRpcResults.tokend_get_daily_trend_v5, 'days')
-  clientRpcResults.tokend_get_model_breakdown_v3 = await callClient('tokend_get_model_breakdown_v3', base)
+  clientRpcResults.tokend_get_model_breakdown_v3 = await client('tokend_get_model_breakdown_v3', base)
   const models = requireRows(clientRpcResults.tokend_get_model_breakdown_v3, 'models')
-  clientRpcResults.tokend_get_model_detail_v2 = await callClient('tokend_get_model_detail_v2', { ...base, p_model: models[0].model })
-  clientRpcResults.tokend_get_channel_breakdown_v4 = await callClient('tokend_get_channel_breakdown_v4', base)
+  clientRpcResults.tokend_get_model_detail_v2 = await client('tokend_get_model_detail_v2', { ...base, p_model: models[0].model })
+  clientRpcResults.tokend_get_channel_breakdown_v4 = await client('tokend_get_channel_breakdown_v4', base)
   const channels = requireRows(clientRpcResults.tokend_get_channel_breakdown_v4, 'channels')
-  clientRpcResults.tokend_get_channel_detail_v3 = await callClient('tokend_get_channel_detail_v3', { ...base, p_channel: channels[0].channel, p_timezone: 'Asia/Shanghai' })
-  clientRpcResults.tokend_get_sessions_v2 = await callClient('tokend_get_sessions_v2', { ...base, p_limit: 200 })
+  clientRpcResults.tokend_get_channel_detail_v3 = await client('tokend_get_channel_detail_v3', { ...base, p_channel: channels[0].channel, p_timezone: 'Asia/Shanghai' })
+  clientRpcResults.tokend_get_sessions_v2 = await client('tokend_get_sessions_v2', { ...base, p_limit: 200 })
   const sessions = requireRows(clientRpcResults.tokend_get_sessions_v2, 'sessions')
-  clientRpcResults.tokend_get_session_detail_v2 = await callClient('tokend_get_session_detail_v2', { p_token: token, p_session_id: sessions[0].sessionId })
-  clientRpcResults.tokend_get_top_projects_v3 = await callClient('tokend_get_top_projects_v3', base)
+  clientRpcResults.tokend_get_session_detail_v2 = await client('tokend_get_session_detail_v2', { p_token: token, p_session_id: sessions[0].sessionId })
+  clientRpcResults.tokend_get_top_projects_v3 = await client('tokend_get_top_projects_v3', base)
   const projects = requireRows(clientRpcResults.tokend_get_top_projects_v3, 'projects')
   const legacyBodies = {
     tokend_get_summary_v4: { ...base, p_timezone: 'Asia/Shanghai' },
@@ -1464,7 +1483,7 @@ export async function collectRpcVerification({ token, liveAccess, adminExpected 
   }
   const legacyRpcNames = []
   for (const name of LEGACY_RPC_NAMES) {
-    const payload = await callLegacy(name, legacyBodies[name])
+    const payload = await legacy(name, legacyBodies[name])
     if (!payload || payload.ok === false) fail(`Legacy RPC ${name} is unavailable`)
     legacyRpcNames.push(name)
   }
@@ -1777,6 +1796,8 @@ export function validateReconciliation(report, expected) {
   return { passed: true }
 }
 
+const MONITOR_MAX_UNPRICED_SHARE_DELTA = 0.0001
+
 function validateMonitorSnapshot(snapshot, baselineGlobal, baselineRpc) {
   if (!snapshot.legacyHealthy || !snapshot.vNextHealthy) fail('Legacy/vNext monitor health failed')
   for (const [label, report] of [['legacy', snapshot.legacyRpc], ['vNext', snapshot.vNextRpc]]) {
@@ -1801,7 +1822,13 @@ function validateMonitorSnapshot(snapshot, baselineGlobal, baselineRpc) {
     const coverageRank = { unpriced: 0, partial: 1, legacy: 2, zero_rate: 3, complete: 4, no_usage: 4 }
     if (!Object.hasOwn(coverageRank, snapshot.global?.status) || !Object.hasOwn(coverageRank, baselineGlobal.status)
       || coverageRank[snapshot.global.status] < coverageRank[baselineGlobal.status]) fail('Global coverage status regressed')
-    if (Number(snapshot.global?.unpricedShare ?? 0) > Number(baselineGlobal.maxUnpricedShare ?? 0)) fail('Global unpriced share exceeded baseline')
+    // Live ingestion can add a handful of legitimate unknown-model rows during
+    // the observation window. Keep a 0.01 percentage-point noise budget while
+    // still rejecting any material coverage regression.
+    if (Number(snapshot.global?.unpricedShare ?? 0)
+      > Number(baselineGlobal.maxUnpricedShare ?? 0) + MONITOR_MAX_UNPRICED_SHARE_DELTA + 1e-12) {
+      fail('Global unpriced share exceeded baseline')
+    }
     if (Number(snapshot.global?.membersOver2x ?? 0) > Number(baselineGlobal.membersOver2x ?? 0)) fail('membersOver2x exceeded baseline')
   }
   const postSnapshotEventCount = exactNonnegativeInteger(snapshot.global?.postSnapshotEventCount, 'Monitor postSnapshotEventCount').number

@@ -118,11 +118,96 @@ WHERE pronamespace = 'public'::regnamespace
 \ir ../../migrations/202607100005_optimize_sessions_v2.sql
 \ir ../../migrations/202607100006_extend_reconcile_timeout.sql
 \ir ../../migrations/202607100006_extend_reconcile_timeout.sql
+\ir ../../migrations/202607100007_extend_channel_detail_timeout.sql
+\ir ../../migrations/202607100007_extend_channel_detail_timeout.sql
+\ir ../../migrations/202607100008_extend_activation_timeout.sql
+\ir ../../migrations/202607100008_extend_activation_timeout.sql
+
+CREATE TEMP TABLE channel_detail_v3_oid_before_hotfix AS
+SELECT oid
+FROM pg_proc
+WHERE oid = 'public.tokend_get_channel_detail_v3(text,text,text,text)'::regprocedure;
+
+\ir ../../migrations/202607100009_optimize_channel_detail_v3.sql
+\ir ../../migrations/202607100009_optimize_channel_detail_v3.sql
+
+CREATE TEMP TABLE pricing_preflight_oid_before_hotfix AS
+SELECT oid
+FROM pg_proc
+WHERE oid = 'public.tokend_pricing_preflight()'::regprocedure;
+
+\ir ../../migrations/202607100010_optimize_pricing_preflight.sql
+\ir ../../migrations/202607100010_optimize_pricing_preflight.sql
+\ir ../../migrations/202607100011_extend_preflight_rest_timeout.sql
+\ir ../../migrations/202607100011_extend_preflight_rest_timeout.sql
+\ir ../../migrations/202607100012_extend_preflight_rest_timeout_headroom.sql
+\ir ../../migrations/202607100012_extend_preflight_rest_timeout_headroom.sql
+\ir ../../migrations/202607100013_extend_sessions_rest_timeout.sql
+\ir ../../migrations/202607100013_extend_sessions_rest_timeout.sql
+\ir ../../migrations/202607100014_extend_session_detail_rest_timeout.sql
+\ir ../../migrations/202607100014_extend_session_detail_rest_timeout.sql
 
 BEGIN;
 SET LOCAL search_path = public, extensions;
 
-SELECT plan(197);
+SELECT plan(206);
+
+SELECT is(
+  'public.tokend_pricing_preflight()'::regprocedure::OID,
+  (SELECT oid FROM pricing_preflight_oid_before_hotfix),
+  'pricing preflight hotfix preserves the function OID across both loads'
+);
+
+SELECT ok(
+  COALESCE((
+    SELECT proconfig @> ARRAY['statement_timeout=40s']
+    FROM pg_proc
+    WHERE oid = 'public.tokend_pricing_preflight()'::regprocedure
+  ), FALSE),
+  'pricing preflight declares the production-tested PostgREST administrative timeout exemption'
+);
+
+SELECT is(
+  'public.tokend_get_channel_detail_v3(text,text,text,text)'::regprocedure::OID,
+  (SELECT oid FROM channel_detail_v3_oid_before_hotfix),
+  'channel detail v3 hotfix preserves the function OID across both loads'
+);
+
+SELECT ok(
+  COALESCE((
+    SELECT proconfig @> ARRAY['statement_timeout=8s']
+    FROM pg_proc
+    WHERE oid = 'public.tokend_get_channel_detail_v3(text,text,text,text)'::regprocedure
+  ), FALSE),
+  'channel detail v3 has the bounded production runtime budget'
+);
+
+SELECT ok(
+  COALESCE((
+    SELECT proconfig @> ARRAY['statement_timeout=8s']
+    FROM pg_proc
+    WHERE oid = 'public.tokend_get_sessions_v2(text,text,integer)'::regprocedure
+  ), FALSE),
+  'sessions v2 has the bounded production REST runtime budget'
+);
+
+SELECT ok(
+  COALESCE((
+    SELECT proconfig @> ARRAY['statement_timeout=8s']
+    FROM pg_proc
+    WHERE oid = 'public.tokend_get_session_detail_v2(text,text)'::regprocedure
+  ), FALSE),
+  'session detail v2 has the bounded production REST runtime budget'
+);
+
+SELECT ok(
+  COALESCE((
+    SELECT proconfig @> ARRAY['statement_timeout=15s']
+    FROM pg_proc
+    WHERE oid = 'public.tokend_pricing_activate(uuid)'::regprocedure
+  ), FALSE),
+  'pricing activation has the bounded production runtime budget'
+);
 
 SELECT is(
   (SELECT count(*)::INTEGER FROM public.tokend_pricing_catalogs),
@@ -3070,6 +3155,95 @@ SELECT is(
   (public.tokend_pricing_preflight()::JSONB->>'postSnapshotEventCount')::BIGINT,
   5::BIGINT,
   'preflight and get use the same ingest-epoch late-arrival definition'
+);
+
+SELECT ok(
+  (
+    WITH preflight AS (
+      SELECT public.tokend_pricing_preflight()::JSONB AS value
+    ), reference AS (
+      SELECT
+        count(*)::BIGINT AS event_count,
+        count(*) FILTER (WHERE total_tokens > 0)::BIGINT AS eligible_event_count,
+        count(*) FILTER (
+          WHERE total_tokens > 0 AND COALESCE(effective_total_cost, 0) = 0
+        )::BIGINT AS eligible_zero_cost_event_count,
+        count(*) FILTER (
+          WHERE total_tokens > 0 AND effective_pricing_status = 'unpriced'
+        )::BIGINT AS unpriced_event_count,
+        COALESCE(sum(effective_total_cost), 0)::NUMERIC(20,10) AS total_cost,
+        jsonb_build_object(
+          'reported', count(*) FILTER (
+            WHERE total_tokens > 0 AND effective_pricing_status = 'reported'
+          ),
+          'estimated', count(*) FILTER (
+            WHERE total_tokens > 0 AND effective_pricing_status = 'estimated'
+          ),
+          'zero_rate', count(*) FILTER (
+            WHERE total_tokens > 0 AND effective_pricing_status = 'zero_rate'
+          ),
+          'unpriced', count(*) FILTER (
+            WHERE total_tokens > 0 AND effective_pricing_status = 'unpriced'
+          ),
+          'legacy', count(*) FILTER (
+            WHERE total_tokens > 0 AND effective_pricing_status = 'legacy'
+          ),
+          'unset', count(*) FILTER (
+            WHERE total_tokens > 0 AND effective_pricing_status IS NULL
+          )
+        ) AS status_counts
+      FROM public.tokend_effective_usage_events
+    )
+    SELECT
+      (preflight.value->>'eventCount')::BIGINT = reference.event_count
+      AND (preflight.value->>'eligibleEventCount')::BIGINT = reference.eligible_event_count
+      AND (preflight.value->>'eligibleZeroCostEventCount')::BIGINT
+        = reference.eligible_zero_cost_event_count
+      AND (preflight.value->>'unpricedEventCount')::BIGINT = reference.unpriced_event_count
+      AND (preflight.value->>'totalCost')::NUMERIC = reference.total_cost
+      AND preflight.value->'statusCounts' = reference.status_counts
+    FROM preflight CROSS JOIN reference
+  ),
+  'optimized preflight global aggregates exactly match the effective relation'
+);
+
+SELECT ok(
+  (
+    WITH preflight AS (
+      SELECT public.tokend_pricing_preflight()::JSONB AS value
+    ), model_rollup AS MATERIALIZED (
+      SELECT
+        COALESCE(model, 'unknown') AS model,
+        count(*)::BIGINT AS event_count,
+        COALESCE(sum(total_tokens), 0)::BIGINT AS total_tokens
+      FROM public.tokend_effective_usage_events
+      WHERE total_tokens > 0
+        AND COALESCE(effective_total_cost, 0) = 0
+      GROUP BY COALESCE(model, 'unknown')
+    ), bounded_models AS MATERIALIZED (
+      SELECT model, event_count, total_tokens
+      FROM model_rollup
+      ORDER BY event_count DESC, model
+      LIMIT 100
+    ), reference AS (
+      SELECT
+        (SELECT COALESCE(jsonb_agg(jsonb_build_object(
+          'model', bounded_models.model,
+          'eventCount', bounded_models.event_count,
+          'totalTokens', bounded_models.total_tokens
+        ) ORDER BY bounded_models.event_count DESC, bounded_models.model), '[]'::JSONB)
+         FROM bounded_models) AS models,
+        (SELECT count(*)::BIGINT > 100 FROM model_rollup) AS truncated,
+        (SELECT COALESCE(sum(event_count), 0)::BIGINT FROM model_rollup)
+          - (SELECT COALESCE(sum(event_count), 0)::BIGINT FROM bounded_models) AS other_count
+    )
+    SELECT
+      preflight.value->'zeroCostByModel' = reference.models
+      AND (preflight.value->>'zeroCostByModelTruncated')::BOOLEAN = reference.truncated
+      AND (preflight.value->>'zeroCostOtherEventCount')::BIGINT = reference.other_count
+    FROM preflight CROSS JOIN reference
+  ),
+  'optimized preflight zero-cost model rollup exactly matches the effective relation'
 );
 
 SELECT is(

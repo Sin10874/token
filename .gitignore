@@ -10,6 +10,7 @@ data/clawmeter.db-*
 .env
 .npmrc
 *.local
+supabase/.temp/
 
 # macOS
 .DS_Store

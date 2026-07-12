@@ -251,6 +251,62 @@ function readReconcileTimeoutMigration(): string {
   )
 }
 
+function readChannelDetailTimeoutMigration(): string {
+  return fs.readFileSync(
+    path.resolve(process.cwd(), 'supabase/migrations/202607100007_extend_channel_detail_timeout.sql'),
+    'utf8',
+  )
+}
+
+function readActivationTimeoutMigration(): string {
+  return fs.readFileSync(
+    path.resolve(process.cwd(), 'supabase/migrations/202607100008_extend_activation_timeout.sql'),
+    'utf8',
+  )
+}
+
+function readChannelDetailSingleScanMigration(): string {
+  return fs.readFileSync(
+    path.resolve(process.cwd(), 'supabase/migrations/202607100009_optimize_channel_detail_v3.sql'),
+    'utf8',
+  )
+}
+
+function readPreflightSingleScanMigration(): string {
+  return fs.readFileSync(
+    path.resolve(process.cwd(), 'supabase/migrations/202607100010_optimize_pricing_preflight.sql'),
+    'utf8',
+  )
+}
+
+function readPreflightRestTimeoutMigration(): string {
+  return fs.readFileSync(
+    path.resolve(process.cwd(), 'supabase/migrations/202607100011_extend_preflight_rest_timeout.sql'),
+    'utf8',
+  )
+}
+
+function readPreflightRestTimeoutHeadroomMigration(): string {
+  return fs.readFileSync(
+    path.resolve(process.cwd(), 'supabase/migrations/202607100012_extend_preflight_rest_timeout_headroom.sql'),
+    'utf8',
+  )
+}
+
+function readSessionsRestTimeoutMigration(): string {
+  return fs.readFileSync(
+    path.resolve(process.cwd(), 'supabase/migrations/202607100013_extend_sessions_rest_timeout.sql'),
+    'utf8',
+  )
+}
+
+function readSessionDetailRestTimeoutMigration(): string {
+  return fs.readFileSync(
+    path.resolve(process.cwd(), 'supabase/migrations/202607100014_extend_session_detail_rest_timeout.sql'),
+    'utf8',
+  )
+}
+
 function readPricingRollback(): string {
   return fs.readFileSync(
     path.resolve(process.cwd(), 'supabase/rollback/20260710_restore_prepricing.sql'),
@@ -1012,6 +1068,318 @@ function testReconcileTimeoutMigrationChangesOnlyTheFunctionRuntimeBudget(): voi
   assert.match(migration, /NOTIFY pgrst, 'reload schema';/i)
 }
 
+function testChannelDetailTimeoutMigrationChangesOnlyTheFunctionRuntimeBudget(): void {
+  const migration = readChannelDetailTimeoutMigration()
+  assert.match(migration, /SET lock_timeout = '2s';/i)
+  assert.equal(
+    (migration.match(/ALTER FUNCTION public\.tokend_get_channel_detail_v3\(TEXT, TEXT, TEXT, TEXT\)\s+SET statement_timeout = '8s';/gi) ?? []).length,
+    1,
+  )
+  assert.doesNotMatch(migration, /CREATE(?: OR REPLACE)? FUNCTION|\bGRANT\b|\bREVOKE\b/i)
+  assert.match(migration, /RESET lock_timeout;/i)
+  assert.match(migration, /NOTIFY pgrst, 'reload schema';/i)
+}
+
+function testActivationTimeoutMigrationChangesOnlyTheFunctionRuntimeBudget(): void {
+  const migration = readActivationTimeoutMigration()
+  assert.match(migration, /SET lock_timeout = '2s';/i)
+  assert.equal(
+    (migration.match(/ALTER FUNCTION public\.tokend_pricing_activate\(UUID\)\s+SET statement_timeout = '15s';/gi) ?? []).length,
+    1,
+  )
+  assert.doesNotMatch(migration, /CREATE(?: OR REPLACE)? FUNCTION|\bGRANT\b|\bREVOKE\b/i)
+  assert.match(migration, /RESET lock_timeout;/i)
+  assert.match(migration, /NOTIFY pgrst, 'reload schema';/i)
+}
+
+function testPreflightRestTimeoutMigrationChangesOnlyTheFunctionRuntimeBudget(): void {
+  const migration = readPreflightRestTimeoutMigration()
+  assert.match(migration, /SET lock_timeout = '2s';/i)
+  assert.equal(
+    (migration.match(/ALTER FUNCTION public\.tokend_pricing_preflight\(\)\s+SET statement_timeout = '25s';/gi) ?? []).length,
+    1,
+  )
+  assert.doesNotMatch(migration, /CREATE(?: OR REPLACE)? FUNCTION|\bGRANT\b|\bREVOKE\b/i)
+  assert.match(migration, /RESET lock_timeout;/i)
+  assert.match(migration, /NOTIFY pgrst, 'reload schema';/i)
+}
+
+function testPreflightRestTimeoutHeadroomMigrationChangesOnlyTheFunctionRuntimeBudget(): void {
+  const migration = readPreflightRestTimeoutHeadroomMigration()
+  assert.match(migration, /SET lock_timeout = '2s';/i)
+  assert.equal(
+    (migration.match(/ALTER FUNCTION public\.tokend_pricing_preflight\(\)\s+SET statement_timeout = '40s';/gi) ?? []).length,
+    1,
+  )
+  assert.doesNotMatch(migration, /CREATE(?: OR REPLACE)? FUNCTION|\bGRANT\b|\bREVOKE\b/i)
+  assert.match(migration, /RESET lock_timeout;/i)
+  assert.match(migration, /NOTIFY pgrst, 'reload schema';/i)
+}
+
+function testSessionsRestTimeoutMigrationChangesOnlyTheFunctionRuntimeBudget(): void {
+  const migration = readSessionsRestTimeoutMigration()
+  assert.match(migration, /SET lock_timeout = '2s';/i)
+  assert.equal(
+    (migration.match(/ALTER FUNCTION public\.tokend_get_sessions_v2\(TEXT, TEXT, INTEGER\)\s+SET statement_timeout = '8s';/gi) ?? []).length,
+    1,
+  )
+  assert.doesNotMatch(migration, /CREATE(?: OR REPLACE)? FUNCTION|\bGRANT\b|\bREVOKE\b/i)
+  assert.match(migration, /RESET lock_timeout;/i)
+  assert.match(migration, /NOTIFY pgrst, 'reload schema';/i)
+
+  const rollout = fs.readFileSync(
+    path.resolve(process.cwd(), 'scripts/tokend-production-rollout.mjs'),
+    'utf8',
+  )
+  assert.equal((rollout.match(/'202607100013'/g) ?? []).length, 1)
+
+  const scale = fs.readFileSync(
+    path.resolve(process.cwd(), 'scripts/test-pricing-scale.sh'),
+    'utf8',
+  )
+  assert.equal(
+    (scale.match(/supabase\/migrations\/202607100013_extend_sessions_rest_timeout\.sql/g) ?? []).length,
+    1,
+  )
+  assert.match(scale, /sessions_active_ms="\$LAST_ELAPSED_MS"/)
+  assert.match(scale, /assert_le "active sessions v2 ms" "\$sessions_active_ms" 8000/)
+
+  const pgTap = fs.readFileSync(
+    path.resolve(process.cwd(), 'supabase/tests/database/pricing.test.sql'),
+    'utf8',
+  )
+  assert.equal(
+    (pgTap.match(/^\\ir \.\.\/\.\.\/migrations\/202607100013_extend_sessions_rest_timeout\.sql$/gm) ?? []).length,
+    2,
+  )
+  assert.match(
+    pgTap,
+    /proconfig @> ARRAY\['statement_timeout=8s'\][\s\S]{0,300}tokend_get_sessions_v2\(text,text,integer\)/i,
+  )
+}
+
+function testSessionDetailRestTimeoutMigrationChangesOnlyTheFunctionRuntimeBudget(): void {
+  const migration = readSessionDetailRestTimeoutMigration()
+  assert.match(migration, /SET lock_timeout = '2s';/i)
+  assert.equal(
+    (migration.match(/ALTER FUNCTION public\.tokend_get_session_detail_v2\(TEXT, TEXT\)\s+SET statement_timeout = '8s';/gi) ?? []).length,
+    1,
+  )
+  assert.doesNotMatch(migration, /CREATE(?: OR REPLACE)? FUNCTION|\bGRANT\b|\bREVOKE\b/i)
+  assert.match(migration, /RESET lock_timeout;/i)
+  assert.match(migration, /NOTIFY pgrst, 'reload schema';/i)
+
+  const rollout = fs.readFileSync(
+    path.resolve(process.cwd(), 'scripts/tokend-production-rollout.mjs'),
+    'utf8',
+  )
+  assert.equal((rollout.match(/'202607100014'/g) ?? []).length, 1)
+
+  const scale = fs.readFileSync(
+    path.resolve(process.cwd(), 'scripts/test-pricing-scale.sh'),
+    'utf8',
+  )
+  assert.equal(
+    (scale.match(/supabase\/migrations\/202607100014_extend_session_detail_rest_timeout\.sql/g) ?? []).length,
+    1,
+  )
+  assert.match(scale, /session_detail_active_ms="\$LAST_ELAPSED_MS"/)
+  assert.match(scale, /assert_le "active session detail v2 ms" "\$session_detail_active_ms" 8000/)
+
+  const pgTap = fs.readFileSync(
+    path.resolve(process.cwd(), 'supabase/tests/database/pricing.test.sql'),
+    'utf8',
+  )
+  assert.equal(
+    (pgTap.match(/^\\ir \.\.\/\.\.\/migrations\/202607100014_extend_session_detail_rest_timeout\.sql$/gm) ?? []).length,
+    2,
+  )
+  assert.match(
+    pgTap,
+    /proconfig @> ARRAY\['statement_timeout=8s'\][\s\S]{0,300}tokend_get_session_detail_v2\(text,text\)/i,
+  )
+}
+
+function testChannelDetailHotfixUsesOneEffectiveScanAndPreservesTheRpcContract(): void {
+  const migration = readChannelDetailSingleScanMigration()
+  const detail = functionDefinition(migration, 'tokend_get_channel_detail_v3')
+
+  assert.equal(
+    (detail.match(/FROM public\.tokend_effective_usage_events\b/gi) ?? []).length,
+    1,
+    'channel detail v3 must evaluate the security-barrier effective relation only once',
+  )
+  assert.match(detail, /DROP TABLE IF EXISTS pg_temp\.tokend_channel_detail_aggregates/i)
+  assert.doesNotMatch(detail, /DROP TABLE IF EXISTS\s+tokend_channel_detail_aggregates/i)
+  assert.match(
+    detail,
+    /CREATE TEMP TABLE tokend_channel_detail_aggregates ON COMMIT DROP AS[\s\S]*?FROM public\.tokend_effective_usage_events[\s\S]*?member_code\s*=\s*v_code[\s\S]*?channel\s*=\s*p_channel[\s\S]*?timestamp_ms\s*>=\s*v_from_ms/i,
+  )
+  assert.match(detail, /GROUP BY GROUPING SETS\s*\(\(\),\s*\(bucket\),\s*\(model\),\s*\(session_id\)\)/i)
+  assert.doesNotMatch(detail, /COUNT\(DISTINCT session_id\)/i)
+  assert.match(
+    detail,
+    /UPDATE pg_temp\.tokend_channel_detail_aggregates AS summary_row[\s\S]*?WHERE row_kind = 'session'[\s\S]*?summary_row\.row_kind = 'summary'/i,
+  )
+  assert.match(detail, /ANALYZE pg_temp\.tokend_channel_detail_aggregates/i)
+  assert.equal(
+    (detail.match(/FROM pg_temp\.tokend_channel_detail_aggregates\b/gi) ?? []).length,
+    5,
+    'session count, summary, trend, model mix, and top sessions must read only compact rollups',
+  )
+  assert.match(
+    detail,
+    /metadata AS\s*\([\s\S]*?FROM public\.tokend_usage_events[\s\S]*?session_id IN \(SELECT session_id FROM limited\)/i,
+  )
+  assert.match(
+    detail,
+    /p_token TEXT,[\s\S]*?p_channel TEXT,[\s\S]*?p_period TEXT DEFAULT '7d',[\s\S]*?p_timezone TEXT DEFAULT 'Asia\/Shanghai'[\s\S]*?RETURNS JSON/i,
+  )
+  assert.match(detail, /SECURITY DEFINER[\s\S]*?SET search_path = public, pg_temp[\s\S]*?SET statement_timeout = '8s'/i)
+  assert.doesNotMatch(migration, /DROP\s+FUNCTION/i)
+  assert.match(
+    migration,
+    /REVOKE ALL ON FUNCTION public\.tokend_get_channel_detail_v3\(TEXT, TEXT, TEXT, TEXT\) FROM PUBLIC, anon, authenticated, service_role;/i,
+  )
+  assert.match(
+    migration,
+    /GRANT EXECUTE ON FUNCTION public\.tokend_get_channel_detail_v3\(TEXT, TEXT, TEXT, TEXT\) TO anon, authenticated;/i,
+  )
+  assert.doesNotMatch(
+    migration,
+    /GRANT EXECUTE ON FUNCTION public\.tokend_get_channel_detail_v3\(TEXT, TEXT, TEXT, TEXT\) TO service_role/i,
+  )
+  assert.match(migration, /SET lock_timeout = '2s';/i)
+  assert.match(migration, /RESET lock_timeout;/i)
+  assert.match(migration, /NOTIFY pgrst, 'reload schema';/i)
+
+  const rollout = fs.readFileSync(
+    path.resolve(process.cwd(), 'scripts/tokend-production-rollout.mjs'),
+    'utf8',
+  )
+  assert.equal((rollout.match(/'202607100009'/g) ?? []).length, 1)
+
+  const scale = fs.readFileSync(
+    path.resolve(process.cwd(), 'scripts/test-pricing-scale.sh'),
+    'utf8',
+  )
+  assert.equal(
+    (scale.match(/supabase\/migrations\/202607100009_optimize_channel_detail_v3\.sql/g) ?? []).length,
+    1,
+  )
+  assert.match(scale, /TOKEND_SCALE_CHANNELS:-3/)
+  assert.match(scale, /'scale-token', 'scale-0', '30d'/)
+  assert.match(scale, /expected_channel_detail_calls=\$\(\(scale_rows \/ scale_channels\)\)/)
+  assert.match(scale, /\/sys\/fs\/cgroup\/memory\.current/)
+  assert.match(scale, /\/sys\/fs\/cgroup\/memory\.stat/)
+  assert.match(scale, /containerMemoryDeltaKiB/)
+  assert.match(scale, /containerWorkingDeltaKiB/)
+  assert.match(scale, /containerFileCacheDeltaKiB/)
+  assert.match(scale, /baseline_anon_kb \+ baseline_shmem_kb \+ baseline_kernel_kb/)
+  assert.doesNotMatch(scale, /VmRSS|postgresRssDeltaKiB/)
+
+  const scaleFixture = fs.readFileSync(
+    path.resolve(process.cwd(), 'supabase/tests/database/pricing-scale-fixture.sql'),
+    'utf8',
+  )
+  assert.match(scaleFixture, /'scale-' \|\| MOD\(series\.event_number, :scale_channels::BIGINT\)::TEXT/i)
+}
+
+function testPreflightHotfixUsesOneBaseScanAndPreservesTheAdminContract(): void {
+  const migration = readPreflightSingleScanMigration()
+  const preflight = functionDefinition(migration, 'tokend_pricing_preflight')
+
+  assert.equal(
+    (preflight.match(/FROM public\.tokend_usage_events AS usage_event\b/gi) ?? []).length,
+    1,
+    'preflight must evaluate the base event table only once',
+  )
+  assert.doesNotMatch(preflight, /tokend_effective_usage_events/i)
+  assert.match(
+    preflight,
+    /LEFT JOIN public\.tokend_event_cost_revisions AS revision[\s\S]*?revision\.version\s*=\s*v_active_catalog_version[\s\S]*?revision\.member_code\s*=\s*usage_event\.member_code[\s\S]*?revision\.event_id\s*=\s*usage_event\.id/i,
+  )
+  assert.doesNotMatch(preflight, /CREATE\s+(?:TEMP|TEMPORARY)\s+TABLE|DROP\s+TABLE/i)
+  assert.match(preflight, /model_rollup AS MATERIALIZED\s*\([\s\S]*?GROUP BY effective\.model_label/i)
+  assert.match(preflight, /bounded_models AS MATERIALIZED/i)
+  assert.doesNotMatch(preflight, /GROUPING SETS/i)
+  assert.match(preflight, /effective_source\s*=\s*'reported'/i)
+  assert.match(preflight, /effective_source\s*=\s*'legacy'/i)
+  assert.match(preflight, /effective_source\s*=\s*'revision'/i)
+  assert.doesNotMatch(
+    preflight,
+    /SET statement_timeout/i,
+    'function-local statement_timeout does not arm a timer for the current RPC statement',
+  )
+  assert.match(preflight, /SECURITY DEFINER[\s\S]*?SET search_path = public, pg_temp/i)
+  assert.doesNotMatch(migration, /DROP\s+FUNCTION/i)
+  assert.match(migration, /SET lock_timeout = '2s';/i)
+  assert.match(migration, /RESET lock_timeout;/i)
+  assert.match(migration, /NOTIFY pgrst, 'reload schema';/i)
+  assert.match(
+    migration,
+    /REVOKE ALL ON FUNCTION public\.tokend_pricing_preflight\(\) FROM PUBLIC, anon, authenticated, service_role;/i,
+  )
+  assert.match(
+    migration,
+    /GRANT EXECUTE ON FUNCTION public\.tokend_pricing_preflight\(\) TO service_role;/i,
+  )
+  assert.doesNotMatch(
+    migration,
+    /GRANT EXECUTE ON FUNCTION public\.tokend_pricing_preflight\(\) TO (?:PUBLIC|anon|authenticated)/i,
+  )
+
+  const rollout = fs.readFileSync(
+    path.resolve(process.cwd(), 'scripts/tokend-production-rollout.mjs'),
+    'utf8',
+  )
+  assert.equal((rollout.match(/'202607100010'/g) ?? []).length, 1)
+  assert.equal((rollout.match(/'202607100011'/g) ?? []).length, 1)
+  assert.equal((rollout.match(/'202607100012'/g) ?? []).length, 1)
+
+  const scale = fs.readFileSync(
+    path.resolve(process.cwd(), 'scripts/test-pricing-scale.sh'),
+    'utf8',
+  )
+  assert.equal(
+    (scale.match(/supabase\/migrations\/202607100010_optimize_pricing_preflight\.sql/g) ?? []).length,
+    1,
+  )
+  assert.equal(
+    (scale.match(/supabase\/migrations\/202607100011_extend_preflight_rest_timeout\.sql/g) ?? []).length,
+    1,
+  )
+  assert.equal(
+    (scale.match(/supabase\/migrations\/202607100012_extend_preflight_rest_timeout_headroom\.sql/g) ?? []).length,
+    1,
+  )
+  assert.match(scale, /preflight_rolled_back_ms="\$LAST_ELAPSED_MS"/)
+  assert.match(scale, /preflight_active_ms="\$LAST_ELAPSED_MS"/)
+  assert.match(scale, /assert_le "rolled-back preflight" "\$preflight_rolled_back_ms" 8000/)
+  assert.match(scale, /assert_le "active preflight" "\$preflight_active_ms" 8000/)
+  assert.match(scale, /preflightRolledBackMs/)
+  assert.match(scale, /preflightActiveMs/)
+
+  const pgTap = fs.readFileSync(
+    path.resolve(process.cwd(), 'supabase/tests/database/pricing.test.sql'),
+    'utf8',
+  )
+  assert.equal(
+    (pgTap.match(/^\\ir \.\.\/\.\.\/migrations\/202607100010_optimize_pricing_preflight\.sql$/gm) ?? []).length,
+    2,
+  )
+  assert.equal(
+    (pgTap.match(/^\\ir \.\.\/\.\.\/migrations\/202607100011_extend_preflight_rest_timeout\.sql$/gm) ?? []).length,
+    2,
+  )
+  assert.equal(
+    (pgTap.match(/^\\ir \.\.\/\.\.\/migrations\/202607100012_extend_preflight_rest_timeout_headroom\.sql$/gm) ?? []).length,
+    2,
+  )
+  assert.match(pgTap, /optimized preflight global aggregates exactly match the effective relation/i)
+  assert.match(pgTap, /optimized preflight zero-cost model rollup exactly matches the effective relation/i)
+}
+
 const BACKFILL_ADMIN_SIGNATURES = [
   ['tokend_pricing_create_backfill', 'p_catalog_version TEXT, p_create_request_id UUID', 'TEXT, UUID'],
   ['tokend_pricing_freeze_batch', 'p_run_id UUID, p_limit INTEGER DEFAULT 5000', 'UUID, INTEGER'],
@@ -1530,10 +1898,10 @@ function testPgTapContractIsSelfContained(): void {
   const assertionPattern = /^SELECT (?:fk_ok|is|lives_ok|ok|results_eq|throws_ok)\(/gm
   assert.equal(plans.length, 1, 'pgTAP must declare exactly one continuous plan')
   assert.equal(finishes.length, 1, 'pgTAP must call finish exactly once')
-  assert.equal(Number(plans[0]?.[1]), 197, 'pgTAP must plan the full 197 assertions')
+  assert.equal(Number(plans[0]?.[1]), 206, 'pgTAP must plan the full 206 assertions')
   assert.equal(
     (pgTap.match(assertionPattern) ?? []).length,
-    197,
+    206,
     'continuous pgTAP plan must exactly match all assertions',
   )
   assert.doesNotMatch(pgTap, /^SELECT pass\(/gm)
@@ -1559,6 +1927,18 @@ function testPgTapContractIsSelfContained(): void {
   )
   assert.equal(
     (pgTap.match(/^\\ir \.\.\/\.\.\/migrations\/202607100006_extend_reconcile_timeout\.sql$/gm) ?? []).length,
+    2,
+  )
+  assert.equal(
+    (pgTap.match(/^\\ir \.\.\/\.\.\/migrations\/202607100007_extend_channel_detail_timeout\.sql$/gm) ?? []).length,
+    2,
+  )
+  assert.equal(
+    (pgTap.match(/^\\ir \.\.\/\.\.\/migrations\/202607100008_extend_activation_timeout\.sql$/gm) ?? []).length,
+    2,
+  )
+  assert.equal(
+    (pgTap.match(/^\\ir \.\.\/\.\.\/migrations\/202607100009_optimize_channel_detail_v3\.sql$/gm) ?? []).length,
     2,
   )
   assert.equal(
@@ -1662,6 +2042,14 @@ testSummaryChildrenAndSessionsUseTheFullEnvelopeContract()
 testSummaryUsesTheV14SingleScanExecutionShape()
 testSessionsHotfixUsesOneEffectiveScanAndPreservesTheRpcContract()
 testReconcileTimeoutMigrationChangesOnlyTheFunctionRuntimeBudget()
+testChannelDetailTimeoutMigrationChangesOnlyTheFunctionRuntimeBudget()
+testActivationTimeoutMigrationChangesOnlyTheFunctionRuntimeBudget()
+testPreflightRestTimeoutMigrationChangesOnlyTheFunctionRuntimeBudget()
+testPreflightRestTimeoutHeadroomMigrationChangesOnlyTheFunctionRuntimeBudget()
+testSessionsRestTimeoutMigrationChangesOnlyTheFunctionRuntimeBudget()
+testSessionDetailRestTimeoutMigrationChangesOnlyTheFunctionRuntimeBudget()
+testChannelDetailHotfixUsesOneEffectiveScanAndPreservesTheRpcContract()
+testPreflightHotfixUsesOneBaseScanAndPreservesTheAdminContract()
 testBackfillMigrationDefinesExactAdminSurfaceAndAcls()
 testBackfillMigrationUsesAShortEpochFenceAndBoundedFreeze()
 testBackfillBatchUsesPersistedCursorAndOneLockedPendingWindow()

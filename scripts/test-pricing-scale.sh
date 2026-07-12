@@ -7,6 +7,7 @@ pg_container="${TOKEND_TEST_PG_CONTAINER:-tokend-pg17-scale}"
 pg_user="${TOKEND_TEST_PGUSER:-postgres}"
 pg_password="${TOKEND_TEST_PGPASSWORD:-postgres}"
 scale_rows="${TOKEND_SCALE_ROWS:-700000}"
+scale_channels="${TOKEND_SCALE_CHANNELS:-3}"
 upload_clients="${TOKEND_SCALE_UPLOAD_CLIENTS:-4}"
 upload_rate="${TOKEND_SCALE_UPLOAD_RATE:-20}"
 freeze_load_seconds="${TOKEND_SCALE_FREEZE_LOAD_SECONDS:-90}"
@@ -45,12 +46,20 @@ run_file() {
     < "$repo_root/$file"
 }
 
-postgres_rss_kb() {
-  container_command sh -c 'for pid in $(pgrep postgres); do
-    if [ -r "/proc/$pid/status" ]; then
-      awk "/^VmRSS:/ {print \$2}" "/proc/$pid/status" 2>/dev/null
-    fi
-  done | awk "{sum += \$1} END {print sum + 0}"'
+container_memory_sample_kb() {
+  container_command sh -c '
+    current=$(cat /sys/fs/cgroup/memory.current) || exit 1
+    awk -v current="$current" '\''
+      $1 == "anon" { anon = $2 }
+      $1 == "file" { file = $2 }
+      $1 == "shmem" { shmem = $2 }
+      $1 == "kernel" { kernel = $2 }
+      END {
+        if (current !~ /^[0-9]+$/) exit 1
+        printf "%d\t%d\t%d\t%d\t%d\n", current / 1024, anon / 1024,
+          file / 1024, shmem / 1024, kernel / 1024
+      }
+    '\'' /sys/fs/cgroup/memory.stat'
 }
 
 container_memory_limit_kb() {
@@ -162,7 +171,7 @@ finish_pgbench() {
 sample_memory() {
   while container_command true >/dev/null 2>&1; do
     printf '%s\t' "$(now_ms)"
-    postgres_rss_kb
+    container_memory_sample_kb
     sleep 1
   done
 }
@@ -187,18 +196,25 @@ if ! [[ "$scale_rows" =~ ^[1-9][0-9]*$ ]]; then
   echo "TOKEND_SCALE_ROWS must be a positive integer" >&2
   exit 2
 fi
+if ! [[ "$scale_channels" =~ ^[1-9][0-9]*$ ]]; then
+  echo "TOKEND_SCALE_CHANNELS must be a positive integer" >&2
+  exit 2
+fi
 container_command pg_isready -h 127.0.0.1 -p 5432 -U "$pg_user" >/dev/null
 container_command createdb -h 127.0.0.1 -p 5432 -U "$pg_user" "$database"
 active_database="$database"
 
 echo "scale: seed $scale_rows rows"
 seed_started="$(now_ms)"
-run_file supabase/tests/database/pricing-scale-fixture.sql -v "scale_rows=$scale_rows" \
+run_file supabase/tests/database/pricing-scale-fixture.sql \
+  -v "scale_rows=$scale_rows" -v "scale_channels=$scale_channels" \
   > "$evidence_dir/seed.out" 2>&1
 seed_ms=$(( $(now_ms) - seed_started ))
-baseline_rss_kb="$(postgres_rss_kb)"
+IFS=$'\t' read -r baseline_memory_kb baseline_anon_kb baseline_file_kb baseline_shmem_kb baseline_kernel_kb \
+  <<< "$(container_memory_sample_kb)"
+baseline_working_kb=$((baseline_anon_kb + baseline_shmem_kb + baseline_kernel_kb))
 memory_limit_kb="$(container_memory_limit_kb)"
-sample_memory > "$evidence_dir/postgres-rss.tsv" &
+sample_memory > "$evidence_dir/container-memory.tsv" &
 memory_sampler_pid=$!
 
 echo "scale: migration 001 under legacy uploads"
@@ -240,9 +256,17 @@ for migration in \
   supabase/migrations/202607100003_pricing_rpcs.sql \
   supabase/migrations/202607100004_pricing_backfill.sql \
   supabase/migrations/202607100005_optimize_sessions_v2.sql \
-  supabase/migrations/202607100006_extend_reconcile_timeout.sql
+  supabase/migrations/202607100006_extend_reconcile_timeout.sql \
+  supabase/migrations/202607100007_extend_channel_detail_timeout.sql \
+  supabase/migrations/202607100008_extend_activation_timeout.sql \
+  supabase/migrations/202607100009_optimize_channel_detail_v3.sql \
+  supabase/migrations/202607100010_optimize_pricing_preflight.sql \
+  supabase/migrations/202607100011_extend_preflight_rest_timeout.sql \
+  supabase/migrations/202607100012_extend_preflight_rest_timeout_headroom.sql \
+  supabase/migrations/202607100013_extend_sessions_rest_timeout.sql \
+  supabase/migrations/202607100014_extend_session_detail_rest_timeout.sql
 do
-  run_file "$migration" --single-transaction >> "$evidence_dir/migrations-002-006.out" 2>&1
+  run_file "$migration" --single-transaction >> "$evidence_dir/migrations-002-009.out" 2>&1
 done
 
 echo "scale: sessions v2 sparse-member performance gate"
@@ -267,15 +291,15 @@ run_sql "
   FROM generate_series(1, 3) AS series;" >/dev/null
 rpc_concurrent_started="$(now_ms)"
 rpc_concurrent_pids=()
-(run_sql "SET statement_timeout = '10s'; SELECT public.tokend_get_summary_v5('scale-rpc-token', '7d', 'Asia/Shanghai')::JSONB->>'ok'" > "$evidence_dir/rpc-concurrent-summary.out") &
+(run_sql "SET statement_timeout = '8s'; SELECT public.tokend_get_summary_v5('scale-rpc-token', '7d', 'Asia/Shanghai')::JSONB->>'ok'" > "$evidence_dir/rpc-concurrent-summary.out") &
 rpc_concurrent_pids+=("$!")
-(run_sql "SET statement_timeout = '10s'; SELECT public.tokend_get_daily_trend_v5('scale-rpc-token', '7d', 'Asia/Shanghai')::JSONB->>'ok'" > "$evidence_dir/rpc-concurrent-daily.out") &
+(run_sql "SET statement_timeout = '8s'; SELECT public.tokend_get_daily_trend_v5('scale-rpc-token', '7d', 'Asia/Shanghai')::JSONB->>'ok'" > "$evidence_dir/rpc-concurrent-daily.out") &
 rpc_concurrent_pids+=("$!")
-(run_sql "SET statement_timeout = '10s'; SELECT public.tokend_get_model_breakdown_v3('scale-rpc-token', '7d')::JSONB->>'ok'" > "$evidence_dir/rpc-concurrent-models.out") &
+(run_sql "SET statement_timeout = '8s'; SELECT public.tokend_get_model_breakdown_v3('scale-rpc-token', '7d')::JSONB->>'ok'" > "$evidence_dir/rpc-concurrent-models.out") &
 rpc_concurrent_pids+=("$!")
-(run_sql "SET statement_timeout = '10s'; SELECT public.tokend_get_sessions_v2('scale-rpc-token', '7d', 50)::JSONB->>'ok'" > "$evidence_dir/rpc-concurrent-sessions.out") &
+(run_sql "SET statement_timeout = '8s'; SELECT public.tokend_get_sessions_v2('scale-rpc-token', '7d', 50)::JSONB->>'ok'" > "$evidence_dir/rpc-concurrent-sessions.out") &
 rpc_concurrent_pids+=("$!")
-(run_sql "SET statement_timeout = '10s'; SELECT public.tokend_get_top_projects_v3('scale-rpc-token', '7d')::JSONB->>'ok'" > "$evidence_dir/rpc-concurrent-projects.out") &
+(run_sql "SET statement_timeout = '8s'; SELECT public.tokend_get_top_projects_v3('scale-rpc-token', '7d')::JSONB->>'ok'" > "$evidence_dir/rpc-concurrent-projects.out") &
 rpc_concurrent_pids+=("$!")
 rpc_concurrent_failed=0
 for pid in "${rpc_concurrent_pids[@]}"; do
@@ -289,10 +313,10 @@ fi
 for result in "$evidence_dir"/rpc-concurrent-*.out; do
   assert_eq "concurrent RPC result $(basename "$result")" "$(tr -d '[:space:]' < "$result")" "true"
 done
-assert_le "concurrent sparse-member dashboard RPC latency ms" "$rpc_concurrent_ms" 10000
+assert_le "concurrent sparse-member dashboard RPC latency ms" "$rpc_concurrent_ms" 8000
 sessions_sparse_started="$(now_ms)"
 sessions_sparse_result="$(run_sql "
-  SET statement_timeout = '10s';
+  SET statement_timeout = '8s';
   WITH response AS MATERIALIZED (
     SELECT public.tokend_get_sessions_v2('scale-rpc-token', '7d', 50)::JSONB AS value
   )
@@ -301,7 +325,7 @@ sessions_sparse_result="$(run_sql "
   FROM response")"
 sessions_sparse_ms=$(( $(now_ms) - sessions_sparse_started ))
 assert_eq "sessions v2 sparse result" "$sessions_sparse_result" "true|1|3"
-assert_le "sessions v2 sparse latency ms" "$sessions_sparse_ms" 10000
+assert_le "sessions v2 sparse latency ms" "$sessions_sparse_ms" 8000
 run_sql "
   DELETE FROM public.tokend_usage_events WHERE member_code = 'SCALE_RPC';
   DELETE FROM public.tokend_members WHERE member_code = 'SCALE_RPC';" >/dev/null
@@ -328,7 +352,7 @@ run_sql "
   LIMIT 200;" >/dev/null
 sessions_dense_started="$(now_ms)"
 sessions_dense_result="$(run_sql "
-  SET statement_timeout = '10s';
+  SET statement_timeout = '8s';
   WITH response AS MATERIALIZED (
     SELECT public.tokend_get_sessions_v2('scale-token', '7d', 200)::JSONB AS value
   )
@@ -342,7 +366,7 @@ if [[ "$sessions_dense_count" -lt 1 || "$sessions_dense_count" -gt 200 || "$sess
   echo "sessions v2 dense result is outside the bounded nonempty contract: $sessions_dense_result" >&2
   exit 1
 fi
-assert_le "sessions v2 dense latency ms" "$sessions_dense_ms" 10000
+assert_le "sessions v2 dense latency ms" "$sessions_dense_ms" 8000
 run_sql "
   DELETE FROM public.tokend_usage_events
   WHERE member_code = 'SCALE001' AND id LIKE 'scale-rpc-touch-%';" >/dev/null
@@ -473,9 +497,82 @@ assert_eq "first activation" "$LAST_RESULT" "active"
 timed_sql "SELECT public.tokend_pricing_rollback('$run_id'::UUID)->>'status'"
 rollback_ms="$LAST_ELAPSED_MS"
 assert_eq "rollback" "$LAST_RESULT" "rolled_back"
+timed_sql "
+  WITH response AS MATERIALIZED (
+    SELECT public.tokend_pricing_preflight()::JSONB AS value
+  )
+  SELECT (value->>'authoritative') || '|' || (value->>'source') || '|'
+    || (value->>'eventCount') || '|' || (value->>'eligibleEventCount') || '|'
+    || (SELECT COALESCE(sum(status.value::BIGINT), 0)
+        FROM jsonb_each_text(value->'statusCounts') AS status)
+  FROM response"
+preflight_rolled_back_ms="$LAST_ELAPSED_MS"
+IFS='|' read -r preflight_rolled_back_authoritative preflight_rolled_back_source \
+  preflight_rolled_back_events preflight_rolled_back_eligible preflight_rolled_back_status_total <<< "$LAST_RESULT"
+assert_eq "rolled-back preflight authoritative" "$preflight_rolled_back_authoritative" "true"
+assert_eq "rolled-back preflight source" "$preflight_rolled_back_source" "admin_aggregate"
+assert_eq "rolled-back preflight eligible/status parity" "$preflight_rolled_back_status_total" "$preflight_rolled_back_eligible"
+if [[ "$preflight_rolled_back_events" -lt "$scale_rows"
+  || "$preflight_rolled_back_eligible" -lt "$scale_rows" ]]; then
+  echo "Rolled-back preflight lost scale events" >&2
+  exit 1
+fi
 timed_sql "SELECT public.tokend_pricing_activate('$run_id'::UUID)->>'status'"
 second_activation_ms="$LAST_ELAPSED_MS"
 assert_eq "second activation" "$LAST_RESULT" "active"
+
+timed_sql "
+  WITH response AS MATERIALIZED (
+    SELECT public.tokend_get_channel_detail_v3(
+      'scale-token', 'scale-0', '30d', 'Asia/Shanghai'
+    )::JSONB AS value
+  )
+  SELECT (value->>'ok') || '|' || (value->>'callCount') || '|'
+    || jsonb_array_length(value->'dailyTrend') || '|'
+    || jsonb_array_length(value->'modelMix') || '|'
+    || jsonb_array_length(value->'topSessions')
+  FROM response"
+channel_detail_active_ms="$LAST_ELAPSED_MS"
+IFS='|' read -r channel_detail_ok channel_detail_calls channel_detail_days channel_detail_models channel_detail_sessions <<< "$LAST_RESULT"
+assert_eq "active channel detail ok" "$channel_detail_ok" "true"
+expected_channel_detail_calls=$((scale_rows / scale_channels))
+assert_eq "active channel detail call count" "$channel_detail_calls" "$expected_channel_detail_calls"
+if [[ "$channel_detail_days" -lt 1
+  || "$channel_detail_models" -lt 1
+  || "$channel_detail_sessions" -lt 1 ]]; then
+  echo "Active channel detail response is outside the nonempty scale contract: $LAST_RESULT" >&2
+  exit 1
+fi
+
+timed_sql "
+  WITH response AS MATERIALIZED (
+    SELECT public.tokend_get_sessions_v2('scale-token', '30d', 200)::JSONB AS value
+  )
+  SELECT (value->>'ok') || '|' || jsonb_array_length(value->'sessions') || '|'
+    || COALESCE(value->'sessions'->0->>'sessionId', '')
+  FROM response"
+sessions_active_ms="$LAST_ELAPSED_MS"
+IFS='|' read -r sessions_active_ok sessions_active_count sessions_active_id <<< "$LAST_RESULT"
+assert_eq "active sessions v2 ok" "$sessions_active_ok" "true"
+if [[ "$sessions_active_count" -lt 1 || -z "$sessions_active_id" ]]; then
+  echo "Active sessions v2 response is outside the nonempty scale contract: $LAST_RESULT" >&2
+  exit 1
+fi
+
+timed_sql "
+  WITH response AS MATERIALIZED (
+    SELECT public.tokend_get_session_detail_v2('scale-token', '$sessions_active_id')::JSONB AS value
+  )
+  SELECT (value->>'ok') || '|' || jsonb_array_length(value->'events') || '|'
+    || (value->>'callCount')
+  FROM response"
+session_detail_active_ms="$LAST_ELAPSED_MS"
+IFS='|' read -r session_detail_active_ok session_detail_active_events session_detail_active_calls <<< "$LAST_RESULT"
+assert_eq "active session detail v2 ok" "$session_detail_active_ok" "true"
+if [[ "$session_detail_active_events" -lt 1 || "$session_detail_active_calls" -lt 1 ]]; then
+  echo "Active session detail v2 response is outside the nonempty scale contract: $LAST_RESULT" >&2
+  exit 1
+fi
 
 echo "scale: steady upload and health baseline"
 start_pgbench steady "$steady_load_seconds" supabase/tests/database/pricing-scale-upload.sql
@@ -501,8 +598,26 @@ assert_eq "duplicate revisions" "$duplicate_count" "0"
 assert_eq "invalid breakdowns" "$invalid_count" "0"
 assert_eq "unexplained members" "$unexplained_count" "0"
 
-preflight="$(run_sql "SELECT (value->>'authoritative') || '|' || (value->>'source') FROM (SELECT public.tokend_pricing_preflight()::JSONB AS value) AS result")"
-assert_eq "authoritative preflight" "$preflight" "true|frozen_reconciled_run"
+timed_sql "
+  WITH response AS MATERIALIZED (
+    SELECT public.tokend_pricing_preflight()::JSONB AS value
+  )
+  SELECT (value->>'authoritative') || '|' || (value->>'source') || '|'
+    || (value->>'eventCount') || '|' || (value->>'eligibleEventCount') || '|'
+    || (SELECT COALESCE(sum(status.value::BIGINT), 0)
+        FROM jsonb_each_text(value->'statusCounts') AS status)
+  FROM response"
+preflight_active_ms="$LAST_ELAPSED_MS"
+IFS='|' read -r preflight_active_authoritative preflight_active_source \
+  preflight_active_events preflight_active_eligible preflight_active_status_total <<< "$LAST_RESULT"
+assert_eq "active preflight authoritative" "$preflight_active_authoritative" "true"
+assert_eq "active preflight source" "$preflight_active_source" "frozen_reconciled_run"
+assert_eq "active preflight eligible/status parity" "$preflight_active_status_total" "$preflight_active_eligible"
+if [[ "$preflight_active_events" -lt "$scale_rows"
+  || "$preflight_active_eligible" -lt "$scale_rows" ]]; then
+  echo "Active preflight lost scale events" >&2
+  exit 1
+fi
 
 filter_log_interval "$evidence_dir/freeze_live.log" "$evidence_dir/freeze-overlap.log" "$freeze_overlap_started" "$freeze_overlap_finished"
 filter_log_interval "$evidence_dir/backfill_live.log" "$evidence_dir/backfill-overlap.log" "$backfill_overlap_started" "$backfill_overlap_finished"
@@ -533,10 +648,16 @@ backfill_batch_p95_ms="$(column_percentile_ms "$evidence_dir/backfill-batches.ts
 backfill_batch_max_ms="$(column_maximum_ms "$evidence_dir/backfill-batches.tsv")"
 health_p95_ms="$(column_percentile_ms "$evidence_dir/health.tsv" 95)"
 
-peak_rss_kb="$(awk 'NF >= 2 && $2 > max { max = $2 } END { print max + 0 }' "$evidence_dir/postgres-rss.tsv")"
-rss_delta_kb=$((peak_rss_kb - baseline_rss_kb))
-if [[ "$rss_delta_kb" -lt 0 ]]; then rss_delta_kb=0; fi
-rss_quarter_limit_kb=$((memory_limit_kb / 4))
+peak_memory_kb="$(awk 'NF >= 2 && $2 > max { max = $2 } END { print max + 0 }' "$evidence_dir/container-memory.tsv")"
+memory_delta_kb=$((peak_memory_kb - baseline_memory_kb))
+if [[ "$memory_delta_kb" -lt 0 ]]; then memory_delta_kb=0; fi
+peak_working_kb="$(awk 'NF >= 6 { value = $3 + $5 + $6; if (value > max) max = value } END { print max + 0 }' "$evidence_dir/container-memory.tsv")"
+working_delta_kb=$((peak_working_kb - baseline_working_kb))
+if [[ "$working_delta_kb" -lt 0 ]]; then working_delta_kb=0; fi
+peak_file_kb="$(awk 'NF >= 4 && $4 > max { max = $4 } END { print max + 0 }' "$evidence_dir/container-memory.tsv")"
+file_delta_kb=$((peak_file_kb - baseline_file_kb))
+if [[ "$file_delta_kb" -lt 0 ]]; then file_delta_kb=0; fi
+memory_quarter_limit_kb=$((memory_limit_kb / 4))
 disk_free_percent="$(container_command sh -c "df -Pk /var/lib/postgresql/data | awk 'NR == 2 {gsub(/%/, \"\", \$5); print 100 - \$5}'")"
 
 assert_le "migration upload max latency ms" "$migration_max_ms" 2000
@@ -553,6 +674,11 @@ assert_le "reconcile ms" "$reconcile_ms" 45000
 assert_le "first activation ms" "$first_activation_ms" 30000
 assert_le "rollback ms" "$rollback_ms" 2000
 assert_le "second activation ms" "$second_activation_ms" 30000
+assert_le "active channel detail ms" "$channel_detail_active_ms" 8000
+assert_le "active sessions v2 ms" "$sessions_active_ms" 8000
+assert_le "active session detail v2 ms" "$session_detail_active_ms" 8000
+assert_le "rolled-back preflight" "$preflight_rolled_back_ms" 8000
+assert_le "active preflight" "$preflight_active_ms" 8000
 assert_le "health p95 ms" "$health_p95_ms" 3000
 assert_le "live upload p95 ms" "$live_p95_ms" 2000
 assert_le "live upload p95 ratio" "$live_p95_ms" "$(awk -v baseline="$pre_rollout_p95_ms" 'BEGIN { print baseline * 2 }')"
@@ -560,8 +686,8 @@ assert_le "freeze upload p95 ms" "$freeze_upload_p95_ms" 2000
 assert_le "freeze upload p95 ratio" "$freeze_upload_p95_ms" "$(awk -v baseline="$pre_rollout_p95_ms" 'BEGIN { print baseline * 2 }')"
 assert_le "backfill upload p95 ms" "$backfill_upload_p95_ms" 2000
 assert_le "backfill upload p95 ratio" "$backfill_upload_p95_ms" "$(awk -v baseline="$pre_rollout_p95_ms" 'BEGIN { print baseline * 2 }')"
-assert_le "postgres RSS delta KiB" "$rss_delta_kb" 524288
-assert_le "postgres RSS delta versus 25% memory KiB" "$rss_delta_kb" "$rss_quarter_limit_kb"
+assert_le "container cgroup anon shmem kernel delta KiB" "$working_delta_kb" 524288
+assert_le "container cgroup memory delta versus 25% limit KiB" "$memory_delta_kb" "$memory_quarter_limit_kb"
 if [[ "$disk_free_percent" -lt 30 ]]; then
   echo "Database disk reserve below 30%: ${disk_free_percent}%" >&2
   exit 1
@@ -570,6 +696,8 @@ fi
 cat > "$evidence_dir/summary.json" <<JSON
 {
   "rows": $scale_rows,
+  "channels": $scale_channels,
+  "activeChannelDetailCalls": $channel_detail_calls,
   "targetCount": $actual_target_count,
   "revisionCount": $actual_revision_count,
   "seedMs": $seed_ms,
@@ -593,6 +721,11 @@ cat > "$evidence_dir/summary.json" <<JSON
   "firstActivationMs": $first_activation_ms,
   "rollbackMs": $rollback_ms,
   "secondActivationMs": $second_activation_ms,
+  "activeChannelDetailMs": $channel_detail_active_ms,
+  "activeSessionsV2Ms": $sessions_active_ms,
+  "activeSessionDetailV2Ms": $session_detail_active_ms,
+  "preflightRolledBackMs": $preflight_rolled_back_ms,
+  "preflightActiveMs": $preflight_active_ms,
   "liveUploadP95Ms": $live_p95_ms,
   "liveUploadMaxMs": $live_max_ms,
   "liveUploadOverlapSamples": $live_overlap_samples,
@@ -605,7 +738,9 @@ cat > "$evidence_dir/summary.json" <<JSON
   "preRolloutUploadP95Ms": $pre_rollout_p95_ms,
   "steadyUploadP95Ms": $steady_p95_ms,
   "healthP95Ms": $health_p95_ms,
-  "postgresRssDeltaKiB": $rss_delta_kb,
+  "containerMemoryDeltaKiB": $memory_delta_kb,
+  "containerWorkingDeltaKiB": $working_delta_kb,
+  "containerFileCacheDeltaKiB": $file_delta_kb,
   "containerMemoryLimitKiB": $memory_limit_kb,
   "diskFreePercent": $disk_free_percent,
   "targetHash": "$target_hash_one",

@@ -1,6 +1,6 @@
 {
   "name": "tokend-cli",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "description": "AI 编程成本监控 — 扫描本地日志，同步至云端面板",
   "bin": {
     "tokend-cli": "cli/bin.js"

@@ -1480,6 +1480,32 @@ test('RPC verification calls real child keys and three selected details before e
       : structuredClone(rows[name as keyof typeof rows]),
     callLegacy: async () => ({ ok: true }),
   }), /models.*non-empty/i)
+  await assert.rejects(collectRpcVerification({
+    token: 'fixture-token', liveAccess, adminExpected: true,
+    callClient: async () => { throw new Error('HTTP request failed with status 500') },
+    callLegacy: async () => ({ ok: true }),
+  }), /vNext RPC tokend_get_summary_v5 failed: HTTP request failed with status 500/i)
+
+  const rpcCause = Object.assign(new Error('canceling statement due to statement timeout'), {
+    status: 500,
+    sqlstate: '57014',
+    code: 'PGRST500',
+    body: 'must-not-be-copied-to-the-wrapper',
+  })
+  await assert.rejects(collectRpcVerification({
+    token: 'fixture-token', liveAccess, adminExpected: true,
+    callClient: async () => { throw rpcCause },
+    callLegacy: async () => ({ ok: true }),
+  }), (error: any) => {
+    assert.match(error.message, /vNext RPC tokend_get_summary_v5 failed: canceling statement/i)
+    assert.equal(error.status, 500)
+    assert.equal(error.sqlstate, '57014')
+    assert.equal(error.code, 'PGRST500')
+    assert.equal(error.cause, rpcCause)
+    assert.equal(error.body, undefined)
+    assert.doesNotMatch(error.message, /must-not-be-copied/i)
+    return true
+  })
 })
 
 test('live access proof derives grants from anon/service HTTP outcomes with safe invalid admin inputs', async () => {
@@ -2188,6 +2214,29 @@ test('monitor checks both RPC generations, adjusted global health, late cadence,
     uploadLateFixture: async () => {}, sleep: async () => {},
   })
   assert.equal(improved.passed, true)
+
+  const oneBasisPointNoise = await runMonitorLoop({
+    durationSeconds: 0, intervalSeconds: 30, lateUploadEverySeconds: 120,
+    baselineGlobal: { eligibleEventCount: 100, status: 'complete', maxUnpricedShare: 0.02, membersOver2x: 0, postSnapshotEventCount: 0 },
+    baselineRpc: { count: 100, httpErrorCount: 0, jsonErrorCount: 0, p95Seconds: 0.05, reconciliationHash: 'recon-hash', pointers: snapshot.pointers },
+    collectSnapshot: async () => ({
+      ...snapshot,
+      global: { ...snapshot.global, unpricedShare: 0.0201 },
+    }),
+    uploadLateFixture: async () => {}, sleep: async () => {},
+  })
+  assert.equal(oneBasisPointNoise.passed, true)
+
+  await assert.rejects(runMonitorLoop({
+    durationSeconds: 0, intervalSeconds: 30, lateUploadEverySeconds: 120,
+    baselineGlobal: { eligibleEventCount: 100, status: 'complete', maxUnpricedShare: 0.02, membersOver2x: 0, postSnapshotEventCount: 0 },
+    baselineRpc: { count: 100, httpErrorCount: 0, jsonErrorCount: 0, p95Seconds: 0.05, reconciliationHash: 'recon-hash', pointers: snapshot.pointers },
+    collectSnapshot: async () => ({
+      ...snapshot,
+      global: { ...snapshot.global, unpricedShare: 0.020101 },
+    }),
+    uploadLateFixture: async () => {}, sleep: async () => {},
+  }), /unpriced share exceeded baseline/i)
 
   const productionLatency = await runMonitorLoop({
     durationSeconds: 0, intervalSeconds: 30, lateUploadEverySeconds: 120,

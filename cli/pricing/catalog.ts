@@ -1,12 +1,18 @@
 import { createHash } from 'node:crypto'
 import type { CatalogSnapshot, PriceVersion, TokenRates } from './types.ts'
 
-export const CATALOG_VERSION = '2026-07-10'
+export const CATALOG_VERSION = '2026-08-02'
 
 const OFFICIAL_CHECKED_AT = '2026-07-10'
+const MODEL_REFRESH_CHECKED_AT = '2026-08-02'
 const LEGACY_VALID_FROM = '2026-06-12T00:00:00Z'
 const LEGACY_CHECKED_AT = '2026-06-12'
 const LEGACY_SOURCE_URL = 'legacy:tokend-cli-2.4.0'
+
+export const CACHE_MISS_INPUT_MODEL_IDS = new Set([
+  'kimi-k2.7-code',
+  'kimi-k3',
+])
 
 type LegacyPriceTuple = readonly [
   modelId: string,
@@ -74,6 +80,34 @@ const officialRows: PriceVersion[] = [
     sourceUrl: 'https://platform.claude.com/docs/en/about-claude/pricing',
   },
   {
+    modelId: 'claude-opus-5',
+    provider: 'anthropic',
+    catalogVersion: CATALOG_VERSION,
+    validFrom: '2026-07-24T00:00:00Z',
+    standard: rates(5, 25, 0.5, 6.25),
+    sourceCheckedAt: MODEL_REFRESH_CHECKED_AT,
+    sourceUrl: 'https://platform.claude.com/docs/en/about-claude/pricing',
+  },
+  {
+    modelId: 'claude-sonnet-5',
+    provider: 'anthropic',
+    catalogVersion: CATALOG_VERSION,
+    validFrom: '2026-06-30T00:00:00Z',
+    validTo: '2026-09-01T00:00:00Z',
+    standard: rates(2, 10, 0.2, 2.5),
+    sourceCheckedAt: MODEL_REFRESH_CHECKED_AT,
+    sourceUrl: 'https://platform.claude.com/docs/en/about-claude/pricing',
+  },
+  {
+    modelId: 'claude-sonnet-5',
+    provider: 'anthropic',
+    catalogVersion: CATALOG_VERSION,
+    validFrom: '2026-09-01T00:00:00Z',
+    standard: rates(3, 15, 0.3, 3.75),
+    sourceCheckedAt: MODEL_REFRESH_CHECKED_AT,
+    sourceUrl: 'https://platform.claude.com/docs/en/about-claude/pricing',
+  },
+  {
     modelId: 'gpt-5.6-sol',
     provider: 'openai',
     catalogVersion: CATALOG_VERSION,
@@ -105,6 +139,24 @@ const officialRows: PriceVersion[] = [
     longContextThreshold: 272_000,
     sourceCheckedAt: OFFICIAL_CHECKED_AT,
     sourceUrl: 'https://developers.openai.com/api/docs/pricing',
+  },
+  {
+    modelId: 'kimi-k2.7-code',
+    provider: 'moonshot',
+    catalogVersion: CATALOG_VERSION,
+    validFrom: '2026-06-12T00:00:00Z',
+    standard: rates(0.95, 4, 0.19, 0),
+    sourceCheckedAt: MODEL_REFRESH_CHECKED_AT,
+    sourceUrl: 'https://platform.kimi.ai/docs/pricing/chat-k27-code.md',
+  },
+  {
+    modelId: 'kimi-k3',
+    provider: 'moonshot',
+    catalogVersion: CATALOG_VERSION,
+    validFrom: '2026-07-16T00:00:00Z',
+    standard: rates(3, 15, 0.3, 0),
+    sourceCheckedAt: MODEL_REFRESH_CHECKED_AT,
+    sourceUrl: 'https://platform.kimi.ai/docs/pricing/chat-k3.md',
   },
 ]
 
@@ -160,7 +212,7 @@ export const MODEL_ALIASES = CATALOG_ALIASES
 type DefaultSeedRow = [string, string, number, number, number, number]
 
 export function getDefaultSeedRows(
-  atMs = Date.parse('2026-07-10T00:00:00Z'),
+  atMs = Date.parse('2026-08-02T00:00:00Z'),
 ): readonly DefaultSeedRow[] {
   if (!Number.isFinite(atMs)) {
     throw new RangeError('atMs must be a finite timestamp')

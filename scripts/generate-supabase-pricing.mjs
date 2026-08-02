@@ -15,7 +15,7 @@ const {
 
 const BEGIN_MARKER = '-- BEGIN GENERATED PRICING CATALOG'
 const END_MARKER = '-- END GENERATED PRICING CATALOG'
-const MIGRATION_URL = new URL('../supabase/migrations/202607100001_pricing_core.sql', import.meta.url)
+const MIGRATION_URL = new URL('../supabase/migrations/202608020001_model_catalog_refresh.sql', import.meta.url)
 
 function compareText(left, right) {
   if (left < right) return -1

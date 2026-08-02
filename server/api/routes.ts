@@ -3,7 +3,9 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import db from '../db/index.js'
+import { withEffectiveDefaultPrices } from '../db/effective-model-price-rows.js'
 import { runIngestion } from '../ingestion/index.js'
+import type { LocalModelPriceRow } from '../ingestion/local-price-resolver.js'
 
 const router = Router()
 const TOOL_CHANNELS = ['claude-code', 'codex', 'gemini-cli', 'copilot-cli', 'opencode'] as const
@@ -715,8 +717,8 @@ router.get('/sessions/:id', (req: Request, res: Response) => {
 // ─── Settings / Prices ───────────────────────────────────────────────────────
 
 router.get('/settings/prices', (_req: Request, res: Response) => {
-  const rows = db.prepare('SELECT * FROM model_prices ORDER BY provider, model_id').all()
-  res.json(rows)
+  const rows = db.prepare('SELECT * FROM model_prices ORDER BY provider, model_id').all() as unknown as LocalModelPriceRow[]
+  res.json(withEffectiveDefaultPrices(rows))
 })
 
 router.put('/settings/prices/:modelId', (req: Request, res: Response) => {

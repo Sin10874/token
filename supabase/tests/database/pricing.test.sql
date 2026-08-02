@@ -146,11 +146,35 @@ WHERE oid = 'public.tokend_pricing_preflight()'::regprocedure;
 \ir ../../migrations/202607100013_extend_sessions_rest_timeout.sql
 \ir ../../migrations/202607100014_extend_session_detail_rest_timeout.sql
 \ir ../../migrations/202607100014_extend_session_detail_rest_timeout.sql
+\ir ../../migrations/202608020001_model_catalog_refresh.sql
+\ir ../../migrations/202608020001_model_catalog_refresh.sql
 
 BEGIN;
 SET LOCAL search_path = public, extensions;
 
-SELECT plan(206);
+SELECT plan(216);
+
+CREATE FUNCTION pg_temp.model_refresh_event(
+  p_model TEXT,
+  p_timestamp_ms BIGINT,
+  p_semantics TEXT DEFAULT 'disjoint',
+  p_cache_write BIGINT DEFAULT 1000000
+)
+RETURNS JSONB
+LANGUAGE sql
+IMMUTABLE
+AS $function$
+  SELECT jsonb_build_object(
+    'model', p_model,
+    'timestampMs', p_timestamp_ms,
+    'inputTokens', 1000000,
+    'outputTokens', 1000000,
+    'reasoningTokens', 0,
+    'cacheReadTokens', 1000000,
+    'cacheWriteTokens', p_cache_write,
+    'tokenSemantics', p_semantics
+  )
+$function$;
 
 SELECT is(
   'public.tokend_pricing_preflight()'::regprocedure::OID,
@@ -211,8 +235,8 @@ SELECT ok(
 
 SELECT is(
   (SELECT count(*)::INTEGER FROM public.tokend_pricing_catalogs),
-  1,
-  'exactly one catalog is published'
+  2,
+  'the original and model-refresh catalogs are published'
 );
 
 SELECT is(
@@ -252,7 +276,8 @@ SELECT results_eq(
       source_checked_at::TEXT,
       source_url
     FROM public.tokend_pricing_models
-    WHERE model_id IN ('claude-fable-5', 'gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra')
+    WHERE version = '2026-07-10'
+      AND model_id IN ('claude-fable-5', 'gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra')
     ORDER BY model_id
   $actual$,
   $expected$
@@ -302,12 +327,181 @@ SELECT is(
   (
     SELECT count(*)::INTEGER
     FROM public.tokend_pricing_models
-    WHERE model_id = 'claude-fable-5'
+    WHERE version = '2026-07-10'
+      AND model_id = 'claude-fable-5'
       AND source_url = 'https://platform.claude.com/docs/en/about-claude/pricing'
   ),
   1,
   'Fable has one official-source price version'
 );
+
+SELECT is(
+  (SELECT hash FROM public.tokend_pricing_catalogs WHERE version = '2026-08-02'),
+  '0e393d97c225c26e10ffad44367aaf1de69a3943d1fbce0f7459869854284107',
+  'model-refresh catalog hash matches TypeScript'
+);
+
+SELECT ok(
+  (SELECT count(*) = 48 FROM public.tokend_pricing_models WHERE version = '2026-08-02')
+    AND (SELECT count(*) = 11 FROM public.tokend_pricing_aliases WHERE version = '2026-08-02'),
+  'model-refresh catalog installs every price version and exact alias once'
+);
+
+SELECT results_eq(
+  $actual$
+    SELECT
+      model_id,
+      provider,
+      to_char(valid_from AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+      CASE WHEN valid_to IS NULL THEN NULL
+        ELSE to_char(valid_to AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') END,
+      standard_input_rate::TEXT,
+      standard_output_rate::TEXT,
+      standard_cache_read_rate::TEXT,
+      standard_cache_write_rate::TEXT,
+      source_checked_at::TEXT,
+      source_url
+    FROM public.tokend_pricing_models
+    WHERE version = '2026-08-02'
+      AND model_id IN ('claude-opus-5', 'claude-sonnet-5', 'kimi-k2.7-code', 'kimi-k3')
+    ORDER BY model_id, valid_from
+  $actual$,
+  $expected$
+    VALUES
+      (
+        'claude-opus-5', 'anthropic', '2026-07-24T00:00:00Z', NULL::TEXT,
+        '5.0000000000', '25.0000000000', '0.5000000000', '6.2500000000',
+        '2026-08-02', 'https://platform.claude.com/docs/en/about-claude/pricing'
+      ),
+      (
+        'claude-sonnet-5', 'anthropic', '2026-06-30T00:00:00Z', '2026-09-01T00:00:00Z',
+        '2.0000000000', '10.0000000000', '0.2000000000', '2.5000000000',
+        '2026-08-02', 'https://platform.claude.com/docs/en/about-claude/pricing'
+      ),
+      (
+        'claude-sonnet-5', 'anthropic', '2026-09-01T00:00:00Z', NULL::TEXT,
+        '3.0000000000', '15.0000000000', '0.3000000000', '3.7500000000',
+        '2026-08-02', 'https://platform.claude.com/docs/en/about-claude/pricing'
+      ),
+      (
+        'kimi-k2.7-code', 'moonshot', '2026-06-12T00:00:00Z', NULL::TEXT,
+        '0.9500000000', '4.0000000000', '0.1900000000', '0.0000000000',
+        '2026-08-02', 'https://platform.kimi.ai/docs/pricing/chat-k27-code.md'
+      ),
+      (
+        'kimi-k3', 'moonshot', '2026-07-16T00:00:00Z', NULL::TEXT,
+        '3.0000000000', '15.0000000000', '0.3000000000', '0.0000000000',
+        '2026-08-02', 'https://platform.kimi.ai/docs/pricing/chat-k3.md'
+      )
+  $expected$,
+  'Opus 5 Sonnet 5 dual intervals and current Kimi models have exact official rates and sources'
+);
+
+SELECT ok(
+  public.tokend_price_event(
+    pg_temp.model_refresh_event('anthropic/claude-opus-5', 1784851200000),
+    '2026-08-02'
+  )->>'reason' = 'unknown_model'
+  AND public.tokend_price_event(
+    pg_temp.model_refresh_event('claude-opus-5', 1784851199999),
+    '2026-08-02'
+  )->>'reason' = 'no_effective_price',
+  'fuzzy provider prefixes stay unknown and historical events do not receive future prices'
+);
+
+SELECT is(
+  (public.tokend_price_event(
+    pg_temp.model_refresh_event('claude-opus-5', 1784851200000),
+    '2026-08-02'
+  )->>'totalCost')::NUMERIC,
+  36.75::NUMERIC,
+  'Opus 5 starts at its exact release boundary with cache components intact'
+);
+
+SELECT results_eq(
+  $actual$
+    SELECT
+      result->>'priceVersion',
+      (result->>'totalCost')::NUMERIC
+    FROM (VALUES
+      (public.tokend_price_event(
+        pg_temp.model_refresh_event('claude-sonnet-5', 1788220799999),
+        '2026-08-02'
+      )),
+      (public.tokend_price_event(
+        pg_temp.model_refresh_event('claude-sonnet-5', 1788220800000),
+        '2026-08-02'
+      ))
+    ) AS priced(result)
+  $actual$,
+  $expected$
+    VALUES
+      ('2026-08-02/claude-sonnet-5/2026-06-30T00:00:00Z', 14.7::NUMERIC),
+      ('2026-08-02/claude-sonnet-5/2026-09-01T00:00:00Z', 22.05::NUMERIC)
+  $expected$,
+  'Sonnet 5 introduction pricing ends exactly at the September boundary'
+);
+
+SELECT is(
+  public.tokend_price_event(
+    pg_temp.model_refresh_event('kimi-k3', 1785628800000, 'unknown', 0),
+    '2026-08-02'
+  )->>'reason',
+  'unsupported_token_semantics',
+  'Kimi K3 unknown token semantics fail closed'
+);
+
+SELECT is(
+  public.tokend_price_event(
+    pg_temp.model_refresh_event('kimi-k3', 1785628800000, 'disjoint', 1),
+    '2026-08-02'
+  )->>'reason',
+  'unsupported_cache_write_mapping',
+  'Kimi K3 cache-write buckets fail closed instead of double charging cache misses'
+);
+
+SELECT ok(
+  public.tokend_price_event(
+    pg_temp.model_refresh_event('kimi-k3', 1785628800000, 'disjoint', 0),
+    '2026-08-02'
+  )->>'status' = 'estimated'
+  AND (public.tokend_price_event(
+    pg_temp.model_refresh_event('kimi-k3', 1785628800000, 'disjoint', 0),
+    '2026-08-02'
+  )->>'totalCost')::NUMERIC = 18.3::NUMERIC,
+  'Kimi K3 prices only proven disjoint cache-hit and cache-miss buckets'
+);
+
+SELECT ok(
+  public.tokend_price_event(
+    pg_temp.model_refresh_event('kimi-k2.7-code', 1785628800000, 'unknown', 0),
+    '2026-08-02'
+  )->>'reason' = 'unsupported_token_semantics'
+  AND (public.tokend_price_event(
+    pg_temp.model_refresh_event('kimi-k2.7-code', 1785628800000, 'disjoint', 0),
+    '2026-08-02'
+  )->>'totalCost')::NUMERIC = 5.14::NUMERIC,
+  'Kimi K2.7 Code also requires proven cache-hit and cache-miss buckets'
+);
+
+-- The immutable-installer conflict tests below intentionally exercise the
+-- original catalog. Restore their staging inputs after validating the refresh.
+TRUNCATE TABLE pg_temp.tokend_expected_pricing_models;
+TRUNCATE TABLE pg_temp.tokend_expected_pricing_aliases;
+INSERT INTO pg_temp.tokend_expected_pricing_models
+SELECT
+  version, model_id, provider, valid_from, valid_to,
+  standard_input_rate, standard_output_rate,
+  standard_cache_read_rate, standard_cache_write_rate,
+  long_context_input_rate, long_context_output_rate,
+  long_context_cache_read_rate, long_context_cache_write_rate,
+  long_context_threshold, source_checked_at, source_url
+FROM public.tokend_pricing_models
+WHERE version = '2026-07-10';
+INSERT INTO pg_temp.tokend_expected_pricing_aliases
+SELECT version, alias, model_id
+FROM public.tokend_pricing_aliases
+WHERE version = '2026-07-10';
 
 SELECT fk_ok(
   'public',

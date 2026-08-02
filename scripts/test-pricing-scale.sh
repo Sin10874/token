@@ -264,7 +264,8 @@ for migration in \
   supabase/migrations/202607100011_extend_preflight_rest_timeout.sql \
   supabase/migrations/202607100012_extend_preflight_rest_timeout_headroom.sql \
   supabase/migrations/202607100013_extend_sessions_rest_timeout.sql \
-  supabase/migrations/202607100014_extend_session_detail_rest_timeout.sql
+  supabase/migrations/202607100014_extend_session_detail_rest_timeout.sql \
+  supabase/migrations/202608020001_model_catalog_refresh.sql
 do
   run_file "$migration" --single-transaction >> "$evidence_dir/migrations-002-009.out" 2>&1
 done

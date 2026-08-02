@@ -91,7 +91,7 @@ const validArgv: Record<string, string[]> = {
   'activation-rehearsal': ['--state', 'private.json', '--out', 'activation.json'],
   'rollback-active': ['--state', 'private.json', '--out', 'rollback.json'],
   'verify-emergency': ['--state', 'private.json', '--migration-list', 'list.txt', '--out', 'emergency.json'],
-  'forward-recover': ['--state', 'private.json', '--migration-list', 'list.txt', '--migrations-dir', 'migrations', '--migration-file', '202607110001_recover.sql', '--post-schema', 'post.sql', '--approval', 'approval.json', '--out', 'recover.json'],
+  'forward-recover': ['--state', 'private.json', '--migration-list', 'list.txt', '--migrations-dir', 'migrations', '--migration-file', '202608030001_recover.sql', '--post-schema', 'post.sql', '--approval', 'approval.json', '--out', 'recover.json'],
   monitor: ['--state', 'private.json', '--duration', '900', '--interval', '30', '--late-upload-every', '120', '--global-baseline', 'preflight.json', '--rpc-baseline', 'sample.json', '--out', 'monitor.json'],
   cleanup: ['--state', 'private.json'],
 }

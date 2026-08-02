@@ -216,6 +216,13 @@ function readMigration(): string {
   )
 }
 
+function readModelRefreshMigration(): string {
+  return fs.readFileSync(
+    path.resolve(process.cwd(), 'supabase/migrations/202608020001_model_catalog_refresh.sql'),
+    'utf8',
+  )
+}
+
 function readUploadMigration(): string {
   return fs.readFileSync(
     path.resolve(process.cwd(), 'supabase/migrations/202607100002_pricing_upload.sql'),
@@ -332,7 +339,7 @@ function tableDefinition(sql: string, table: string): string {
 }
 
 function testMigrationEmbedsExactlyGeneratedCatalog(): void {
-  const migration = readMigration()
+  const migration = readModelRefreshMigration()
   const begin = migration.indexOf(BEGIN_MARKER)
   const end = migration.indexOf(END_MARKER)
   assert.ok(begin >= 0 && end > begin)
@@ -345,6 +352,25 @@ function testMigrationEmbedsExactlyGeneratedCatalog(): void {
   assert.equal(replaceGeneratedCatalogBlock(migration), migration)
   assert.deepEqual(parseGeneratedModels(migration), PRICE_VERSIONS)
   assert.deepEqual(parseGeneratedAliases(migration), MODEL_ALIASES)
+}
+
+function testModelRefreshMigrationIsAdditiveAndKimiFailsClosed(): void {
+  const migration = readModelRefreshMigration()
+  const pricingFunction = functionDefinition(migration, 'tokend_price_event')
+
+  assert.match(migration, /tokend_install_pricing_catalog\('2026-08-02',\s*'0e393d97c225c26e10ffad44367aaf1de69a3943d1fbce0f7459869854284107'/i)
+  assert.match(migration, /https:\/\/platform\.claude\.com\/docs\/en\/about-claude\/pricing/i)
+  assert.match(migration, /https:\/\/platform\.kimi\.ai\/docs\/pricing\/chat-k3\.md/i)
+  assert.doesNotMatch(migration, /\b(?:DROP|TRUNCATE)\s+(?:TABLE\s+)?public\./i)
+  assert.doesNotMatch(migration, /ALTER TABLE public\.tokend_(?:members|usage_events|sessions|sync_state|model_prices)\b/i)
+  assert.doesNotMatch(migration, /\/Users\/|\/home\/|SUPABASE_(?:KEY|TOKEN)|NPM_TOKEN|member[_ -]?secret/i)
+
+  const semanticsGuard = pricingFunction.indexOf("v_matched_model IN ('kimi-k2.7-code', 'kimi-k3') AND v_semantics <> 'disjoint'")
+  const cacheWriteGuard = pricingFunction.indexOf("v_matched_model IN ('kimi-k2.7-code', 'kimi-k3') AND v_cache_write_tokens <> 0")
+  const costCalculation = pricingFunction.indexOf('v_input_cost :=')
+  assert.ok(semanticsGuard >= 0 && cacheWriteGuard > semanticsGuard && costCalculation > cacheWriteGuard)
+  assert.match(pricingFunction, /'reason', 'unsupported_token_semantics'/)
+  assert.match(pricingFunction, /'reason', 'unsupported_cache_write_mapping'/)
 }
 
 function testMigrationIsAdditiveAndDefinesRequiredKeys(): void {
@@ -1898,10 +1924,10 @@ function testPgTapContractIsSelfContained(): void {
   const assertionPattern = /^SELECT (?:fk_ok|is|lives_ok|ok|results_eq|throws_ok)\(/gm
   assert.equal(plans.length, 1, 'pgTAP must declare exactly one continuous plan')
   assert.equal(finishes.length, 1, 'pgTAP must call finish exactly once')
-  assert.equal(Number(plans[0]?.[1]), 206, 'pgTAP must plan the full 206 assertions')
+  assert.equal(Number(plans[0]?.[1]), 216, 'pgTAP must plan the full 216 assertions')
   assert.equal(
     (pgTap.match(assertionPattern) ?? []).length,
-    206,
+    216,
     'continuous pgTAP plan must exactly match all assertions',
   )
   assert.doesNotMatch(pgTap, /^SELECT pass\(/gm)
@@ -1939,6 +1965,10 @@ function testPgTapContractIsSelfContained(): void {
   )
   assert.equal(
     (pgTap.match(/^\\ir \.\.\/\.\.\/migrations\/202607100009_optimize_channel_detail_v3\.sql$/gm) ?? []).length,
+    2,
+  )
+  assert.equal(
+    (pgTap.match(/^\\ir \.\.\/\.\.\/migrations\/202608020001_model_catalog_refresh\.sql$/gm) ?? []).length,
     2,
   )
   assert.equal(
@@ -2014,6 +2044,12 @@ function testPgTapContractIsSelfContained(): void {
     'activate rollback and reactivate preserve the frozen catalog run pair',
     'a competing active run cannot claim the current run idempotency path',
     'a truly stale active rollback cannot replace the current pair',
+    'fuzzy provider prefixes stay unknown and historical events do not receive future prices',
+    'Sonnet 5 introduction pricing ends exactly at the September boundary',
+    'Kimi K3 unknown token semantics fail closed',
+    'Kimi K3 cache-write buckets fail closed instead of double charging cache misses',
+    'Kimi K3 prices only proven disjoint cache-hit and cache-miss buckets',
+    'Kimi K2.7 Code also requires proven cache-hit and cache-miss buckets',
     'rollback restores the exact legacy upload envelope and behavior',
     'rollback removes only vNext and admin functions while retaining pricing data',
   ]) assert.match(pgTap, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'))
@@ -2025,6 +2061,7 @@ testGeneratedRowsRoundTripToTypescriptCatalog()
 testSharedCatalogValidatorRejectsUnsafeInput()
 testMarkerReplacementIsSurgical()
 testMigrationEmbedsExactlyGeneratedCatalog()
+testModelRefreshMigrationIsAdditiveAndKimiFailsClosed()
 testMigrationIsAdditiveAndDefinesRequiredKeys()
 testLargeUsageTableDdlIsOneShortFailFastTailWindow()
 testMigrationUsesExactMoneyTypesAndAuditShape()

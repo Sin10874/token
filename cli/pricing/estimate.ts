@@ -1,4 +1,9 @@
-import { assertCatalogSnapshotHash, CATALOG_SNAPSHOT, resolveModelPrice } from './catalog.ts'
+import {
+  assertCatalogSnapshotHash,
+  CACHE_MISS_INPUT_MODEL_IDS,
+  CATALOG_SNAPSHOT,
+  resolveModelPrice,
+} from './catalog.ts'
 import type {
   CatalogSnapshot,
   CostEstimate,
@@ -162,6 +167,22 @@ export function estimateCost(
     return emptyEstimate(snapshot, matchedModelId, [
       `No effective price version for ${matchedModelId} at the event timestamp.`,
     ])
+  }
+
+  // Kimi K3 publishes cache-hit and cache-miss input rates, not a separate
+  // cache-write rate. Only price it when the parser proves that inputTokens is
+  // the uncached bucket and no cache-write bucket needs an invented mapping.
+  if (CACHE_MISS_INPUT_MODEL_IDS.has(matchedModelId)) {
+    if (event.tokenSemantics !== 'disjoint') {
+      return emptyEstimate(snapshot, matchedModelId, [
+        `${matchedModelId} cache-miss input pricing requires proven disjoint token semantics.`,
+      ])
+    }
+    if (event.cacheWriteTokens !== 0) {
+      return emptyEstimate(snapshot, matchedModelId, [
+        `${matchedModelId} has no verified cache-write mapping; event remains unpriced.`,
+      ])
+    }
   }
 
   let tier: PricingTier = 'standard'

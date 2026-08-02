@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Tokend 模型目录刷新 · 2026-08-02</title>
+  <style>
+    :root{color-scheme:light;--bg:#f5f5f2;--paper:#fff;--ink:#181816;--muted:#696963;--line:#dcdcd4;--ok:#246b45;--warn:#8a5b12;--bad:#982f2f;--soft:#eeeeea}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.58 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    main{max-width:1180px;margin:0 auto;padding:54px 34px 80px}h1{font-size:30px;font-weight:560;letter-spacing:-.03em;margin:0 0 8px}h2{font-size:17px;margin:42px 0 14px;border-top:1px solid var(--line);padding-top:20px}h3{font-size:14px;margin:22px 0 8px}p{max-width:900px}.meta,.muted{color:var(--muted)}.lead{font-size:16px;max-width:920px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:24px 0}.card{background:var(--paper);border:1px solid var(--line);padding:16px}.card b{display:block;font-size:18px;margin-top:4px}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}table{width:100%;border-collapse:collapse;background:var(--paper);font-size:12px}th,td{text-align:left;vertical-align:top;padding:10px 9px;border:1px solid var(--line)}th{background:var(--soft);font-weight:600}code{font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--soft);padding:1px 4px;overflow-wrap:anywhere}ul,ol{padding-left:20px}li{margin:5px 0}a{color:#285b80;text-decoration:none}a:hover{text-decoration:underline}.pill{display:inline-block;border:1px solid currentColor;padding:2px 7px;border-radius:999px;font-size:11px}.flow{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}.flow div{background:var(--paper);border:1px solid var(--line);padding:12px;min-height:72px}.note{border-left:3px solid var(--warn);background:#fffaf0;padding:12px 14px}.block{border-left-color:var(--bad);background:#fff5f5}@media(max-width:850px){.grid,.flow{grid-template-columns:1fr 1fr}main{padding:30px 16px}}
+  </style>
+</head>
+<body><main>
+  <h1>Tokend 模型目录刷新</h1>
+  <div class="meta">ClawMeter · 基线 8608ce7 · 分支 codex/tokend-model-refresh-20260802 · 抓取/核验日 2026-08-02</div>
+  <p class="lead">结论：Opus 5、Sonnet 5 双区间、Kimi K3 已打通 TypeScript 目录、本地 CLI/服务端导入、Settings API、Supabase 迁移/RPC 与发布编排。另补齐有完整官方证据的 <code>kimi-k2.7-code</code>。Kimi cache-miss 输入在分桶语义不可证明时保持未定价。</p>
+
+  <div class="grid">
+    <div class="card"><span class="muted">目录版本</span><b>2026-08-02</b></div>
+    <div class="card"><span class="muted">价格版本 / 别名</span><b>48 / 11</b></div>
+    <div class="card"><span class="muted">目录哈希</span><b style="font-size:11px">0e393d97…84107</b></div>
+    <div class="card"><span class="muted">真实 PostgreSQL</span><b class="ok">216 / 216</b></div>
+  </div>
+
+  <h2>官方证据与入库结果</h2>
+  <table>
+    <thead><tr><th>模型</th><th>API ID / 生效区间</th><th>USD / MTok</th><th>证据</th></tr></thead>
+    <tbody>
+      <tr><td>Claude Opus 5</td><td><code>claude-opus-5</code><br>2026-07-24 起</td><td>input 5 · output 25 · cache hit .5 · 5m write 6.25</td><td><a href="https://platform.claude.com/docs/en/about-claude/models/overview">模型页</a> · <a href="https://platform.claude.com/docs/en/about-claude/pricing">价格页</a> · <a href="https://platform.claude.com/docs/en/release-notes/overview">发布说明</a></td></tr>
+      <tr><td>Claude Sonnet 5</td><td><code>claude-sonnet-5</code><br>06-30 ≤ t &lt; 09-01</td><td>2 · 10 · .2 · 2.5</td><td rowspan="2"><a href="https://platform.claude.com/docs/en/about-claude/models/overview">模型页</a> · <a href="https://platform.claude.com/docs/en/about-claude/pricing">价格页</a> · <a href="https://platform.claude.com/docs/en/release-notes/overview">发布说明</a></td></tr>
+      <tr><td>Claude Sonnet 5</td><td><code>claude-sonnet-5</code><br>2026-09-01 起</td><td>3 · 15 · .3 · 3.75</td></tr>
+      <tr><td>Kimi K3</td><td><code>kimi-k3</code><br>2026-07-16 起 · 1,048,576 context</td><td>cache hit .30 · cache miss input 3 · output 15</td><td><a href="https://platform.kimi.ai/docs/pricing/chat-k3.md">价格页</a> · <a href="https://platform.kimi.ai/docs/guide/kimi-k3-quickstart.md">Quickstart</a> · <a href="https://www.kimi.com/code/docs/en/kimi-code/whats-new.html">发布日期</a> · <a href="https://www.moonshot.ai/">Moonshot</a></td></tr>
+      <tr><td>Kimi K2.7 Code</td><td><code>kimi-k2.7-code</code><br>2026-06-12 起 · 262,144 context</td><td>cache hit .19 · cache miss input .95 · output 4</td><td><a href="https://platform.kimi.ai/docs/models.md">当前模型索引</a> · <a href="https://platform.kimi.ai/docs/pricing/chat-k27-code.md">价格页</a> · <a href="https://www.kimi.com/code/docs/en/kimi-code/whats-new.html">发布日期</a></td></tr>
+    </tbody>
+  </table>
+
+  <h2>全链审计</h2>
+  <div class="flow">
+    <div><b>1. Raw event</b><br><span class="muted">parser 保留 tokenSemantics 与五个桶</span></div>
+    <div><b>2. Resolve</b><br><span class="muted">exact canonical / exact alias / 单一合法 YYYYMMDD 后缀</span></div>
+    <div><b>3. Catalog</b><br><span class="muted">按事件时间选 [validFrom, validTo)</span></div>
+    <div><b>4. Ingestion</b><br><span class="muted">CLI 与本地 server 共用 estimator；reported 优先</span></div>
+    <div><b>5. SQL/RPC</b><br><span class="muted">不可变目录 + tokend_price_event + backfill</span></div>
+    <div><b>6. UI API</b><br><span class="muted">聚合只读已存成本；Settings 默认价按请求时刻选区间</span></div>
+  </div>
+  <h3>Kimi fail-closed</h3>
+  <ul>
+    <li><code>tokenSemantics !== disjoint</code> → <code>unpriced / unsupported_token_semantics</code>。</li>
+    <li><code>cacheWriteTokens !== 0</code> → <code>unpriced / unsupported_cache_write_mapping</code>。</li>
+    <li>只有 input=cache-miss、cacheRead=cache-hit 且 cacheWrite=0 被证明时才估算；本地 manual price 不能绕过。</li>
+    <li><code>pricingStatus=reported</code> 的服务商成本原样保留，不被目录覆盖。</li>
+  </ul>
+  <h3>解析与别名</h3>
+  <p>未新增猜测别名。<code>anthropic/claude-opus-5</code>、<code>moonshot/kimi-k3</code>、vendor 前后缀仍拒绝；只保留目录已有、可追溯的 exact aliases。历史事件早于 validFrom 时不套用未来价。</p>
+
+  <h2>同供应商目录审计</h2>
+  <table>
+    <thead><tr><th>项目</th><th>处理</th><th>理由 / 风险</th></tr></thead>
+    <tbody>
+      <tr><td>Claude Mythos 5</td><td><span class="pill warn">跳过</span></td><td>官方模型页标为 limited availability / invitation-only，不放入普通自助目录。</td></tr>
+      <tr><td>Kimi K2.7 Code HighSpeed</td><td><span class="pill warn">未定价</span></td><td>当前模型与价格有官方证据，但 06-12 发布说明仍写 beta coming soon，未取得精确正式生效日；禁止用抓取日倒填历史。</td></tr>
+      <tr><td>Kimi K2.6</td><td><span class="pill ok">已有</span></td><td>现有 canonical 与官方当前 ID 对齐。</td></tr>
+      <tr><td>Kimi K2.5</td><td><span class="pill warn">保留历史</span></td><td>官方索引提示新用户不可用、8/31 全量退场；不删除历史价格版本。</td></tr>
+      <tr><td>旧 <code>kimi-k2.7</code></td><td><span class="pill warn">兼容保留</span></td><td>已有实际日志别名 <code>k2p7</code> 仍指向旧 canonical；官方 API ID 另以 <code>kimi-k2.7-code</code> 精确建模，不模糊合并。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>RED → GREEN 与验证</h2>
+  <table>
+    <thead><tr><th>门</th><th>结果</th><th>证据</th></tr></thead>
+    <tbody>
+      <tr><td>模型刷新专项</td><td class="ok">PASS</td><td>缺 local estimator、发布迁移未编排、K3 manual 绕过、Settings 未来价均先 RED 后 GREEN。</td></tr>
+      <tr><td>定价 / sync / token semantics / local state</td><td class="ok">PASS</td><td>四组回归通过；reported-cost、unknown/unpriced、有效期与 alias 边界覆盖。</td></tr>
+      <tr><td>SQL contract / catalog parity</td><td class="ok">PASS</td><td>生成器 check 通过；TypeScript ↔ SQL 48 rows / 11 aliases / hash 完全一致。</td></tr>
+      <tr><td>本地 PostgreSQL pgTAP</td><td class="ok">216 / 216</td><td>新增迁移重复加载；旧目录不可变性、RPC、回填、激活、rollback 全链通过；临时数据库已删除。</td></tr>
+      <tr><td>生产 rollout contract</td><td class="ok">64 / 64</td><td>新迁移按 managed 顺序纳入；未执行任何云端命令。</td></tr>
+      <tr><td>TypeScript / production build</td><td class="ok">PASS</td><td><code>tsc --noEmit</code>；Vite 2,386 modules。保留既有 &gt;500k chunk 警告。</td></tr>
+      <tr><td>npm audit</td><td class="warn">基线未绿</td><td>15 项：1 low / 6 moderate / 7 high / 1 critical；依赖图未因本次功能变更增加，未自动 fix。</td></tr>
+      <tr><td>孤立 ingestion 全量文件</td><td class="bad">基线阻断</td><td><code>8608ce7</code> 的测试直接导入缺失的 <code>dashboard-metrics.ts</code>；但同一基线 routes 使用 <code>total_tokens/total_cost</code>，测试却要求 output&gt;0 且排除 reasoning/cache-write 的 active 口径，无法证明“无语义漂移提炼”，因此未把猜测实现纳入 write-set。</td></tr>
+    </tbody>
+  </table>
+  <div class="note block"><b>不能宣称“仓库所有测试全绿”。</b>模型刷新专项、目录一致性、SQL 与构建门已绿；孤立的 <code>tests/ingestion-regression.ts</code> 在模型刷新代码执行前即被 8608ce7 缺失 helper 阻断。曾做不入仓的最小验证实现以确认后续阻断，但因其口径不能从现有 routes 无漂移推出，已撤回，不能拿它掩盖回归。</div>
+
+  <h2>发布前置门与顺序</h2>
+  <ol>
+    <li>先由原 dashboard 变更 owner 提交完整 helper 契约，或明确批准 dashboard active 口径变更；随后补齐其余缺失 API helpers，并让同一 ingestion 全量文件真实执行。否则停止上线。</li>
+    <li>合并代码后发布 <code>tokend-cli@2.5.1</code>；推送时跳过会写外部版本表的本地 hook，本 PR 不做外部写。</li>
+    <li>只读核验 Supabase migration history、当前 active/previous catalog、preflight 聚合与 catalog hash。</li>
+    <li>应用 <code>202608020001_model_catalog_refresh.sql</code>。它只安装不可变目录并替换计价函数，不激活新目录。</li>
+    <li>用既有 rollout 工具依次 create → freeze → backfill → reconcile；所有 gate 绿后才 activate <code>2026-08-02</code>。</li>
+    <li>观察 unpriced share、Kimi bucket warnings、总成本与供应商报告成本差异；最后再重部署需要该版本的本地 server/UI。</li>
+  </ol>
+  <p><b>需要：</b>CLI npm 2.5.1、Supabase migration、受控历史 backfill/activation、本地 server/UI 新包。<b>不需要：</b>新的 Supabase Edge Function 或 AI798 页面代码用于这条定价链。</p>
+  <h3>Rollback</h3>
+  <ul>
+    <li>激活前：保持旧 active pointer，不删除已安装目录。</li>
+    <li>激活后：调用既有 paired rollback 恢复 exact previous catalog/run；保留审计和 revisions。</li>
+    <li>CLI：停止分发 2.5.1 / 回退 2.5.0。数据库函数不做破坏性 down migration；如函数需回退，走审阅后的 forward-recovery migration。</li>
+  </ul>
+
+  <h2>Write-set</h2>
+  <p><b>模型刷新：</b><code>cli/pricing/**</code>、本地 ingestion estimator/调用点、Settings 有效价 helper、SQL 迁移/pgTAP/生成器、rollout/scale 编排、专项与合约测试、2.5.1 元数据、本报告。</p>
+  <p><b>dashboard 基线恢复（单列）：</b>最终 write-set 为零。证据表明测试确实要求该文件，但 routes 与测试口径冲突，未满足“无语义漂移”前置条件；未修改 routes，未补 <code>model-list.ts</code> / platform helpers。</p>
+  <p><b>残余风险：</b>缺失 helper 使仓库全量测试无法执行到模型刷新相关断言；因此专项虽绿，发布仍必须阻断，不能用假 fallback 或死代码解除。</p>
+  <p class="meta">本报告不含 secret、token、PII 或原始 provider payload。未 merge、deploy、改云、执行 migration/backfill。</p>
+</main></body></html>

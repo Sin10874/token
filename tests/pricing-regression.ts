@@ -52,7 +52,7 @@ function testCatalogResolution() {
   assert.equal(resolveModelPrice('gpt-5.6-sol-202607099'), null)
   assert.equal(resolveModelPrice('vendor-gpt-5.6-sol'), null)
 
-  assert.equal(CATALOG_VERSION, '2026-07-10')
+  assert.equal(CATALOG_VERSION, '2026-08-02')
   assert.match(CATALOG_HASH, /^[a-f0-9]{64}$/)
 
   const rowOrder = CATALOG_SNAPSHOT.rows.map(row => `${row.modelId}\u0000${row.validFrom}`)
@@ -79,16 +79,44 @@ function testCatalogResolution() {
     {
       modelId: 'claude-fable-5',
       provider: 'anthropic',
-      catalogVersion: '2026-07-10',
+      catalogVersion: '2026-08-02',
       validFrom: '2026-06-09T00:00:00Z',
       standard: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
       sourceCheckedAt: '2026-07-10',
       sourceUrl: 'https://platform.claude.com/docs/en/about-claude/pricing',
     },
     {
+      modelId: 'claude-opus-5',
+      provider: 'anthropic',
+      catalogVersion: '2026-08-02',
+      validFrom: '2026-07-24T00:00:00Z',
+      standard: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+      sourceCheckedAt: '2026-08-02',
+      sourceUrl: 'https://platform.claude.com/docs/en/about-claude/pricing',
+    },
+    {
+      modelId: 'claude-sonnet-5',
+      provider: 'anthropic',
+      catalogVersion: '2026-08-02',
+      validFrom: '2026-06-30T00:00:00Z',
+      validTo: '2026-09-01T00:00:00Z',
+      standard: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+      sourceCheckedAt: '2026-08-02',
+      sourceUrl: 'https://platform.claude.com/docs/en/about-claude/pricing',
+    },
+    {
+      modelId: 'claude-sonnet-5',
+      provider: 'anthropic',
+      catalogVersion: '2026-08-02',
+      validFrom: '2026-09-01T00:00:00Z',
+      standard: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+      sourceCheckedAt: '2026-08-02',
+      sourceUrl: 'https://platform.claude.com/docs/en/about-claude/pricing',
+    },
+    {
       modelId: 'gpt-5.6-luna',
       provider: 'openai',
-      catalogVersion: '2026-07-10',
+      catalogVersion: '2026-08-02',
       validFrom: '2026-06-26T00:00:00Z',
       standard: { input: 1, output: 6, cacheRead: 0.1, cacheWrite: 1.25 },
       longContext: { input: 2, output: 9, cacheRead: 0.2, cacheWrite: 2.5 },
@@ -99,7 +127,7 @@ function testCatalogResolution() {
     {
       modelId: 'gpt-5.6-sol',
       provider: 'openai',
-      catalogVersion: '2026-07-10',
+      catalogVersion: '2026-08-02',
       validFrom: '2026-06-26T00:00:00Z',
       standard: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 },
       longContext: { input: 10, output: 45, cacheRead: 1, cacheWrite: 12.5 },
@@ -110,13 +138,31 @@ function testCatalogResolution() {
     {
       modelId: 'gpt-5.6-terra',
       provider: 'openai',
-      catalogVersion: '2026-07-10',
+      catalogVersion: '2026-08-02',
       validFrom: '2026-06-26T00:00:00Z',
       standard: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 3.125 },
       longContext: { input: 5, output: 22.5, cacheRead: 0.5, cacheWrite: 6.25 },
       longContextThreshold: 272_000,
       sourceCheckedAt: '2026-07-10',
       sourceUrl: 'https://developers.openai.com/api/docs/pricing',
+    },
+    {
+      modelId: 'kimi-k2.7-code',
+      provider: 'moonshot',
+      catalogVersion: '2026-08-02',
+      validFrom: '2026-06-12T00:00:00Z',
+      standard: { input: 0.95, output: 4, cacheRead: 0.19, cacheWrite: 0 },
+      sourceCheckedAt: '2026-08-02',
+      sourceUrl: 'https://platform.kimi.ai/docs/pricing/chat-k27-code.md',
+    },
+    {
+      modelId: 'kimi-k3',
+      provider: 'moonshot',
+      catalogVersion: '2026-08-02',
+      validFrom: '2026-07-16T00:00:00Z',
+      standard: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 },
+      sourceCheckedAt: '2026-08-02',
+      sourceUrl: 'https://platform.kimi.ai/docs/pricing/chat-k3.md',
     },
   ])
 }
@@ -170,7 +216,7 @@ function testLegacyCatalogRemainsInSharedCatalog() {
   assert.deepEqual(actualLegacyRows.find(row => row.modelId === 'gpt-5.4'), {
     modelId: 'gpt-5.4',
     provider: 'openai',
-    catalogVersion: '2026-07-10',
+    catalogVersion: '2026-08-02',
     validFrom: '2026-06-12T00:00:00Z',
     standard: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 },
     sourceCheckedAt: '2026-06-12',
@@ -802,7 +848,7 @@ function testStandardEstimationAndEffectiveDates() {
   assert.equal(sol.matchedModelId, 'gpt-5.6-sol')
   assert.equal(sol.status, 'estimated')
   assert.equal(sol.tier, 'standard')
-  assert.equal(sol.priceVersion, '2026-07-10/gpt-5.6-sol/2026-06-26T00:00:00Z')
+  assert.equal(sol.priceVersion, '2026-08-02/gpt-5.6-sol/2026-06-26T00:00:00Z')
   assert.equal(sol.catalogHash, CATALOG_HASH)
   assert.equal(sol.inputCost, 0.5)
   assert.equal(sol.outputCost, 0.6)

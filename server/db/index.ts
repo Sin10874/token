@@ -136,7 +136,7 @@ ensureColumn('ingestion_state', 'parser_version', 'INTEGER DEFAULT 1')
 ensureColumn('sessions', 'title', 'TEXT')
 
 function upsertDefaultModelPrices() {
-  const seedRows = getDefaultSeedRows()
+  const seedRows = getDefaultSeedRows(Date.now())
   const upsert = db.prepare(`
     INSERT INTO model_prices (model_id, provider, input_price, output_price, cache_read_price, cache_write_price, per_tokens, source, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, 1000000, 'default', ?)

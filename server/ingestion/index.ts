@@ -1,6 +1,6 @@
 import db from '../db/index.js'
 import { discoverSessionFiles } from './scanner.js'
-import { parseSessionFile } from './parser.js'
+import { parseSessionFile, type RawUsageEvent } from './parser.js'
 import { discoverClaudeCodeFiles } from './claude-code-scanner.js'
 import { parseClaudeCodeFile } from './claude-code-parser.js'
 import { discoverCodexFiles } from './codex-scanner.js'
@@ -18,6 +18,7 @@ import {
   type IngestionState,
 } from './ingestion-state.js'
 import { createLocalPriceResolver, type LocalModelPriceRow } from './local-price-resolver.js'
+import { applyLocalCosts } from './local-cost-estimator.js'
 import { PARSER_VERSIONS } from './parser-versions.js'
 
 export { resolveStartLine }
@@ -67,22 +68,10 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
   const priceRows = db.prepare('SELECT * FROM model_prices').all() as unknown as LocalModelPriceRow[]
   const findPrice = createLocalPriceResolver(priceRows)
 
-  // 日志自带成本时优先用日志值，否则按价格表补算
-  function applyCostsFromPrices(events: Array<{
-    model: string; totalCost: number; totalTokens: number
-    inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number
-    inputCost: number; outputCost: number; cacheReadCost: number; cacheWriteCost: number
-  }>) {
+  // 日志自带成本优先；默认价走有效期目录，显式本地覆盖仍保留。
+  function applyCostsFromPrices(events: RawUsageEvent[]) {
     for (const event of events) {
-      if (event.totalCost !== 0 || event.totalTokens <= 0) continue
-      const price = findPrice(event.model)
-      if (!price) continue
-      const perTokens = price.per_tokens || 1000000
-      event.inputCost = (event.inputTokens * price.input_price) / perTokens
-      event.outputCost = (event.outputTokens * price.output_price) / perTokens
-      event.cacheReadCost = (event.cacheReadTokens * price.cache_read_price) / perTokens
-      event.cacheWriteCost = (event.cacheWriteTokens * price.cache_write_price) / perTokens
-      event.totalCost = event.inputCost + event.outputCost + event.cacheReadCost + event.cacheWriteCost
+      applyLocalCosts(event, findPrice)
     }
   }
 
@@ -101,20 +90,7 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
       continue
     }
 
-    // Calculate costs from model_prices if event has zero cost
-    for (const event of result.events) {
-      if (event.totalCost === 0 && event.totalTokens > 0) {
-        const price = findPrice(event.model)
-        if (price) {
-          const perTokens = price.per_tokens || 1000000
-          event.inputCost = (event.inputTokens * price.input_price) / perTokens
-          event.outputCost = (event.outputTokens * price.output_price) / perTokens
-          event.cacheReadCost = (event.cacheReadTokens * price.cache_read_price) / perTokens
-          event.cacheWriteCost = 0
-          event.totalCost = event.inputCost + event.outputCost + event.cacheReadCost
-        }
-      }
-    }
+    applyCostsFromPrices(result.events)
 
     // Insert events in a transaction
     let inserted = 0
@@ -178,18 +154,7 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
       continue
     }
 
-    // Calculate costs from model_prices
-    for (const event of result.events) {
-      const price = findPrice(event.model)
-      if (price) {
-        const perTokens = price.per_tokens || 1000000
-        event.inputCost = (event.inputTokens * price.input_price) / perTokens
-        event.outputCost = (event.outputTokens * price.output_price) / perTokens
-        event.cacheReadCost = (event.cacheReadTokens * price.cache_read_price) / perTokens
-        event.cacheWriteCost = (event.cacheWriteTokens * price.cache_write_price) / perTokens
-        event.totalCost = event.inputCost + event.outputCost + event.cacheReadCost + event.cacheWriteCost
-      }
-    }
+    applyCostsFromPrices(result.events)
 
     let inserted = 0
     db.exec('BEGIN')
@@ -250,18 +215,7 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
       continue
     }
 
-    // Calculate costs from model_prices
-    for (const event of result.events) {
-      const price = findPrice(event.model)
-      if (price) {
-        const perTokens = price.per_tokens || 1000000
-        event.inputCost = (event.inputTokens * price.input_price) / perTokens
-        event.outputCost = (event.outputTokens * price.output_price) / perTokens
-        event.cacheReadCost = (event.cacheReadTokens * price.cache_read_price) / perTokens
-        event.cacheWriteCost = 0
-        event.totalCost = event.inputCost + event.outputCost + event.cacheReadCost
-      }
-    }
+    applyCostsFromPrices(result.events)
 
     let inserted = 0
     db.exec('BEGIN')

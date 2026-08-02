@@ -192,6 +192,12 @@ BEGIN
 END;
 $$;
 
+ALTER FUNCTION tokend_upload_events(TEXT, JSONB, JSONB)
+  OWNER TO postgres;
+
+ALTER FUNCTION tokend_upload_events(TEXT, JSONB, JSONB)
+  SET search_path TO public, pg_temp;
+
 DROP FUNCTION IF EXISTS tokend_backfill_versioned_model_costs_batch(INTEGER);
 DROP TABLE IF EXISTS tokend_model_price_versions;
 DROP TABLE IF EXISTS tokend_model_price_backfills;

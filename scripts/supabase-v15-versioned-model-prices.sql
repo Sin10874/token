@@ -385,6 +385,12 @@ BEGIN
 END;
 $$;
 
+ALTER FUNCTION tokend_upload_events(TEXT, JSONB, JSONB)
+  OWNER TO postgres;
+
+ALTER FUNCTION tokend_upload_events(TEXT, JSONB, JSONB)
+  SET search_path TO public, pg_temp;
+
 CREATE OR REPLACE FUNCTION tokend_backfill_versioned_model_costs_batch(p_limit INTEGER DEFAULT 20000)
 RETURNS JSON
 LANGUAGE plpgsql

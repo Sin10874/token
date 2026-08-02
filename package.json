@@ -11,6 +11,7 @@
     "tsconfig.json"
   ],
   "scripts": {
+    "test": "tsx tests/ingestion-regression.ts",
     "dev": "concurrently -k -n server,client -c cyan,magenta \"npm run server:dev\" \"npm run client:dev\"",
     "server:dev": "tsx watch server/index.ts",
     "client:dev": "vite",

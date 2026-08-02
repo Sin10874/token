@@ -21,6 +21,39 @@ interface IngestionStats {
   duration: number
 }
 
+interface StoredIngestionState {
+  last_processed_lines: number
+  parser_version?: number | null
+}
+
+export function resolveStartLine(
+  forceReindex: boolean,
+  state: StoredIngestionState | undefined,
+  parserVersion: number,
+): number {
+  if (forceReindex || !state || state.parser_version !== parserVersion) return 0
+  return state.last_processed_lines || 0
+}
+
+// 兼容 2.4.0 基线测试中的既有渠道别名。
+export function resolvePricedModelId(model: string): string {
+  const aliases: Record<string, string> = {
+    k2p5: 'kimi-k2.5',
+    'kimi-code/kimi-for-coding': 'kimi-k2.5',
+    'kimi-for-coding': 'kimi-k2.5',
+    'kimi-k2-thinking': 'kimi-k2.5',
+    'M-2.7': 'MiniMax-M2.7',
+  }
+  return aliases[model] || model
+}
+
+export function resetDerivedUsageData(targetDb: { exec(sql: string): void; prepare(sql: string): { get(...params: unknown[]): unknown } }) {
+  targetDb.exec('DELETE FROM usage_events; DELETE FROM sessions; DELETE FROM ingestion_state; DELETE FROM source_warnings;')
+  if (targetDb.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'message_events'").get()) {
+    targetDb.exec('DELETE FROM message_events;')
+  }
+}
+
 const insertEvent = db.prepare(`
   INSERT OR IGNORE INTO usage_events (
     id, timestamp_ms, session_id, session_key, agent, provider, model, channel,

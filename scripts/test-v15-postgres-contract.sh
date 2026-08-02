@@ -41,7 +41,7 @@ trap cleanup EXIT
 
 psql=("$pg_bin/psql" -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p "$port")
 "${psql[@]}" -d postgres -c "CREATE DATABASE $database" >"$log_dir/create-database.log"
-"${psql[@]}" -d "$database" -c "CREATE EXTENSION IF NOT EXISTS pgcrypto; CREATE TABLE tokend_members (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), phone TEXT, member_code TEXT NOT NULL UNIQUE, tagline TEXT);" >"$log_dir/bootstrap.log"
+"${psql[@]}" -d "$database" -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'postgres') THEN CREATE ROLE postgres SUPERUSER LOGIN; END IF; END \$\$; CREATE EXTENSION IF NOT EXISTS pgcrypto; CREATE TABLE tokend_members (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), phone TEXT, member_code TEXT NOT NULL UNIQUE, tagline TEXT);" >"$log_dir/bootstrap.log"
 
 history=(
   scripts/supabase-schema.sql

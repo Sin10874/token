@@ -12,10 +12,10 @@
 </head>
 <body><main>
   <h1>Tokend 新模型窄回迁审查</h1>
-  <p class="lede">基于本地真实 <code>main@9607a595</code>，不含 <code>tokend-pricing-full-chain</code> 的 42 个领先提交。结论：代码与 SQLite 路径可审；生产发布仍需先同步 GitHub 的 11 个本地提交，并在真实 PostgreSQL/Supabase 环境完成 v15 apply/rollback 合同门。</p>
+  <p class="lede">基于 <code>origin/main@46af772</code>（已含历史同步与 frozen helper），仅保留两笔模型能力提交，不含 <code>tokend-pricing-full-chain</code> 的 42 个领先提交。结论：CLI、server、SQLite 与 Supabase v15 静态合同可审；真实 PostgreSQL/Supabase 的 apply/rollback 仍是发布前置门。</p>
 
   <div class="grid">
-    <div class="card"><div class="label">真实基线</div><div class="value mono">9607a595</div><div class="small">merge-base 已锁定</div></div>
+    <div class="card"><div class="label">PR 基线</div><div class="value mono">46af772</div><div class="small">merge-base 已锁定</div></div>
     <div class="card"><div class="label">本地专项</div><div class="value ok">62 / 62</div><div class="small">ingestion 20 + 模型 42</div></div>
     <div class="card"><div class="label">发布判断</div><div class="value warn">有前置门</div><div class="small">未 merge / 未 deploy / 未写云</div></div>
   </div>
@@ -25,16 +25,10 @@
     <thead><tr><th>层</th><th>预存证据 / RED</th><th>GREEN</th><th>write-set</th></tr></thead>
     <tbody>
       <tr>
-        <td>前置基线修复</td>
-        <td><code>b2f9979</code> 在测试中 import 4 个 API helper 与 3 个 ingestion helper，但仓库历史从未提交 4 个模块；原命令先报 <code>ERR_MODULE_NOT_FOUND dashboard-metrics.ts</code>，补模块后再报 <code>resolveStartLine is not a function</code>。</td>
-        <td><code>07af3c0</code> 的独立 detached worktree：ingestion regression 20 例通过，<code>tsc --noEmit</code> 通过。</td>
-        <td><code>server/api/dashboard-metrics.ts</code>、<code>model-list.ts</code>、<code>platform-overview.ts</code>、<code>platform-summary.ts</code>、既有 <code>routes.ts</code> 提炼、<code>server/ingestion/index.ts</code> 三个冻结 helper export。</td>
-      </tr>
-      <tr>
         <td>本次模型能力</td>
         <td>新增测试先读取尚不存在的 <code>OFFICIAL_MODEL_PRICE_VERSIONS</code>，RED 为 <code>undefined.map</code>；同时冻结有效期、未知模型、Kimi cache、reported-cost、SQLite 与 Supabase 上传合同。</td>
         <td>模型专项 42 例通过；CLI 上传前计价、server resolver、SQLite 版本表/回填/回滚、Supabase v15 静态合同均覆盖。</td>
-        <td><code>cli/prices.ts</code>、server resolver/SQLite catalog、两份 SQLite SQL、Supabase v15/rollback、模型测试、测试脚本、<code>package-lock.json</code> 安全补丁与本报告。</td>
+        <td><code>cli/prices.ts</code>、server resolver/SQLite catalog、两份 SQLite SQL、Supabase v15/rollback、模型测试、测试脚本与本报告。</td>
       </tr>
     </tbody>
   </table>
@@ -48,6 +42,9 @@
       <tr><td><code>claude-sonnet-5</code></td><td>2026-09-01 起</td><td>3 / 15 / 0.3 / 3.75</td><td>标准价只对该时点后的事件生效</td></tr>
       <tr><td><code>kimi-k2.7-code</code></td><td>2026-06-12 起</td><td>miss input 0.95 / output 4 / hit 0.19</td><td>262,144；cache-write 非零则整条未计价</td></tr>
       <tr><td><code>kimi-k3</code></td><td>2026-07-16 起</td><td>miss input 3 / output 15 / hit 0.3</td><td>1,048,576；cache-write 非零则整条未计价</td></tr>
+      <tr><td><code>deepseek-v4-flash/pro</code></td><td>2026-04-24 起</td><td>flash 0.14 / 0.28 / 0.0028；pro 0.435 / 0.87 / 0.003625</td><td>hit/miss 语义；cache-write 非零则未计价</td></tr>
+      <tr><td><code>mimo-v2.5/pro</code></td><td>2026-05-27 起</td><td>2.5: 0.14 / 0.28 / 0.0028；pro: 0.435 / 0.87 / 0.0036</td><td>hit/miss 语义；cache-write 非零则未计价</td></tr>
+      <tr><td><code>GLM / MiniMax</code></td><td>现有目录补别名与完整路径</td><td>沿用 main 已核验的平铺价格</td><td>仅精确 provider-prefixed / 实际日志别名；无模糊后缀匹配</td></tr>
     </tbody>
   </table>
   <p class="note">只接受精确 model ID。<code>anthropic/claude-opus-5</code>、<code>moonshot/kimi-k3</code>、HighSpeed 后缀与任意 vendor 前缀都保持未计价。Mythos 5 因 limited availability 跳过；Kimi HighSpeed 因缺精确生效日跳过。</p>
@@ -56,12 +53,12 @@
   <table>
     <thead><tr><th>门</th><th>结果</th><th>证据</th></tr></thead>
     <tbody>
-      <tr><td>干净安装</td><td class="ok">通过</td><td>同一 lockfile，官方 registry 重试后安装 341 packages；第一次仅为 npmmirror timeout。</td></tr>
+      <tr><td>干净安装</td><td class="ok">通过</td><td>同一 lockfile，341 packages。</td></tr>
       <tr><td>专项 / 全量</td><td class="ok">通过</td><td>ingestion 20；模型 42；合计 62。</td></tr>
       <tr><td>TypeScript / build</td><td class="ok">通过</td><td><code>tsc --noEmit</code>；Vite 5.4.21，2386 modules。仅保留既有 500k chunk warning。</td></tr>
-      <tr><td>SQLite 实库副本</td><td class="ok">通过</td><td>117MB 副本 integrity ok；双 apply 后 5 version rows；目标历史事件 0；rollback 后新增表 0，integrity ok。</td></tr>
+      <tr><td>SQLite 实库副本</td><td class="ok">通过</td><td>117MB 副本 integrity ok；双 apply 后 9 version rows、backfill audit 0；rollback 后新增表 0，integrity ok。</td></tr>
       <tr><td>npm pack</td><td class="ok">通过</td><td>dry-run 29 files；<code>cli/prices.ts</code> 与 CLI 所需 ingestion parser 均在包内。</td></tr>
-      <tr><td>npm audit</td><td class="warn">critical 清零</td><td>15 → 4：critical 0、high 1、moderate 3。Vite/esbuild 需 Vite 8；React Router 需 7.18。omit-dev 另剩 tsx→esbuild 低危 Windows dev-server 条件项。</td></tr>
+      <tr><td>npm audit</td><td class="warn">critical=0</td><td>main 已完成非破坏性补丁更新；仍有 high 1、moderate 3。Vite/esbuild 需 Vite 8；React Router 需 7.18。</td></tr>
       <tr><td>真实 PostgreSQL / pgTAP</td><td class="stop">未通过</td><td>本机 5432/54322 无响应且无对应 Supabase 容器；现阶段只有 SQL 静态上传合同，不可宣称真实数据库 GREEN。</td></tr>
     </tbody>
   </table>
@@ -76,14 +73,14 @@
 
   <h2>安全上线与回滚</h2>
   <ol>
-    <li>先将本地真实 main 的 11 个提交单独推为同步分支并 review；合并后确认 GitHub <code>origin/main=9607a595</code>（或其等价后继）。不要把本分支直接对旧 <code>b046f38</code> 开 PR。</li>
-    <li>把本分支重放到更新后的 origin/main，确认 PR 只剩“基线 helper”与“模型能力”两笔提交。</li>
+    <li>已合并的 PR #3 将历史同步与 frozen helper 纳入 <code>origin/main@46af772</code>；本 PR 以该 commit 为 base。</li>
+    <li>确认本 PR 只剩两笔模型能力提交；不得带入 helper、页面、部署或 npm publish。</li>
     <li>在临时/预发布 PostgreSQL 执行 v15、上传边界用例与 rollback；门绿后再执行生产 v15。先建立版本目录与 RPC，再接受新 CLI 流量。</li>
     <li>生产分批调用 <code>tokend_backfill_versioned_model_costs_batch</code> 直到 0，再重建 session costs；观测 unknown/unpriced 数量。</li>
     <li>分配下一 patch 版本，同时更新 <code>package.json</code> 与 <code>release/current-version.json</code>；发布 npm 后由 daemon 自升级。当前 2.4.0 不可重复 publish。</li>
     <li>回滚先恢复 v12 上传 RPC，再执行 v15 rollback 恢复审计过的历史成本；最后重建 session costs。CLI 可回退上一 npm 版本。</li>
   </ol>
-  <p class="note stopbox"><strong>生产门：</strong>在真实 PostgreSQL apply/rollback 与远端 11 提交同步完成前，禁止 merge/deploy/backfill/npm publish。代码测试通过不等于生产数据库已验收。</p>
+  <p class="note stopbox"><strong>生产门：</strong>在真实 PostgreSQL apply/rollback 合同通过前，禁止 merge/deploy/backfill/npm publish。代码测试通过不等于生产数据库已验收。</p>
 
   <h2>官方证据</h2>
   <ul>

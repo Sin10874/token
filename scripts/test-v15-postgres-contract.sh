@@ -72,8 +72,6 @@ done >"$log_dir/history-replay.log"
   -f "$repo_root/scripts/supabase-v15-versioned-model-prices.sql" >"$log_dir/v15-apply-twice.log"
 "${psql[@]}" -d "$database" -f "$repo_root/tests/postgres-v15-contract.initial.sql" >"$log_dir/contract-initial.log"
 
-# Restore v12's pre-v15 upload RPC before the v15 rollback removes its override.
-"${psql[@]}" -d "$database" -f "$repo_root/scripts/supabase-v12-truncate-project.sql" >"$log_dir/v12-restore.log"
 "${psql[@]}" -d "$database" -f "$repo_root/scripts/supabase-v15-versioned-model-prices.rollback.sql" >"$log_dir/v15-rollback.log"
 "${psql[@]}" -d "$database" -f "$repo_root/tests/postgres-v15-contract.rollback.sql" >"$log_dir/contract-rollback.log"
 

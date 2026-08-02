@@ -52,6 +52,41 @@ CREATE TABLE IF NOT EXISTS tokend_model_price_backfills (
 
 ALTER TABLE tokend_model_price_backfills ENABLE ROW LEVEL SECURITY;
 
+-- 快照 v15 之前已经存在的 flat catalog 行，供 rollback 逐字段恢复。
+CREATE TABLE IF NOT EXISTS tokend_model_prices_pre_v15 (
+  model_id          TEXT        PRIMARY KEY,
+  provider          TEXT,
+  input_price       REAL,
+  output_price      REAL,
+  cache_read_price  REAL,
+  cache_write_price REAL,
+  per_tokens        BIGINT,
+  updated_at        TIMESTAMPTZ
+);
+
+INSERT INTO tokend_model_prices_pre_v15 (
+  model_id, provider, input_price, output_price,
+  cache_read_price, cache_write_price, per_tokens, updated_at
+)
+SELECT
+  model_id, provider, input_price, output_price,
+  cache_read_price, cache_write_price, per_tokens, updated_at
+FROM tokend_model_prices
+WHERE model_id IN (
+  'claude-opus-5',
+  'claude-sonnet-5',
+  'kimi-k2.7-code',
+  'kimi-k3',
+  'deepseek-v4-flash',
+  'deepseek-v4-pro',
+  'mimo-v2.5',
+  'mimo-v2.5-pro',
+  'MiniMax-M2.7-highspeed',
+  'MiniMax-M2.5',
+  'MiniMax-M2.5-highspeed'
+)
+ON CONFLICT (model_id) DO NOTHING;
+
 INSERT INTO tokend_model_price_versions (
   model_id, provider, valid_from_ms, valid_to_ms,
   input_price, output_price, cache_read_price, cache_write_price,

@@ -12,7 +12,7 @@
 </head>
 <body><main>
   <h1>Tokend 新模型窄回迁审查</h1>
-  <p class="lede">基于 <code>origin/main@46af772</code>（已含历史同步与 frozen helper），仅保留两笔模型能力提交，不含 <code>tokend-pricing-full-chain</code> 的 42 个领先提交。结论：CLI、server、SQLite 与 Supabase v15 静态合同可审；真实 PostgreSQL/Supabase 的 apply/rollback 仍是发布前置门。</p>
+  <p class="lede">基于 <code>origin/main@46af772</code>（已含历史同步与 frozen helper），仅保留两笔模型能力提交，不含 <code>tokend-pricing-full-chain</code> 的 42 个领先提交。结论：CLI、server、SQLite 与 Supabase v15 静态合同可审；独立临时 PostgreSQL 的 apply/rollback/reapply 合同已通过，但生产 PostgreSQL/Supabase 仍须按上线门执行。</p>
 
   <div class="grid">
     <div class="card"><div class="label">PR 基线</div><div class="value mono">46af772</div><div class="small">merge-base 已锁定</div></div>
@@ -27,7 +27,7 @@
       <tr>
         <td>本次模型能力</td>
         <td>新增测试先读取尚不存在的 <code>OFFICIAL_MODEL_PRICE_VERSIONS</code>，RED 为 <code>undefined.map</code>；同时冻结有效期、未知模型、Kimi cache、reported-cost、SQLite 与 Supabase 上传合同。</td>
-        <td>模型专项 42 例通过；CLI 上传前计价、server resolver、SQLite 版本表/回填/回滚、Supabase v15 静态合同均覆盖。</td>
+        <td>模型专项 42 例通过；CLI 上传前计价、server resolver、SQLite 版本表/回填/回滚，以及独立 PostgreSQL 的 v15 双 apply、上传、回填、session、rollback/reapply 合同均覆盖。</td>
         <td><code>cli/prices.ts</code>、server resolver/SQLite catalog、两份 SQLite SQL、Supabase v15/rollback、模型测试、测试脚本与本报告。</td>
       </tr>
     </tbody>
@@ -59,7 +59,7 @@
       <tr><td>SQLite 实库副本</td><td class="ok">通过</td><td>117MB 副本 integrity ok；双 apply 后 9 version rows、backfill audit 0；rollback 后新增表 0，integrity ok。</td></tr>
       <tr><td>npm pack</td><td class="ok">通过</td><td>dry-run 29 files；<code>cli/prices.ts</code> 与 CLI 所需 ingestion parser 均在包内。</td></tr>
       <tr><td>npm audit</td><td class="warn">critical=0</td><td>main 已完成非破坏性补丁更新；仍有 high 1、moderate 3。Vite/esbuild 需 Vite 8；React Router 需 7.18。</td></tr>
-      <tr><td>真实 PostgreSQL / pgTAP</td><td class="stop">未通过</td><td>本机 5432/54322 无响应且无对应 Supabase 容器；现阶段只有 SQL 静态上传合同，不可宣称真实数据库 GREEN。</td></tr>
+      <tr><td>独立 PostgreSQL 合同</td><td class="ok">通过</td><td>新建临时 cluster，从 schema + v2–v14 正序重放（跳过仅供人工执行的 v8/v9 validation 脚本）；v15 双 apply 后目录 9 条，随后验证上传 RPC、Sonnet 边界、精确别名、Kimi fail-closed、reported cost、unknown、backfill/session、rollback 与 reapply。以 SQL assertions 等价替代仓库未配置的 pgTAP。</td></tr>
     </tbody>
   </table>
 
@@ -75,12 +75,12 @@
   <ol>
     <li>已合并的 PR #3 将历史同步与 frozen helper 纳入 <code>origin/main@46af772</code>；本 PR 以该 commit 为 base。</li>
     <li>确认本 PR 只剩两笔模型能力提交；不得带入 helper、页面、部署或 npm publish。</li>
-    <li>在临时/预发布 PostgreSQL 执行 v15、上传边界用例与 rollback；门绿后再执行生产 v15。先建立版本目录与 RPC，再接受新 CLI 流量。</li>
+    <li>独立临时 PostgreSQL 合同已绿；生产仍先在目标 Supabase schema 上按相同顺序 dry-run/审阅。先建立版本目录与 RPC，再接受新 CLI 流量。</li>
     <li>生产分批调用 <code>tokend_backfill_versioned_model_costs_batch</code> 直到 0，再重建 session costs；观测 unknown/unpriced 数量。</li>
     <li>分配下一 patch 版本，同时更新 <code>package.json</code> 与 <code>release/current-version.json</code>；发布 npm 后由 daemon 自升级。当前 2.4.0 不可重复 publish。</li>
     <li>回滚先恢复 v12 上传 RPC，再执行 v15 rollback 恢复审计过的历史成本；最后重建 session costs。CLI 可回退上一 npm 版本。</li>
   </ol>
-  <p class="note stopbox"><strong>生产门：</strong>在真实 PostgreSQL apply/rollback 合同通过前，禁止 merge/deploy/backfill/npm publish。代码测试通过不等于生产数据库已验收。</p>
+  <p class="note stopbox"><strong>生产门：</strong>临时 PostgreSQL 合同不等于生产验收。合并后仍须先对目标 Supabase schema 审阅 v15、备份并批准维护窗口；未经批准，禁止 production apply/backfill/npm publish/deploy。</p>
 
   <h2>官方证据</h2>
   <ul>

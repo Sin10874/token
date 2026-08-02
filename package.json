@@ -11,7 +11,6 @@
     "tsconfig.json"
   ],
   "scripts": {
-    "test": "tsx tests/ingestion-regression.ts",
     "dev": "concurrently -k -n server,client -c cyan,magenta \"npm run server:dev\" \"npm run client:dev\"",
     "server:dev": "tsx watch server/index.ts",
     "client:dev": "vite",
@@ -19,6 +18,10 @@
     "start": "NODE_ENV=production tsx server/index.ts",
     "prod": "npm run build && NODE_ENV=production tsx server/index.ts",
     "ingest": "tsx server/ingestion/index.ts",
+    "test:model-pricing": "node --import tsx tests/model-pricing-regression.ts",
+    "test:ingestion": "node --import tsx tests/ingestion-regression.ts",
+    "test:postgres-v15": "bash scripts/test-v15-postgres-contract.sh",
+    "test": "npm run test:ingestion && npm run test:model-pricing",
     "setup-hooks": "git config core.hooksPath .githooks",
     "update-version-record": "node scripts/update-version-record.mjs"
   },

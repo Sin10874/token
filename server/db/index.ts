@@ -3,6 +3,7 @@ import path from 'path'
 import fs from 'fs'
 import os from 'os'
 import { resolveOfficialPriceOverride } from './model-price-overrides.js'
+import { OFFICIAL_MODEL_PRICE_VERSIONS } from '../../cli/prices.js'
 
 const DATA_DIR = path.join(process.cwd(), 'data')
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true })
@@ -101,6 +102,28 @@ db.exec(`
     updated_at INTEGER
   );
 
+  CREATE TABLE IF NOT EXISTS model_price_versions (
+    model_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    valid_from_ms INTEGER NOT NULL,
+    valid_to_ms INTEGER,
+    input_price REAL NOT NULL,
+    output_price REAL NOT NULL,
+    cache_read_price REAL NOT NULL,
+    cache_write_price REAL,
+    currency TEXT NOT NULL DEFAULT 'USD',
+    per_tokens INTEGER NOT NULL DEFAULT 1000000,
+    cache_semantics TEXT NOT NULL CHECK (cache_semantics IN ('anthropic', 'hit_miss', 'generic')),
+    context_window INTEGER,
+    source_url TEXT NOT NULL,
+    source_checked_at TEXT NOT NULL,
+    PRIMARY KEY (model_id, valid_from_ms),
+    CHECK (valid_to_ms IS NULL OR valid_to_ms > valid_from_ms)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_model_price_versions_lookup
+    ON model_price_versions(model_id, valid_from_ms, valid_to_ms);
+
   CREATE TABLE IF NOT EXISTS ingestion_state (
     source_path TEXT PRIMARY KEY,
     last_processed_lines INTEGER DEFAULT 0,
@@ -167,6 +190,10 @@ const DEFAULT_MODEL_PRICES = [
   ['k2p5', 'moonshot', 0.6, 3, 0.1, 0],
   ['kimi-code/kimi-for-coding', 'moonshot', 0.6, 3, 0.1, 0],
   ['kimi-k2-thinking', 'moonshot', 0.6, 2.5, 0.15, 0],
+  ['deepseek-v4-flash', 'deepseek', 0.14, 0.28, 0.0028, 0],
+  ['deepseek-v4-pro', 'deepseek', 0.435, 0.87, 0.003625, 0],
+  ['mimo-v2.5', 'xiaomi', 0.14, 0.28, 0.0028, 0],
+  ['mimo-v2.5-pro', 'xiaomi', 0.435, 0.87, 0.0036, 0],
   ['grok-code', 'xai', 0.2, 1.5, 0.02, 0],
   ['glm-4.7-free', 'zhipu', 0, 0, 0, 0],
   ['minimax-m2.1-free', 'minimax', 0, 0, 0, 0],
@@ -180,6 +207,9 @@ const DEFAULT_MODEL_PRICES = [
   // MiniMax M3 缓存写未公布，按 M2.7 同款 1.25x input 估算
   ['MiniMax-M3', 'minimax', 0.3, 1.2, 0.06, 0.375],
   ['MiniMax-M2.7', 'minimax', 0.3, 1.2, 0.06, 0.375],
+  ['MiniMax-M2.7-highspeed', 'minimax', 0.6, 2.4, 0.06, 0.375],
+  ['MiniMax-M2.5', 'minimax', 0.3, 1.2, 0.03, 0.375],
+  ['MiniMax-M2.5-highspeed', 'minimax', 0.6, 2.4, 0.03, 0.375],
 ] as const
 
 function upsertDefaultModelPrices() {
@@ -204,6 +234,69 @@ function upsertDefaultModelPrices() {
 }
 
 upsertDefaultModelPrices()
+
+function upsertVersionedModelPrices() {
+  const upsertVersion = db.prepare(`
+    INSERT INTO model_price_versions (
+      model_id, provider, valid_from_ms, valid_to_ms,
+      input_price, output_price, cache_read_price, cache_write_price,
+      per_tokens, cache_semantics, context_window, source_url, source_checked_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(model_id, valid_from_ms) DO UPDATE SET
+      provider = excluded.provider,
+      valid_to_ms = excluded.valid_to_ms,
+      input_price = excluded.input_price,
+      output_price = excluded.output_price,
+      cache_read_price = excluded.cache_read_price,
+      cache_write_price = excluded.cache_write_price,
+      per_tokens = excluded.per_tokens,
+      cache_semantics = excluded.cache_semantics,
+      context_window = excluded.context_window,
+      source_url = excluded.source_url,
+      source_checked_at = excluded.source_checked_at
+  `)
+  const upsertCurrent = db.prepare(`
+    INSERT INTO model_prices (
+      model_id, provider, input_price, output_price,
+      cache_read_price, cache_write_price, per_tokens, source, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'default-versioned', ?)
+    ON CONFLICT(model_id) DO UPDATE SET
+      provider = excluded.provider,
+      input_price = excluded.input_price,
+      output_price = excluded.output_price,
+      cache_read_price = excluded.cache_read_price,
+      cache_write_price = excluded.cache_write_price,
+      per_tokens = excluded.per_tokens,
+      source = excluded.source,
+      updated_at = excluded.updated_at
+    WHERE source != 'manual'
+  `)
+
+  const now = Date.now()
+  for (const row of OFFICIAL_MODEL_PRICE_VERSIONS) {
+    upsertVersion.run(
+      row.modelId, row.provider, row.validFromMs, row.validToMs,
+      row.inputPrice, row.outputPrice, row.cacheReadPrice, row.cacheWritePrice,
+      row.perTokens, row.cacheSemantics, row.contextWindow, row.sourceUrl, row.sourceCheckedAt,
+    )
+  }
+
+  const modelIds = new Set(OFFICIAL_MODEL_PRICE_VERSIONS.map((row) => row.modelId))
+  for (const modelId of modelIds) {
+    const active = OFFICIAL_MODEL_PRICE_VERSIONS.find((row) => (
+      row.modelId === modelId
+      && now >= row.validFromMs
+      && (row.validToMs == null || now < row.validToMs)
+    ))
+    if (!active) continue
+    upsertCurrent.run(
+      active.modelId, active.provider, active.inputPrice, active.outputPrice,
+      active.cacheReadPrice, active.cacheWritePrice || 0, active.perTokens, now,
+    )
+  }
+}
+
+upsertVersionedModelPrices()
 
 // Seed default Claude Code config if empty
 const ccConfigCount = (db.prepare('SELECT COUNT(*) as c FROM claude_code_config').get() as { c: number }).c

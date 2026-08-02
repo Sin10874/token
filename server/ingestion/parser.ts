@@ -1,4 +1,5 @@
 import fs from 'fs'
+import { MODEL_ID_ALIASES } from '../../cli/prices.js'
 
 export interface RawUsageEvent {
   id: string
@@ -51,13 +52,8 @@ export interface ParseResult {
   projectName?: string
 }
 
-// Normalize model names (merge aliases into canonical name)
-const MODEL_ALIASES: Record<string, string> = {
-  'M-2.7': 'MiniMax-M2.7',
-}
-
 function normalizeModel(model: string): string {
-  return MODEL_ALIASES[model] || model
+  return MODEL_ID_ALIASES[model] || model
 }
 
 function resolveTimestamp(raw: unknown): number {

@@ -76,6 +76,26 @@ node --import tsx "$repo_root/tests/v15-backfill-index-contract.ts" >"$log_dir/b
   -f "$repo_root/scripts/supabase-v15-versioned-model-prices.sql" >"$log_dir/v15-apply-twice.log"
 "${psql[@]}" -d "$database" -f "$repo_root/tests/postgres-v15-contract.initial.sql" >"$log_dir/contract-initial.log"
 
+# CREATE INDEX IF NOT EXISTS would also skip a valid but wrong same-name index.
+# The helper must reject that definition before the invalid-index retry case below.
+"${psql[@]}" -d "$database" -f "$repo_root/scripts/supabase-v15-backfill-candidate-index.cleanup.sql" >"$log_dir/backfill-index-cleanup-before-wrong-valid.log"
+if "${psql[@]}" -d "$database" -f "$repo_root/scripts/supabase-v15-backfill-candidate-index.check.sql" >"$log_dir/backfill-index-missing-check.log" 2>&1; then
+  echo "candidate index check accepted a missing index" >&2
+  exit 1
+fi
+"${psql[@]}" -d "$database" -c "CREATE INDEX CONCURRENTLY idx_tokend_usage_events_v15_backfill_candidates ON public.tokend_usage_events (model)" >"$log_dir/backfill-index-wrong-valid-create.log"
+if "${psql[@]}" -d "$database" -f "$repo_root/scripts/supabase-v15-backfill-candidate-index.sql" >"$log_dir/backfill-index-wrong-valid-guard.log" 2>&1; then
+  echo "candidate index script accepted a valid but wrong same-name index" >&2
+  exit 1
+fi
+if "${psql[@]}" -d "$database" -f "$repo_root/scripts/supabase-v15-backfill-candidate-index.check.sql" >"$log_dir/backfill-index-wrong-valid-check.log" 2>&1; then
+  echo "candidate index check accepted a valid but wrong same-name index" >&2
+  exit 1
+fi
+"${psql[@]}" -d "$database" -f "$repo_root/scripts/supabase-v15-backfill-candidate-index.cleanup.sql" >"$log_dir/backfill-index-cleanup-after-wrong-valid.log"
+"${psql[@]}" -d "$database" -f "$repo_root/scripts/supabase-v15-backfill-candidate-index.sql" >"$log_dir/backfill-index-recreate-after-wrong-valid.log"
+"${psql[@]}" -d "$database" -f "$repo_root/tests/postgres-v15-backfill-index.contract.sql" >"$log_dir/backfill-index-recreate-after-wrong-valid-contract.log"
+
 # A failed concurrent unique build leaves an invalid same-name index. The helper
 # must fail instead of letting CREATE INDEX IF NOT EXISTS silently skip it.
 "${psql[@]}" -d "$database" -f "$repo_root/scripts/supabase-v15-backfill-candidate-index.cleanup.sql" >"$log_dir/backfill-index-cleanup-before-invalid.log"
@@ -85,6 +105,10 @@ if "${psql[@]}" -d "$database" -c "CREATE UNIQUE INDEX CONCURRENTLY idx_tokend_u
 fi
 if "${psql[@]}" -d "$database" -f "$repo_root/scripts/supabase-v15-backfill-candidate-index.sql" >"$log_dir/backfill-index-invalid-guard.log" 2>&1; then
   echo "candidate index script accepted an invalid same-name index" >&2
+  exit 1
+fi
+if "${psql[@]}" -d "$database" -f "$repo_root/scripts/supabase-v15-backfill-candidate-index.check.sql" >"$log_dir/backfill-index-invalid-check.log" 2>&1; then
+  echo "candidate index check accepted an invalid same-name index" >&2
   exit 1
 fi
 "${psql[@]}" -d "$database" -f "$repo_root/scripts/supabase-v15-backfill-candidate-index.cleanup.sql" >"$log_dir/backfill-index-cleanup-after-invalid.log"

@@ -4,7 +4,7 @@
 --   0. 在事务外先执行 supabase-v15-backfill-candidate-index.sql，并用
 --      supabase-v15-backfill-candidate-index.check.sql 确认 valid/ready/key/predicate。
 --   1. 整段执行本文件（表、目录、上传 RPC、回填 RPC）。
---   2. 反复执行 SELECT tokend_backfill_versioned_model_costs_batch(20000);
+--   2. 反复执行 SELECT tokend_backfill_versioned_model_costs_batch(1000);
 --      直到 repriced = 0。
 --   3. 执行 SELECT tokend_rebuild_session_costs();
 --   Management API / Supabase CLI 必须轮询 session 至最终 exit/result；30 秒 yield 不是 timeout。
@@ -395,7 +395,7 @@ ALTER FUNCTION tokend_upload_events(TEXT, JSONB, JSONB)
 ALTER FUNCTION tokend_upload_events(TEXT, JSONB, JSONB)
   SET search_path TO public, pg_temp;
 
-CREATE OR REPLACE FUNCTION tokend_backfill_versioned_model_costs_batch(p_limit INTEGER DEFAULT 20000)
+CREATE OR REPLACE FUNCTION tokend_backfill_versioned_model_costs_batch(p_limit INTEGER DEFAULT 1000)
 RETURNS JSON
 LANGUAGE plpgsql
 SECURITY DEFINER

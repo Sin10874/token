@@ -6,6 +6,7 @@ DECLARE
   target_keys TEXT[];
   target_predicate TEXT;
   target_model TEXT;
+  batch_arguments TEXT;
 BEGIN
   IF target_oid IS NULL THEN
     RAISE EXCEPTION 'v15 candidate index is missing';
@@ -49,6 +50,17 @@ BEGIN
       RAISE EXCEPTION 'v15 candidate index predicate lacks %', target_model;
     END IF;
   END LOOP;
+
+  IF to_regprocedure('public.tokend_backfill_versioned_model_costs_batch(integer)') IS NOT NULL THEN
+    SELECT pg_get_function_arguments(
+      to_regprocedure('public.tokend_backfill_versioned_model_costs_batch(integer)')
+    )
+    INTO batch_arguments;
+
+    IF batch_arguments IS DISTINCT FROM 'p_limit integer DEFAULT 1000' THEN
+      RAISE EXCEPTION 'v15 backfill batch default must be 1000, got %', batch_arguments;
+    END IF;
+  END IF;
 
   IF to_regclass('public.tokend_model_price_versions') IS NOT NULL THEN
     IF EXISTS (

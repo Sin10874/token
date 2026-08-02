@@ -13,7 +13,7 @@
 <body><main>
   <h1>Tokend 模型目录刷新</h1>
   <div class="meta">ClawMeter · 基线 8608ce7 · 分支 codex/tokend-model-refresh-20260802 · 抓取/核验日 2026-08-02</div>
-  <p class="lead">结论：Opus 5、Sonnet 5 双区间、Kimi K3 已打通 TypeScript 目录、本地 CLI/服务端导入、Settings API、Supabase 迁移/RPC 与发布编排。另补齐有完整官方证据的 <code>kimi-k2.7-code</code>。Kimi cache-miss 输入在分桶语义不可证明时保持未定价。</p>
+  <p class="lead">结论：Opus 5、Sonnet 5 双区间、Kimi K3 已打通 TypeScript 目录、本地 CLI/服务端导入、Settings API、Supabase 迁移/RPC 与发布编排。Kimi cache-miss 输入在分桶语义不可证明时保持未定价。ClawMeter 发布仍有两道明确阻断：Dashboard/Platform 的 active cost 与 full billable cost 口径需 owner 选择；剩余 Vite 8 与 React Router 7 安全迁移不能当作补丁升级。</p>
 
   <div class="grid">
     <div class="card"><span class="muted">目录版本</span><b>2026-08-02</b></div>
@@ -75,16 +75,55 @@
       <tr><td>本地 PostgreSQL pgTAP</td><td class="ok">216 / 216</td><td>新增迁移重复加载；旧目录不可变性、RPC、回填、激活、rollback 全链通过；临时数据库已删除。</td></tr>
       <tr><td>生产 rollout contract</td><td class="ok">64 / 64</td><td>新迁移按 managed 顺序纳入；未执行任何云端命令。</td></tr>
       <tr><td>TypeScript / production build</td><td class="ok">PASS</td><td><code>tsc --noEmit</code>；Vite 2,386 modules。保留既有 &gt;500k chunk 警告。</td></tr>
-      <tr><td>npm audit</td><td class="warn">基线未绿</td><td>15 项：1 low / 6 moderate / 7 high / 1 critical；依赖图未因本次功能变更增加，未自动 fix。</td></tr>
-      <tr><td>孤立 ingestion 全量文件</td><td class="bad">基线阻断</td><td><code>8608ce7</code> 的测试直接导入缺失的 <code>dashboard-metrics.ts</code>；但同一基线 routes 使用 <code>total_tokens/total_cost</code>，测试却要求 output&gt;0 且排除 reasoning/cache-write 的 active 口径，无法证明“无语义漂移提炼”，因此未把猜测实现纳入 write-set。</td></tr>
+      <tr><td>npm audit</td><td class="warn">15 → 4</td><td>不使用 <code>force</code> 的锁文件更新消除 11 项，包括唯一 critical；余 3 moderate / 1 high，均无同 major 修复。</td></tr>
+      <tr><td>孤立 ingestion 全量文件</td><td class="bad">基线阻断</td><td><code>tests/ingestion-regression.ts</code> 仍在加载阶段因缺失 <code>dashboard-metrics.ts</code> RED；未添加死代码或猜测实现。</td></tr>
     </tbody>
   </table>
-  <div class="note block"><b>不能宣称“仓库所有测试全绿”。</b>模型刷新专项、目录一致性、SQL 与构建门已绿；孤立的 <code>tests/ingestion-regression.ts</code> 在模型刷新代码执行前即被 8608ce7 缺失 helper 阻断。曾做不入仓的最小验证实现以确认后续阻断，但因其口径不能从现有 routes 无漂移推出，已撤回，不能拿它掩盖回归。</div>
+  <div class="note block"><b>不能宣称“仓库所有测试全绿”。</b>模型刷新专项、目录一致性、SQL 与构建门已绿；<code>tests/ingestion-regression.ts</code> 在测试执行前被缺失 helper 阻断。真实来源追溯又证明 committed tests 与后续未提交 WIP 的成本口径冲突，不能拿一组孤立 helper 掩盖运行时 routes 的语义差异。</div>
+
+  <h2>缺失 API helper：来源与契约矩阵</h2>
+  <p>源头不是已提交分支。<code>b2f9979</code> 提交了 imports/tests，但四个 helper 仅存在于 stash 的 untracked parent <code>906ad32</code>；完整 stash 为 <code>19b8b55</code>。<code>b2f9979</code> 是 8608ce7 的祖先，因此这确是基线遗留测试要求，不是本次模型刷新引入。当前所有已提交历史中，<code>server/api/routes.ts</code> 从未导入这些 helper；只有 stash 的 529 行 route WIP 接过线。</p>
+  <table>
+    <thead><tr><th>helper</th><th>已提交测试契约</th><th>未提交源 / WIP</th><th>判断</th></tr></thead>
+    <tbody>
+      <tr><td><code>model-list.ts</code></td><td>heartbeat 隐藏；模型列表使用 active token/cost 与规范化项目。</td><td><code>906ad32</code> 与测试一致。</td><td class="ok">可孤立恢复，但 routes 未接线；单独加入会成为死代码。</td></tr>
+      <tr><td><code>platform-summary.ts</code></td><td>internal cron heartbeat 隐藏；visible cron 保留；平台过滤映射固定。</td><td><code>906ad32</code>、现有 v8 heartbeat SQL 与测试一致。</td><td class="ok">可孤立恢复，但 routes 未接线；单独加入会成为死代码。</td></tr>
+      <tr><td><code>dashboard-metrics.ts</code></td><td><code>totalTokens=input+output</code>；成本为 input+output+cache-read，例值 4.59。</td><td><code>906ad32</code> 使用 <code>SUM(total_cost)</code>；stash 同步把测试改成 billable 6.32。</td><td class="bad">两套契约冲突，需 product owner 选择。</td></tr>
+      <tr><td><code>platform-overview.ts</code></td><td>active cost，例值 4.2。</td><td><code>906ad32</code> 使用 <code>SUM(total_cost)</code>；stash 同步把测试改成 billable 14.2。</td><td class="bad">两套契约冲突，需 product owner 选择。</td></tr>
+      <tr><td><code>routes.ts</code></td><td>当前提交实现大量聚合 <code>total_tokens/total_cost</code>。</td><td>stash 才导入四个 helper，并同时包含大范围路由/可见性改动。</td><td class="bad">不能以“提炼”名义整段恢复；会改变现有 API 行为。</td></tr>
+    </tbody>
+  </table>
+  <div class="note block"><b>精确决策点：</b>A. 采用已提交测试/v8 SQL 的 active cost，则必须批准现有 Express Dashboard/Platform 从 full total_cost 改口径；B. 采用当前 routes 与 stash 后续 WIP 的 full billable cost，则必须把 committed tests 的 4.59/4.2 改为 6.32/14.2，并审阅 reasoning/cache-write 的 UI 呈现。未获选择前，四个 helper 与 routes write-set 均为零。</div>
+
+  <h2>依赖安全审计：15 项逐项处置</h2>
+  <p><code>npm audit fix</code> 未使用 <code>force</code>。先在现有 ranges 内更新 lockfile，再把直接生产依赖 <code>tsx</code> 的最低版本从 4.15.7 提到同 major 的 4.23.1。完整 audit 由 1 low / 6 moderate / 7 high / 1 critical 降为 3 moderate / 1 high；<code>npm audit --omit=dev</code> 为 0。</p>
+  <table>
+    <thead><tr><th>节点 / 初始等级</th><th>依赖链与运行时可达性</th><th>最小处置</th><th>结果 / breaking 风险</th></tr></thead>
+    <tbody>
+      <tr><td><code>@babel/core</code> · low</td><td><code>@vitejs/plugin-react → Babel</code>；仅编译期。</td><td>7.29.0 → 7.29.7</td><td class="ok">已消除；同 major。</td></tr>
+      <tr><td><code>body-parser</code> · moderate</td><td><code>express → body-parser</code>；HTTP server 可达。</td><td>1.20.4 → 1.20.6</td><td class="ok">已消除；补丁级。</td></tr>
+      <tr><td><code>brace-expansion</code> · high</td><td><code>glob → minimatch → brace-expansion</code>；扫描器运行时依赖，仓库不调用 glob CLI <code>--cmd</code>。</td><td>2.0.2 → 2.1.4</td><td class="ok">已消除；同 major。</td></tr>
+      <tr><td><code>esbuild</code> · moderate</td><td><code>vite@5 → esbuild@0.21</code> 的 dev server 可达；原 <code>tsx@4.21 → esbuild@0.27</code> 只做 transform，不启动 esbuild server。Windows 风险高于当前 macOS 环境。</td><td><code>tsx</code> 4.23.1 → esbuild 0.28.1，生产链已修复；Vite 链无同 major 修复，audit 指向 Vite 8.2。</td><td class="warn">完整 audit 仍计 1 项；仅剩 Vite dev 链。</td></tr>
+      <tr><td><code>express</code> · moderate</td><td>直接生产依赖；HTTP server 可达。</td><td>4.22.1 → 4.22.2</td><td class="ok">已消除；补丁级。</td></tr>
+      <tr><td><code>glob</code> · high</td><td>直接生产依赖；本地日志扫描器程序化调用，未暴露 CLI command injection 参数。</td><td>10.4.5 → 10.5.0</td><td class="ok">已消除；同 major。</td></tr>
+      <tr><td><code>lodash</code> · high</td><td><code>recharts</code> 浏览器包与 <code>concurrently</code> 开发工具均依赖。</td><td>4.17.23 → 4.18.1</td><td class="ok">已消除；同 major。</td></tr>
+      <tr><td><code>path-to-regexp</code> · high</td><td><code>express → path-to-regexp</code>；路由解析运行时可达。</td><td>0.1.12 → 0.1.13</td><td class="ok">已消除；补丁级。</td></tr>
+      <tr><td><code>picomatch</code> · high</td><td>Tailwind/PostCSS 文件匹配；仅开发/构建期。</td><td>2.3.1/4.0.3 → 2.3.2/4.0.5</td><td class="ok">已消除；补丁级。</td></tr>
+      <tr><td><code>postcss</code> · high</td><td>直接 devDependency；CSS 构建期。</td><td>8.5.8 → 8.5.25</td><td class="ok">已消除；同 major。</td></tr>
+      <tr><td><code>qs</code> · moderate</td><td><code>express/body-parser → qs</code>；请求解析运行时可达。</td><td>6.14.2 → 6.15.3</td><td class="ok">已消除；同 major。</td></tr>
+      <tr><td><code>react-router</code> · moderate</td><td><code>react-router-dom → react-router</code>；浏览器运行时。项目用 <code>Link/useNavigate</code>，部分 path 来自事件 session id，不能排除 open redirect 输入面；SSR hydration 子项在本 SPA 不可达。</td><td>6.30.3 → 6.30.4 仍受影响；完整修复需 7.18。</td><td class="warn">仍在；6→7 主版本，需路由/深链/回退浏览器回归。</td></tr>
+      <tr><td><code>react-router-dom</code> · moderate</td><td>直接 devDependency，但被打入生产 SPA；Link open redirect/XSS 运行时可达性不能排除。</td><td>6.30.3 → 6.30.4 仍受影响；完整修复需 7.18。</td><td class="warn">仍在；6→7 主版本。</td></tr>
+      <tr><td><code>shell-quote</code> · critical</td><td><code>concurrently → shell-quote</code>；只在 <code>npm run dev</code> 命令编排可达，不进入 npm pack。</td><td>1.8.3 → 1.10.0</td><td class="ok">critical 已消除；同 major。</td></tr>
+      <tr><td><code>vite</code> · high</td><td>直接 devDependency；dev server 绑定 127.0.0.1，不用于生产 Express 服务，但恶意网页到本机 dev server 的请求面仍存在。</td><td>5.4.21 无同 major修复；audit 指向 8.2，并要求 plugin-react 4→6。</td><td class="warn">仍在；构建器与底层打包器主版本变化，不能用 force。</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">锁文件同时重解析关联包；部分 tarball URL 从 npmmirror 改为 npmjs，但 integrity 全部由 lockfile 固定。production audit 已绿；production build、tsc、专项与 pack 已在更新后重跑。</p>
 
   <h2>发布前置门与顺序</h2>
   <ol>
-    <li>先由原 dashboard 变更 owner 提交完整 helper 契约，或明确批准 dashboard active 口径变更；随后补齐其余缺失 API helpers，并让同一 ingestion 全量文件真实执行。否则停止上线。</li>
-    <li>合并代码后发布 <code>tokend-cli@2.5.1</code>；推送时跳过会写外部版本表的本地 hook，本 PR 不做外部写。</li>
+    <li>先由 product owner 在 active cost 与 full billable cost 二选一；按所选口径接线四个 helpers、补 routes 合同并让 ingestion 全量文件真实执行。否则停止上线。</li>
+    <li>另开安全迁移完成 React Router 7.18 与 Vite 8.2/plugin-react 6（含浏览器导航、Windows dev-server 与生产构建回归），或由发布 owner 书面接受剩余 4 项风险；本 PR 不猜测。</li>
+    <li>两门都绿后再发布 <code>tokend-cli@2.5.1</code>；推送时跳过会写外部版本表的本地 hook，本 PR 不做外部写。</li>
     <li>只读核验 Supabase migration history、当前 active/previous catalog、preflight 聚合与 catalog hash。</li>
     <li>应用 <code>202608020001_model_catalog_refresh.sql</code>。它只安装不可变目录并替换计价函数，不激活新目录。</li>
     <li>用既有 rollout 工具依次 create → freeze → backfill → reconcile；所有 gate 绿后才 activate <code>2026-08-02</code>。</li>
@@ -100,7 +139,8 @@
 
   <h2>Write-set</h2>
   <p><b>模型刷新：</b><code>cli/pricing/**</code>、本地 ingestion estimator/调用点、Settings 有效价 helper、SQL 迁移/pgTAP/生成器、rollout/scale 编排、专项与合约测试、2.5.1 元数据、本报告。</p>
-  <p><b>dashboard 基线恢复（单列）：</b>最终 write-set 为零。证据表明测试确实要求该文件，但 routes 与测试口径冲突，未满足“无语义漂移”前置条件；未修改 routes，未补 <code>model-list.ts</code> / platform helpers。</p>
-  <p><b>残余风险：</b>缺失 helper 使仓库全量测试无法执行到模型刷新相关断言；因此专项虽绿，发布仍必须阻断，不能用假 fallback 或死代码解除。</p>
+  <p><b>本次解除阻断审计：</b><code>package.json</code>（tsx 同 major 最低安全版本）、<code>package-lock.json</code>（安全更新）与本报告。</p>
+  <p><b>dashboard 基线恢复（单列）：</b>最终 write-set 为零。证据表明测试确实要求四个文件，但 committed tests 与后续 WIP 的 Dashboard/Platform 成本契约相反；未修改 routes，未补任何 helper。</p>
+  <p><b>残余风险：</b>缺失 helper 使仓库全量测试 RED；audit 仍为 3 moderate / 1 high。专项虽绿，发布必须继续阻断，不能用假 fallback、死代码或主版本强升解除。</p>
   <p class="meta">本报告不含 secret、token、PII 或原始 provider payload。未 merge、deploy、改云、执行 migration/backfill。</p>
 </main></body></html>

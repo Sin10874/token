@@ -7,6 +7,7 @@ import { parseCodexFile } from '../server/ingestion/codex-parser.ts'
 import { parseGeminiCliFile } from '../server/ingestion/gemini-cli-parser.ts'
 import { parseCopilotCliFile } from '../server/ingestion/copilot-cli-parser.ts'
 import { parseOpencodeFile } from '../server/ingestion/opencode-parser.ts'
+import { parseSessionFile } from '../server/ingestion/parser.ts'
 import { rebuildSessionsFromUsage, upsertSessionSnapshot } from '../server/ingestion/session-upsert.ts'
 
 function testCodexParserNormalizesOpenAIUsage() {
@@ -262,10 +263,45 @@ function testOpencodeJsonParserIncludesReasoningAndCacheWrite() {
   assert.equal(result.events[0].totalTokens, 26290)
 }
 
+function testOpenClawParserKeepsKimiCacheBucketsDisjoint() {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clawmeter-kimi-'))
+  const filePath = path.join(tmpDir, 'session.jsonl')
+  fs.writeFileSync(filePath, `${JSON.stringify({
+    id: 'kimi-event',
+    timestamp: '2026-07-16T00:00:00.000Z',
+    type: 'message',
+    message: {
+      role: 'assistant',
+      provider: 'moonshot',
+      model: 'kimi-k3',
+      usage: {
+        input: 700,
+        output: 100,
+        cacheRead: 300,
+        cacheWrite: 0,
+      },
+    },
+  })}\n`, 'utf8')
+
+  const result = parseSessionFile(filePath, 'kimi-session', undefined, 'agent', 'api')
+  assert.equal(result.events.length, 1)
+  assert.deepEqual(
+    [
+      result.events[0].inputTokens,
+      result.events[0].outputTokens,
+      result.events[0].cacheReadTokens,
+      result.events[0].cacheWriteTokens,
+      result.events[0].totalTokens,
+    ],
+    [700, 100, 300, 0, 1100],
+  )
+}
+
 testCodexParserNormalizesOpenAIUsage()
 testSessionUpsertUsesAuthoritativeUsageTotals()
 testRebuildSessionsDropsOrphansAndRecalculatesAllRows()
 testGeminiCliParserNormalizesCachedAndThoughtTokens()
 testCopilotCliParserSeparatesCacheReadAndWrite()
 testOpencodeJsonParserIncludesReasoningAndCacheWrite()
-console.log('ingestion regression tests passed')
+testOpenClawParserKeepsKimiCacheBucketsDisjoint()
+console.log('ingestion regression tests passed (7 cases)')

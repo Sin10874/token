@@ -186,4 +186,12 @@ function loadOpenClawPrices() {
 
 loadOpenClawPrices()
 
+// Apply the bundled, idempotent catalog migration after legacy/default prices
+// and openclaw.json have loaded. Manual rows remain authoritative.
+const modelPriceMigrationPath = path.join(
+  process.cwd(),
+  'server/db/migrations/202608020001_model_price_versions.sql',
+)
+db.exec(fs.readFileSync(modelPriceMigrationPath, 'utf8'))
+
 export default db

@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Tokend 新模型窄回迁 · 2026-08-02</title>
+  <style>
+    :root { color-scheme: light; --ink:#171717; --muted:#666; --line:#dedbd3; --paper:#f8f7f3; --card:#fff; --ok:#1f6b45; --warn:#8a5a10; --bad:#9d2f2f; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--paper); color:var(--ink); font:14px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif; }
+    main { max-width:1120px; margin:0 auto; padding:48px 28px 80px; }
+    h1 { margin:0 0 8px; font-size:30px; font-weight:620; letter-spacing:-.03em; }
+    h2 { margin:40px 0 12px; font-size:17px; font-weight:650; }
+    p { margin:8px 0; }
+    a { color:inherit; text-decoration-thickness:1px; text-underline-offset:3px; }
+    code { font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; background:#efeee9; padding:2px 5px; border-radius:3px; }
+    .lede { color:var(--muted); max-width:760px; }
+    .status { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:1px; background:var(--line); border:1px solid var(--line); margin-top:24px; }
+    .status div { background:var(--card); padding:14px; }
+    .status small { display:block; color:var(--muted); margin-bottom:4px; }
+    .ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); }
+    table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); }
+    th,td { padding:11px 12px; text-align:left; vertical-align:top; border-bottom:1px solid var(--line); }
+    th { color:var(--muted); font-size:12px; font-weight:600; background:#f2f1ec; }
+    tr:last-child td { border-bottom:0; }
+    .flow { display:grid; grid-template-columns:repeat(5,1fr); gap:8px; align-items:stretch; }
+    .flow div { padding:12px; border:1px solid var(--line); background:var(--card); min-height:72px; }
+    .flow b { display:block; font-size:12px; margin-bottom:5px; }
+    .flow span { color:var(--muted); font-size:12px; }
+    .callout { border-left:3px solid var(--warn); background:#fffaf0; padding:12px 14px; margin:14px 0; }
+    .split { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+    ul,ol { margin:8px 0; padding-left:22px; }
+    .meta { margin-top:48px; color:var(--muted); font-size:12px; border-top:1px solid var(--line); padding-top:16px; }
+    @media (max-width:800px) { .status,.flow,.split { grid-template-columns:1fr; } main { padding:28px 16px 56px; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Tokend 新模型窄回迁</h1>
+  <p class="lede">从最新 <code>origin/main</code> 单独分支，只迁回生产需要的模型、事件时间定价与可逆 SQLite 迁移。未合并旧定价链，未写生产、未部署。</p>
+
+  <section class="status">
+    <div><small>分支</small><code>codex/tokend-model-main-20260802</code></div>
+    <div><small>base / merge-base</small><code>b046f384319f</code></div>
+    <div><small>旧链隔离</small><span class="ok">main 后 53 commits 未带入</span></div>
+    <div><small>发布状态</small><span class="warn">PR 待审 · 未 merge / deploy</span></div>
+  </section>
+
+  <h2>结论</h2>
+  <p>Main 的 <code>model_prices</code> 以 <code>model_id</code> 为单主键，只能保存一个现价，无法安全表达 Sonnet 5 的两段价格。此次保留旧表作为 UI 与手动 fallback，新增 <code>model_price_versions</code>，按事件毫秒时间选择 <code>[valid_from, valid_to)</code> 区间。API、服务启动与 <code>npm run ingest</code> 共用同一 <code>runIngestion</code> 与 resolver。</p>
+
+  <div class="flow">
+    <div><b>入口</b><span>server start<br>POST /api/ingest<br>npm run ingest</span></div>
+    <div><b>解析</b><span>OpenClaw / Claude Code / Codex</span></div>
+    <div><b>选择价格</b><span>exact model + event timestamp</span></div>
+    <div><b>fallback</b><span>manual 优先；其余沿用旧 flat catalog</span></div>
+    <div><b>落库</b><span>分项成本与 total_cost</span></div>
+  </div>
+
+  <h2>模型与官方证据</h2>
+  <table>
+    <thead><tr><th>模型 / 有效期</th><th>USD / MTok</th><th>语义</th><th>来源</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>claude-opus-5</code><br>2026-07-24 起</td>
+        <td>input 5 · output 25 · cache-hit .5 · 5m-write 6.25</td>
+        <td>Anthropic 四分桶；1M context</td>
+        <td><a href="https://platform.claude.com/docs/en/about-claude/models/overview">模型页</a> · <a href="https://platform.claude.com/docs/en/about-claude/pricing">价格页</a> · <a href="https://platform.claude.com/docs/en/release-notes/overview">发布说明</a></td>
+      </tr>
+      <tr>
+        <td><code>claude-sonnet-5</code><br>06-30 ≤ t &lt; 09-01</td>
+        <td>2 · 10 · .2 · 2.5</td>
+        <td>介绍价，不向 06-30 前回算</td>
+        <td><a href="https://platform.claude.com/docs/en/about-claude/pricing">价格页</a> · <a href="https://platform.claude.com/docs/en/release-notes/overview">发布说明</a></td>
+      </tr>
+      <tr>
+        <td><code>claude-sonnet-5</code><br>2026-09-01 起</td>
+        <td>3 · 15 · .3 · 3.75</td>
+        <td>标准价，不提前应用</td>
+        <td><a href="https://platform.claude.com/docs/en/about-claude/pricing">同一官方价格表</a></td>
+      </tr>
+      <tr>
+        <td><code>kimi-k2.7-code</code><br>2026-06-12 起</td>
+        <td>cache-hit .19 · cache-miss input .95 · output 4</td>
+        <td>hit/miss；262,144 context；cache-write 无映射</td>
+        <td><a href="https://platform.kimi.ai/docs/pricing/chat">Kimi 官方价格索引与明细入口</a></td>
+      </tr>
+      <tr>
+        <td><code>kimi-k3</code><br>2026-07-16 起</td>
+        <td>cache-hit .30 · cache-miss input 3 · output 15</td>
+        <td>hit/miss；1,048,576 context；cache-write 无映射</td>
+        <td><a href="https://platform.kimi.ai/docs/pricing/chat-k3.md">价格合同</a> · <a href="https://www.moonshot.ai/">发布日期与模型说明</a></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Kimi fail-closed</h2>
+  <div class="callout"><strong>不把 cache miss 机械当 cache write。</strong>版本表对 Kimi 的 <code>cache_write_price</code> 使用 <code>NULL</code>；事件只要有非零 cache-write，整条不估价，保留 <code>total_cost = 0</code>。OpenClaw parser 回归用例证明 input / output / cacheRead / cacheWrite 四桶独立保留。</div>
+  <p>只接受四个 canonical ID 的 exact match。<code>anthropic/claude-opus-5</code>、<code>moonshot/kimi-k3</code>、vendor 后缀、<code>kimi-k3-highspeed</code> 均不模糊匹配。生产只读样本中没有这四个 canonical ID，因此未添加任何日志猜测别名。</p>
+
+  <h2>明确跳过</h2>
+  <table>
+    <thead><tr><th>项目</th><th>处理</th><th>原因</th></tr></thead>
+    <tbody>
+      <tr><td>Claude Mythos 5</td><td class="warn">未纳入</td><td>官方标为 limited availability / invitation-only，不是普通目录模型。</td></tr>
+      <tr><td>Kimi K2.7 Code HighSpeed</td><td class="warn">未定价</td><td>官方有当前价格，但缺可信精确生效日；禁止用抓取日回填历史。</td></tr>
+      <tr><td><code>kimi-code/kimi-for-coding</code></td><td class="warn">不设别名</td><td>生产只读样本存在该原始名称，但没有证据证明它等同 K2.7 Code 或 K3。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>迁移与回填</h2>
+  <div class="split">
+    <div>
+      <p><strong>上线 SQL</strong></p>
+      <ul>
+        <li>创建版本表、查找索引与可逆 backfill 记录表。</li>
+        <li>五个版本行、四个 flat 当前行均为幂等 upsert。</li>
+        <li><code>source = manual</code> 的旧覆盖不改写。</li>
+        <li>只回填 exact model、有效期命中、原 <code>total_cost = 0</code> 的事件。</li>
+        <li>Kimi 非零 cache-write 与日期前事件保持未计价。</li>
+      </ul>
+    </div>
+    <div>
+      <p><strong>回滚 SQL</strong></p>
+      <ul>
+        <li>按 backfill 审计行恢复原五项成本。</li>
+        <li>重算受影响 session total。</li>
+        <li>只删官方 source 的 flat 行，保留 manual 行。</li>
+        <li>删除新增表；严格回滚优先恢复上线前 SQLite 备份。</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>RED → GREEN 与质量门</h2>
+  <table>
+    <thead><tr><th>门</th><th>结果</th><th>证据</th></tr></thead>
+    <tbody>
+      <tr><td>RED 1</td><td class="ok">按预期失败</td><td>缺少 <code>server/pricing/model-pricing.ts</code>。</td></tr>
+      <tr><td>RED 2</td><td class="ok">按预期失败</td><td>数据库事件仍为 0 成本，证明回填断言有效。</td></tr>
+      <tr><td>专项 + ingestion</td><td class="ok">GREEN</td><td>定价 27 cases；ingestion 7 cases，共 34。</td></tr>
+      <tr><td>TypeScript</td><td class="ok">GREEN</td><td><code>npx tsc --noEmit</code>。</td></tr>
+      <tr><td>生产 build</td><td class="ok">GREEN</td><td>2386 modules；保留 main 已有的 chunk-size warning。</td></tr>
+      <tr><td>npm pack dry-run</td><td class="ok">GREEN</td><td>58 files；74,967 bytes。使用隔离临时 cache，未修改用户 npm cache。</td></tr>
+      <tr><td>真实 schema 副本</td><td class="ok">GREEN</td><td>迁移两次得到 5 version / 4 flat；回滚后新增表 0。原库未写。</td></tr>
+      <tr><td>npm audit</td><td class="warn">基线阻断未扩大</td><td>main 原有 15：1 critical / 7 high / 6 moderate / 1 low；本 PR 未改依赖。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>安全上线顺序</h2>
+  <ol>
+    <li>再次确认 PR base 为最新 main；停止写入并用 SQLite <code>.backup</code> 生成可恢复备份。</li>
+    <li>部署后端代码；启动时自动执行幂等 schema / catalog / backfill。</li>
+    <li>只读核对五个版本行、区间无重叠、四个 flat 行、backfill 数量与 Kimi 拒绝条件。</li>
+    <li>运行 ingestion smoke，再部署同 commit 的前端静态构建；观察聚合成本。</li>
+    <li>失败时先回退代码，防止重启重放迁移；再执行 rollback SQL。要求字节级恢复时直接恢复上线前 DB 备份。</li>
+  </ol>
+
+  <h2>残余风险</h2>
+  <ul>
+    <li>Main 没有 Supabase schema；本 PR 仅适用于仓库实际的本地 SQLite 生产路径，不声称完成云数据库发布。</li>
+    <li>OpenCode parser 的 reasoning token 语义在 main 中未进入成本字段；本 PR 不扩展该旧链，相关事件保持原行为。</li>
+    <li>生产只读库当前没有四个 canonical 新模型事件；真实事件到达后的端到端运行证据仍是发布后 smoke gate。</li>
+    <li>依赖审计 15 项为 main 既有发布门，需独立依赖升级 PR；本窄回迁不使用 <code>--force</code>。</li>
+  </ul>
+
+  <p class="meta">生成于 2026-08-02。报告不含 secret、token、PII、原始日志或生产 payload。</p>
+</main>
+</body>
+</html>

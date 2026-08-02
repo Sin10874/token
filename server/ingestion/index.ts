@@ -12,6 +12,12 @@ import { parseCopilotCliFile } from './copilot-cli-parser.js'
 import { discoverOpencodeFiles } from './opencode-scanner.js'
 import { parseOpencodeFile } from './opencode-parser.js'
 import { rebuildSessionsFromUsage, upsertSessionSnapshot } from './session-upsert.js'
+import {
+  buildModelPriceResolver,
+  priceUsageEvent,
+  type FlatModelPriceRow,
+  type VersionedModelPriceRow,
+} from '../pricing/model-pricing.js'
 
 interface IngestionStats {
   filesProcessed: number
@@ -64,20 +70,9 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
   }
 
   // Preload model prices for cost calculation
-  const priceRows = db.prepare('SELECT * FROM model_prices').all() as Array<{
-    model_id: string; input_price: number; output_price: number;
-    cache_read_price: number; cache_write_price: number; per_tokens: number
-  }>
-  const priceMap = new Map(priceRows.map(p => [p.model_id, p]))
-
-  // Lookup price: exact match first, then strip date suffix (e.g. claude-opus-4-5-20251101 → claude-opus-4-5)
-  function findPrice(model: string) {
-    let p = priceMap.get(model)
-    if (p) return p
-    const stripped = model.replace(/-\d{8,}$/, '')
-    if (stripped !== model) p = priceMap.get(stripped)
-    return p || null
-  }
+  const priceRows = db.prepare('SELECT * FROM model_prices').all() as unknown as FlatModelPriceRow[]
+  const versionRows = db.prepare('SELECT * FROM model_price_versions').all() as unknown as VersionedModelPriceRow[]
+  const resolvePrice = buildModelPriceResolver(priceRows, versionRows)
 
   const files = await discoverSessionFiles()
 
@@ -93,19 +88,9 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
       continue
     }
 
-    // Calculate costs from model_prices if event has zero cost
+    // Preserve reported cost; otherwise use event-time catalog, then legacy fallback.
     for (const event of result.events) {
-      if (event.totalCost === 0 && event.totalTokens > 0) {
-        const price = findPrice(event.model)
-        if (price) {
-          const perTokens = price.per_tokens || 1000000
-          event.inputCost = (event.inputTokens * price.input_price) / perTokens
-          event.outputCost = (event.outputTokens * price.output_price) / perTokens
-          event.cacheReadCost = (event.cacheReadTokens * price.cache_read_price) / perTokens
-          event.cacheWriteCost = 0
-          event.totalCost = event.inputCost + event.outputCost + event.cacheReadCost
-        }
-      }
+      priceUsageEvent(event, resolvePrice)
     }
 
     // Insert events in a transaction
@@ -168,17 +153,9 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
       continue
     }
 
-    // Calculate costs from model_prices
+    // Use the same event-time resolver as server-triggered OpenClaw ingestion.
     for (const event of result.events) {
-      const price = findPrice(event.model)
-      if (price) {
-        const perTokens = price.per_tokens || 1000000
-        event.inputCost = (event.inputTokens * price.input_price) / perTokens
-        event.outputCost = (event.outputTokens * price.output_price) / perTokens
-        event.cacheReadCost = (event.cacheReadTokens * price.cache_read_price) / perTokens
-        event.cacheWriteCost = (event.cacheWriteTokens * price.cache_write_price) / perTokens
-        event.totalCost = event.inputCost + event.outputCost + event.cacheReadCost + event.cacheWriteCost
-      }
+      priceUsageEvent(event, resolvePrice)
     }
 
     let inserted = 0
@@ -238,17 +215,9 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
       continue
     }
 
-    // Calculate costs from model_prices
+    // Use the same event-time resolver as the CLI entrypoint.
     for (const event of result.events) {
-      const price = findPrice(event.model)
-      if (price) {
-        const perTokens = price.per_tokens || 1000000
-        event.inputCost = (event.inputTokens * price.input_price) / perTokens
-        event.outputCost = (event.outputTokens * price.output_price) / perTokens
-        event.cacheReadCost = (event.cacheReadTokens * price.cache_read_price) / perTokens
-        event.cacheWriteCost = 0
-        event.totalCost = event.inputCost + event.outputCost + event.cacheReadCost
-      }
+      priceUsageEvent(event, resolvePrice)
     }
 
     let inserted = 0

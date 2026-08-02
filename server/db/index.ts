@@ -3,6 +3,7 @@ import path from 'path'
 import fs from 'fs'
 import os from 'os'
 import { resolveOfficialPriceOverride } from './model-price-overrides.js'
+import { OFFICIAL_MODEL_PRICE_VERSIONS } from '../../cli/prices.js'
 
 const DATA_DIR = path.join(process.cwd(), 'data')
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true })
@@ -100,6 +101,28 @@ db.exec(`
     source TEXT DEFAULT 'manual',
     updated_at INTEGER
   );
+
+  CREATE TABLE IF NOT EXISTS model_price_versions (
+    model_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    valid_from_ms INTEGER NOT NULL,
+    valid_to_ms INTEGER,
+    input_price REAL NOT NULL,
+    output_price REAL NOT NULL,
+    cache_read_price REAL NOT NULL,
+    cache_write_price REAL,
+    currency TEXT NOT NULL DEFAULT 'USD',
+    per_tokens INTEGER NOT NULL DEFAULT 1000000,
+    cache_semantics TEXT NOT NULL CHECK (cache_semantics IN ('anthropic', 'hit_miss', 'generic')),
+    context_window INTEGER,
+    source_url TEXT NOT NULL,
+    source_checked_at TEXT NOT NULL,
+    PRIMARY KEY (model_id, valid_from_ms),
+    CHECK (valid_to_ms IS NULL OR valid_to_ms > valid_from_ms)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_model_price_versions_lookup
+    ON model_price_versions(model_id, valid_from_ms, valid_to_ms);
 
   CREATE TABLE IF NOT EXISTS ingestion_state (
     source_path TEXT PRIMARY KEY,
@@ -204,6 +227,69 @@ function upsertDefaultModelPrices() {
 }
 
 upsertDefaultModelPrices()
+
+function upsertVersionedModelPrices() {
+  const upsertVersion = db.prepare(`
+    INSERT INTO model_price_versions (
+      model_id, provider, valid_from_ms, valid_to_ms,
+      input_price, output_price, cache_read_price, cache_write_price,
+      per_tokens, cache_semantics, context_window, source_url, source_checked_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(model_id, valid_from_ms) DO UPDATE SET
+      provider = excluded.provider,
+      valid_to_ms = excluded.valid_to_ms,
+      input_price = excluded.input_price,
+      output_price = excluded.output_price,
+      cache_read_price = excluded.cache_read_price,
+      cache_write_price = excluded.cache_write_price,
+      per_tokens = excluded.per_tokens,
+      cache_semantics = excluded.cache_semantics,
+      context_window = excluded.context_window,
+      source_url = excluded.source_url,
+      source_checked_at = excluded.source_checked_at
+  `)
+  const upsertCurrent = db.prepare(`
+    INSERT INTO model_prices (
+      model_id, provider, input_price, output_price,
+      cache_read_price, cache_write_price, per_tokens, source, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'default-versioned', ?)
+    ON CONFLICT(model_id) DO UPDATE SET
+      provider = excluded.provider,
+      input_price = excluded.input_price,
+      output_price = excluded.output_price,
+      cache_read_price = excluded.cache_read_price,
+      cache_write_price = excluded.cache_write_price,
+      per_tokens = excluded.per_tokens,
+      source = excluded.source,
+      updated_at = excluded.updated_at
+    WHERE source != 'manual'
+  `)
+
+  const now = Date.now()
+  for (const row of OFFICIAL_MODEL_PRICE_VERSIONS) {
+    upsertVersion.run(
+      row.modelId, row.provider, row.validFromMs, row.validToMs,
+      row.inputPrice, row.outputPrice, row.cacheReadPrice, row.cacheWritePrice,
+      row.perTokens, row.cacheSemantics, row.contextWindow, row.sourceUrl, row.sourceCheckedAt,
+    )
+  }
+
+  const modelIds = new Set(OFFICIAL_MODEL_PRICE_VERSIONS.map((row) => row.modelId))
+  for (const modelId of modelIds) {
+    const active = OFFICIAL_MODEL_PRICE_VERSIONS.find((row) => (
+      row.modelId === modelId
+      && now >= row.validFromMs
+      && (row.validToMs == null || now < row.validToMs)
+    ))
+    if (!active) continue
+    upsertCurrent.run(
+      active.modelId, active.provider, active.inputPrice, active.outputPrice,
+      active.cacheReadPrice, active.cacheWritePrice || 0, active.perTokens, now,
+    )
+  }
+}
+
+upsertVersionedModelPrices()
 
 // Seed default Claude Code config if empty
 const ccConfigCount = (db.prepare('SELECT COUNT(*) as c FROM claude_code_config').get() as { c: number }).c

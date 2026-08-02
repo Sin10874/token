@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Tokend 新模型窄回迁审查</title>
+  <style>
+    :root{color-scheme:light;--ink:#191919;--muted:#676767;--line:#dedbd4;--paper:#f7f6f2;--card:#fff;--ok:#235c43;--warn:#8a5a13;--stop:#8b2d2d}
+    *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:14px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif}
+    main{max-width:1080px;margin:0 auto;padding:64px 28px 96px}h1{font-size:32px;line-height:1.2;margin:0 0 12px;font-weight:650;letter-spacing:-.02em}h2{font-size:19px;margin:48px 0 14px}h3{font-size:15px;margin:24px 0 8px}.lede{font-size:16px;color:var(--muted);max-width:820px}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:28px 0}.card{background:var(--card);border:1px solid var(--line);padding:18px}.label{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}.value{font-size:20px;margin-top:6px}.ok{color:var(--ok)}.warn{color:var(--warn)}.stop{color:var(--stop)}table{width:100%;border-collapse:collapse;background:var(--card)}th,td{text-align:left;vertical-align:top;border:1px solid var(--line);padding:10px 12px}th{background:#efede7;font-weight:600}code{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:#efede7;padding:2px 5px}ul,ol{padding-left:21px}li+li{margin-top:6px}.note{border-left:3px solid var(--warn);padding:10px 14px;background:#fffaf0}.stopbox{border-left-color:var(--stop);background:#fff6f5}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all}.small{font-size:12px;color:var(--muted)}a{color:#245b87;text-decoration-thickness:1px;text-underline-offset:2px}@media(max-width:760px){main{padding:36px 16px 64px}.grid{grid-template-columns:1fr}table{display:block;overflow-x:auto}}
+  </style>
+</head>
+<body><main>
+  <h1>Tokend 新模型窄回迁审查</h1>
+  <p class="lede">基于本地真实 <code>main@9607a595</code>，不含 <code>tokend-pricing-full-chain</code> 的 42 个领先提交。结论：代码与 SQLite 路径可审；生产发布仍需先同步 GitHub 的 11 个本地提交，并在真实 PostgreSQL/Supabase 环境完成 v15 apply/rollback 合同门。</p>
+
+  <div class="grid">
+    <div class="card"><div class="label">真实基线</div><div class="value mono">9607a595</div><div class="small">merge-base 已锁定</div></div>
+    <div class="card"><div class="label">本地专项</div><div class="value ok">62 / 62</div><div class="small">ingestion 20 + 模型 42</div></div>
+    <div class="card"><div class="label">发布判断</div><div class="value warn">有前置门</div><div class="small">未 merge / 未 deploy / 未写云</div></div>
+  </div>
+
+  <h2>提交边界</h2>
+  <table>
+    <thead><tr><th>层</th><th>预存证据 / RED</th><th>GREEN</th><th>write-set</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>前置基线修复</td>
+        <td><code>b2f9979</code> 在测试中 import 4 个 API helper 与 3 个 ingestion helper，但仓库历史从未提交 4 个模块；原命令先报 <code>ERR_MODULE_NOT_FOUND dashboard-metrics.ts</code>，补模块后再报 <code>resolveStartLine is not a function</code>。</td>
+        <td><code>07af3c0</code> 的独立 detached worktree：ingestion regression 20 例通过，<code>tsc --noEmit</code> 通过。</td>
+        <td><code>server/api/dashboard-metrics.ts</code>、<code>model-list.ts</code>、<code>platform-overview.ts</code>、<code>platform-summary.ts</code>、既有 <code>routes.ts</code> 提炼、<code>server/ingestion/index.ts</code> 三个冻结 helper export。</td>
+      </tr>
+      <tr>
+        <td>本次模型能力</td>
+        <td>新增测试先读取尚不存在的 <code>OFFICIAL_MODEL_PRICE_VERSIONS</code>，RED 为 <code>undefined.map</code>；同时冻结有效期、未知模型、Kimi cache、reported-cost、SQLite 与 Supabase 上传合同。</td>
+        <td>模型专项 42 例通过；CLI 上传前计价、server resolver、SQLite 版本表/回填/回滚、Supabase v15 静态合同均覆盖。</td>
+        <td><code>cli/prices.ts</code>、server resolver/SQLite catalog、两份 SQLite SQL、Supabase v15/rollback、模型测试、测试脚本、<code>package-lock.json</code> 安全补丁与本报告。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>目录与有效期</h2>
+  <table>
+    <thead><tr><th>模型</th><th>生效区间</th><th>USD / MTok</th><th>缓存与上下文</th></tr></thead>
+    <tbody>
+      <tr><td><code>claude-opus-5</code></td><td>2026-07-24 起</td><td>input 5 / output 25 / hit 0.5 / 5m write 6.25</td><td>Anthropic 语义；1,000,000</td></tr>
+      <tr><td><code>claude-sonnet-5</code></td><td>2026-06-30 至 2026-09-01 之前</td><td>2 / 10 / 0.2 / 2.5</td><td>介绍价不会回算到未来区间</td></tr>
+      <tr><td><code>claude-sonnet-5</code></td><td>2026-09-01 起</td><td>3 / 15 / 0.3 / 3.75</td><td>标准价只对该时点后的事件生效</td></tr>
+      <tr><td><code>kimi-k2.7-code</code></td><td>2026-06-12 起</td><td>miss input 0.95 / output 4 / hit 0.19</td><td>262,144；cache-write 非零则整条未计价</td></tr>
+      <tr><td><code>kimi-k3</code></td><td>2026-07-16 起</td><td>miss input 3 / output 15 / hit 0.3</td><td>1,048,576；cache-write 非零则整条未计价</td></tr>
+    </tbody>
+  </table>
+  <p class="note">只接受精确 model ID。<code>anthropic/claude-opus-5</code>、<code>moonshot/kimi-k3</code>、HighSpeed 后缀与任意 vendor 前缀都保持未计价。Mythos 5 因 limited availability 跳过；Kimi HighSpeed 因缺精确生效日跳过。</p>
+
+  <h2>验证门</h2>
+  <table>
+    <thead><tr><th>门</th><th>结果</th><th>证据</th></tr></thead>
+    <tbody>
+      <tr><td>干净安装</td><td class="ok">通过</td><td>同一 lockfile，官方 registry 重试后安装 341 packages；第一次仅为 npmmirror timeout。</td></tr>
+      <tr><td>专项 / 全量</td><td class="ok">通过</td><td>ingestion 20；模型 42；合计 62。</td></tr>
+      <tr><td>TypeScript / build</td><td class="ok">通过</td><td><code>tsc --noEmit</code>；Vite 5.4.21，2386 modules。仅保留既有 500k chunk warning。</td></tr>
+      <tr><td>SQLite 实库副本</td><td class="ok">通过</td><td>117MB 副本 integrity ok；双 apply 后 5 version rows；目标历史事件 0；rollback 后新增表 0，integrity ok。</td></tr>
+      <tr><td>npm pack</td><td class="ok">通过</td><td>dry-run 29 files；<code>cli/prices.ts</code> 与 CLI 所需 ingestion parser 均在包内。</td></tr>
+      <tr><td>npm audit</td><td class="warn">critical 清零</td><td>15 → 4：critical 0、high 1、moderate 3。Vite/esbuild 需 Vite 8；React Router 需 7.18。omit-dev 另剩 tsx→esbuild 低危 Windows dev-server 条件项。</td></tr>
+      <tr><td>真实 PostgreSQL / pgTAP</td><td class="stop">未通过</td><td>本机 5432/54322 无响应且无对应 Supabase 容器；现阶段只有 SQL 静态上传合同，不可宣称真实数据库 GREEN。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>本机运行形态（只读）</h2>
+  <ul>
+    <li>全局包为 <code>tokend-cli@2.4.0</code>，位于 <code>~/.npm-global</code>；已安装 <code>prices.ts</code> 与本分支 hash 不同。</li>
+    <li>LaunchAgent <code>com.tokend.sync</code>：每 300 秒、RunAtLoad；核查瞬间 not running，累计 6289 次，last exit 0。未启动、停止或改写。</li>
+    <li>没有匹配 cron。没有读取 <code>~/.tokend</code> 内容、同步日志、token、PII 或云数据。</li>
+    <li>实际上传图：所有 CLI scanner/parser → <code>applyEstimatedCosts</code> → 截断 payload → <code>tokend_upload_events</code>；server/SQLite 使用同一版本 resolver。</li>
+  </ul>
+
+  <h2>安全上线与回滚</h2>
+  <ol>
+    <li>先将本地真实 main 的 11 个提交单独推为同步分支并 review；合并后确认 GitHub <code>origin/main=9607a595</code>（或其等价后继）。不要把本分支直接对旧 <code>b046f38</code> 开 PR。</li>
+    <li>把本分支重放到更新后的 origin/main，确认 PR 只剩“基线 helper”与“模型能力”两笔提交。</li>
+    <li>在临时/预发布 PostgreSQL 执行 v15、上传边界用例与 rollback；门绿后再执行生产 v15。先建立版本目录与 RPC，再接受新 CLI 流量。</li>
+    <li>生产分批调用 <code>tokend_backfill_versioned_model_costs_batch</code> 直到 0，再重建 session costs；观测 unknown/unpriced 数量。</li>
+    <li>分配下一 patch 版本，同时更新 <code>package.json</code> 与 <code>release/current-version.json</code>；发布 npm 后由 daemon 自升级。当前 2.4.0 不可重复 publish。</li>
+    <li>回滚先恢复 v12 上传 RPC，再执行 v15 rollback 恢复审计过的历史成本；最后重建 session costs。CLI 可回退上一 npm 版本。</li>
+  </ol>
+  <p class="note stopbox"><strong>生产门：</strong>在真实 PostgreSQL apply/rollback 与远端 11 提交同步完成前，禁止 merge/deploy/backfill/npm publish。代码测试通过不等于生产数据库已验收。</p>
+
+  <h2>官方证据</h2>
+  <ul>
+    <li><a href="https://platform.claude.com/docs/en/about-claude/models/overview">Claude model overview</a></li>
+    <li><a href="https://platform.claude.com/docs/en/about-claude/pricing">Claude pricing</a></li>
+    <li><a href="https://platform.claude.com/docs/en/release-notes/overview">Claude release notes</a></li>
+    <li><a href="https://platform.kimi.ai/docs/pricing/chat-k3.md">Kimi K3 pricing</a></li>
+    <li><a href="https://platform.kimi.ai/docs/pricing/chat-k27-code.md">Kimi K2.7 Code pricing</a></li>
+    <li><a href="https://platform.kimi.ai/docs/pricing/chat">Kimi chat pricing</a></li>
+    <li><a href="https://www.moonshot.ai/">Moonshot releases</a></li>
+  </ul>
+  <p class="small">证据核对日期：2026-08-02。报告不含 secret、token、原始 payload、PII 或生产数据。</p>
+</main></body></html>

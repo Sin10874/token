@@ -1,10 +1,14 @@
 -- v15: 新模型有效期价格 + 上传端零成本兜底
 --
 -- 执行顺序：
+--   0. 在事务外先执行 supabase-v15-backfill-candidate-index.sql，并用
+--      supabase-v15-backfill-candidate-index.check.sql 确认 valid/ready/key/predicate。
 --   1. 整段执行本文件（表、目录、上传 RPC、回填 RPC）。
 --   2. 反复执行 SELECT tokend_backfill_versioned_model_costs_batch(20000);
 --      直到 repriced = 0。
 --   3. 执行 SELECT tokend_rebuild_session_costs();
+--   Management API / Supabase CLI 必须轮询 session 至最终 exit/result；30 秒 yield 不是 timeout。
+--   v15 rollback 不会删除独立的 candidate index；需要时单独执行 cleanup 脚本。
 --
 -- 本文件基于 v12 的 tokend_upload_events，保留 project/字段截断。
 -- 不会覆盖客户端已报告的非零成本。Kimi 的 cache-miss input 不能映射为
@@ -450,6 +454,21 @@ BEGIN
       AND (price.valid_to_ms IS NULL OR event.timestamp_ms < price.valid_to_ms)
     WHERE event.total_cost = 0
       AND event.total_tokens > 0
+      AND event.model IN (
+        'claude-opus-5',
+        'claude-sonnet-5',
+        'kimi-k2.7-code',
+        'kimi-k3',
+        'deepseek-v4-flash',
+        'deepseek-v4-pro',
+        'mimo-v2.5',
+        'mimo-v2.5-pro',
+        'deepseek-chat',
+        'deepseek-reasoner',
+        'mimo-v2-flash',
+        'mimo-v2-omni',
+        'mimo-v2-pro'
+      )
       AND NOT (price.cache_semantics = 'hit_miss' AND event.cache_write_tokens <> 0)
       AND NOT (price.cache_write_price IS NULL AND event.cache_write_tokens <> 0)
     ORDER BY event.timestamp_ms, event.id, event.member_code

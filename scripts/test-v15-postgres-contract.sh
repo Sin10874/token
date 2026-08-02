@@ -66,16 +66,38 @@ for migration in "${history[@]}"; do
   "${psql[@]}" -d "$database" -f "$repo_root/$migration"
 done >"$log_dir/history-replay.log"
 
+node --import tsx "$repo_root/tests/v15-backfill-index-contract.ts" >"$log_dir/backfill-index-static-contract.log"
+"${psql[@]}" -d "$database" -f "$repo_root/scripts/supabase-v15-backfill-candidate-index.sql" >"$log_dir/backfill-index-create.log"
+"${psql[@]}" -d "$database" -f "$repo_root/tests/postgres-v15-backfill-index.contract.sql" >"$log_dir/backfill-index-create-contract.log"
+
 # v8/v9 *-validation.sql are manual validator scripts, not migrations.
 "${psql[@]}" -d "$database" \
   -f "$repo_root/scripts/supabase-v15-versioned-model-prices.sql" \
   -f "$repo_root/scripts/supabase-v15-versioned-model-prices.sql" >"$log_dir/v15-apply-twice.log"
 "${psql[@]}" -d "$database" -f "$repo_root/tests/postgres-v15-contract.initial.sql" >"$log_dir/contract-initial.log"
 
+# A failed concurrent unique build leaves an invalid same-name index. The helper
+# must fail instead of letting CREATE INDEX IF NOT EXISTS silently skip it.
+"${psql[@]}" -d "$database" -f "$repo_root/scripts/supabase-v15-backfill-candidate-index.cleanup.sql" >"$log_dir/backfill-index-cleanup-before-invalid.log"
+if "${psql[@]}" -d "$database" -c "CREATE UNIQUE INDEX CONCURRENTLY idx_tokend_usage_events_v15_backfill_candidates ON public.tokend_usage_events (model)" >"$log_dir/backfill-index-invalid-create.log" 2>&1; then
+  echo "expected duplicate-model concurrent index build to fail" >&2
+  exit 1
+fi
+if "${psql[@]}" -d "$database" -f "$repo_root/scripts/supabase-v15-backfill-candidate-index.sql" >"$log_dir/backfill-index-invalid-guard.log" 2>&1; then
+  echo "candidate index script accepted an invalid same-name index" >&2
+  exit 1
+fi
+"${psql[@]}" -d "$database" -f "$repo_root/scripts/supabase-v15-backfill-candidate-index.cleanup.sql" >"$log_dir/backfill-index-cleanup-after-invalid.log"
+"${psql[@]}" -d "$database" -f "$repo_root/scripts/supabase-v15-backfill-candidate-index.sql" >"$log_dir/backfill-index-recreate.log"
+"${psql[@]}" -d "$database" -f "$repo_root/tests/postgres-v15-backfill-index.contract.sql" >"$log_dir/backfill-index-recreate-contract.log"
+
 "${psql[@]}" -d "$database" -f "$repo_root/scripts/supabase-v15-versioned-model-prices.rollback.sql" >"$log_dir/v15-rollback.log"
 "${psql[@]}" -d "$database" -f "$repo_root/tests/postgres-v15-contract.rollback.sql" >"$log_dir/contract-rollback.log"
+"${psql[@]}" -d "$database" -f "$repo_root/tests/postgres-v15-backfill-index.contract.sql" >"$log_dir/backfill-index-rollback-contract.log"
 
 "${psql[@]}" -d "$database" -f "$repo_root/scripts/supabase-v15-versioned-model-prices.sql" >"$log_dir/v15-reapply.log"
 "${psql[@]}" -d "$database" -f "$repo_root/tests/postgres-v15-contract.reapply.sql" >"$log_dir/contract-reapply.log"
+"${psql[@]}" -d "$database" -f "$repo_root/tests/postgres-v15-backfill-index.contract.sql" >"$log_dir/backfill-index-reapply-contract.log"
+"${psql[@]}" -d "$database" -f "$repo_root/scripts/supabase-v15-backfill-candidate-index.cleanup.sql" >"$log_dir/backfill-index-final-cleanup.log"
 
 echo "v15 PostgreSQL contract passed"

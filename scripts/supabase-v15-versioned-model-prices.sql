@@ -81,6 +81,26 @@ INSERT INTO tokend_model_price_versions (
     'kimi-k3', 'moonshot', 1784160000000, NULL,
     3, 15, 0.3, NULL, 'hit_miss', 1048576,
     'https://platform.kimi.ai/docs/pricing/chat-k3.md', DATE '2026-08-02'
+  ),
+  (
+    'deepseek-v4-flash', 'deepseek', 1776988800000, NULL,
+    0.14, 0.28, 0.0028, NULL, 'hit_miss', 1000000,
+    'https://api-docs.deepseek.com/quick_start/pricing', DATE '2026-08-02'
+  ),
+  (
+    'deepseek-v4-pro', 'deepseek', 1776988800000, NULL,
+    0.435, 0.87, 0.003625, NULL, 'hit_miss', 1000000,
+    'https://api-docs.deepseek.com/quick_start/pricing', DATE '2026-08-02'
+  ),
+  (
+    'mimo-v2.5', 'xiaomi', 1779811200000, NULL,
+    0.14, 0.28, 0.0028, NULL, 'hit_miss', 1000000,
+    'https://mimo.mi.com/docs/zh-CN/price/pay-as-you-go', DATE '2026-08-02'
+  ),
+  (
+    'mimo-v2.5-pro', 'xiaomi', 1779811200000, NULL,
+    0.435, 0.87, 0.0036, NULL, 'hit_miss', 1000000,
+    'https://mimo.mi.com/docs/zh-CN/price/pay-as-you-go', DATE '2026-08-02'
   )
 ON CONFLICT (model_id, valid_from_ms) DO UPDATE SET
   provider = EXCLUDED.provider,

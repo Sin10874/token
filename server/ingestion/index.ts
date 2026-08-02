@@ -21,16 +21,49 @@ interface IngestionStats {
   duration: number
 }
 
+interface StoredIngestionState {
+  last_processed_lines: number
+  parser_version?: number | null
+}
+
+export function resolveStartLine(
+  forceReindex: boolean,
+  state: StoredIngestionState | undefined,
+  parserVersion: number,
+): number {
+  if (forceReindex || !state || state.parser_version !== parserVersion) return 0
+  return state.last_processed_lines || 0
+}
+
+// 兼容 2.4.0 基线测试中的既有渠道别名。
+export function resolvePricedModelId(model: string): string {
+  const aliases: Record<string, string> = {
+    k2p5: 'kimi-k2.5',
+    'kimi-code/kimi-for-coding': 'kimi-k2.5',
+    'kimi-for-coding': 'kimi-k2.5',
+    'kimi-k2-thinking': 'kimi-k2.5',
+    'M-2.7': 'MiniMax-M2.7',
+  }
+  return aliases[model] || model
+}
+
+export function resetDerivedUsageData(targetDb: { exec(sql: string): void; prepare(sql: string): { get(...params: unknown[]): unknown } }) {
+  targetDb.exec('DELETE FROM usage_events; DELETE FROM sessions; DELETE FROM ingestion_state; DELETE FROM source_warnings;')
+  if (targetDb.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'message_events'").get()) {
+    targetDb.exec('DELETE FROM message_events;')
+  }
+}
+
 const insertEvent = db.prepare(`
   INSERT OR IGNORE INTO usage_events (
     id, timestamp_ms, session_id, session_key, agent, provider, model, channel,
-    input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens,
-    input_cost, output_cost, cache_read_cost, cache_write_cost, total_cost,
+    input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens, total_tokens,
+    input_cost, output_cost, reasoning_cost, cache_read_cost, cache_write_cost, total_cost,
     source_path, stop_reason
   ) VALUES (
     @id, @timestampMs, @sessionId, @sessionKey, @agent, @provider, @model, @channel,
-    @inputTokens, @outputTokens, @cacheReadTokens, @cacheWriteTokens, @totalTokens,
-    @inputCost, @outputCost, @cacheReadCost, @cacheWriteCost, @totalCost,
+    @inputTokens, @outputTokens, @reasoningTokens, @cacheReadTokens, @cacheWriteTokens, @totalTokens,
+    @inputCost, @outputCost, @reasoningCost, @cacheReadCost, @cacheWriteCost, @totalCost,
     @sourcePath, @stopReason
   )
 `)
@@ -77,6 +110,25 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
     const stripped = model.replace(/-\d{8,}$/, '')
     if (stripped !== model) p = priceMap.get(stripped)
     return p || null
+  }
+
+  // 日志自带成本时优先用日志值，否则按价格表补算
+  function applyCostsFromPrices(events: Array<{
+    model: string; totalCost: number; totalTokens: number
+    inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number
+    inputCost: number; outputCost: number; cacheReadCost: number; cacheWriteCost: number
+  }>) {
+    for (const event of events) {
+      if (event.totalCost !== 0 || event.totalTokens <= 0) continue
+      const price = findPrice(event.model)
+      if (!price) continue
+      const perTokens = price.per_tokens || 1000000
+      event.inputCost = (event.inputTokens * price.input_price) / perTokens
+      event.outputCost = (event.outputTokens * price.output_price) / perTokens
+      event.cacheReadCost = (event.cacheReadTokens * price.cache_read_price) / perTokens
+      event.cacheWriteCost = (event.cacheWriteTokens * price.cache_write_price) / perTokens
+      event.totalCost = event.inputCost + event.outputCost + event.cacheReadCost + event.cacheWriteCost
+    }
   }
 
   const files = await discoverSessionFiles()
@@ -299,6 +351,7 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
 
   for (const fileInfo of geminiFiles) {
     const result = parseGeminiCliFile(fileInfo.filePath, fileInfo.sessionId)
+    applyCostsFromPrices(result.events)
     let inserted = 0
     db.exec('BEGIN')
     try {
@@ -334,6 +387,7 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
 
   for (const fileInfo of copilotFiles) {
     const result = parseCopilotCliFile(fileInfo.filePath, fileInfo.sessionId)
+    applyCostsFromPrices(result.events)
     let inserted = 0
     db.exec('BEGIN')
     try {
@@ -369,6 +423,7 @@ export async function runIngestion(forceReindex = false): Promise<IngestionStats
 
   for (const fileInfo of opencodeFiles) {
     const result = parseOpencodeFile(fileInfo)
+    applyCostsFromPrices(result.events)
     let inserted = 0
     db.exec('BEGIN')
     try {

@@ -4,12 +4,20 @@ import path from 'path'
 import os from 'os'
 import db from '../db/index.js'
 import { runIngestion } from '../ingestion/index.js'
+import {
+  getDashboardDailyRows,
+  getDashboardSummaryRows,
+  getDashboardTopConversations,
+  getDashboardTopProjects,
+} from './dashboard-metrics.js'
+import { getModelsList } from './model-list.js'
+import { getPlatformOverviewData } from './platform-overview.js'
+import { getPlatformsSummary, type PlatformProduct } from './platform-summary.js'
 
 const router = Router()
 const TOOL_CHANNELS = ['claude-code', 'codex', 'gemini-cli', 'copilot-cli', 'opencode'] as const
 const OPENCLAW_CHANNEL_FILTER = TOOL_CHANNELS.map((c) => `'${c}'`).join(', ')
-const OVERVIEW_PRODUCTS = ['claude-code', 'codex', 'openclaw'] as const
-type OverviewProduct = typeof OVERVIEW_PRODUCTS[number]
+const OVERVIEW_PRODUCTS: PlatformProduct[] = ['claude-code', 'codex', 'openclaw', 'hermes']
 
 // Read bot nicknames from openclaw.json (read-only, never writes)
 function loadBotNicknames(): Record<string, string> {
@@ -50,24 +58,6 @@ function daysAgoStart(n: number): number {
   return d.getTime()
 }
 
-function getPeriodBounds(period?: string) {
-  if (period === '1d') {
-    const fromMs = hoursAgo(24)
-    return { period: '1d' as const, fromMs, prevFromMs: hoursAgo(48), prevToMs: fromMs, bucket: 'hour' as const }
-  }
-  if (period === '30d') {
-    const fromMs = daysAgoStart(29)
-    return { period: '30d' as const, fromMs, prevFromMs: daysAgoStart(59), prevToMs: fromMs, bucket: 'day' as const }
-  }
-  const fromMs = daysAgoStart(6)
-  return { period: '7d' as const, fromMs, prevFromMs: daysAgoStart(13), prevToMs: fromMs, bucket: 'day' as const }
-}
-
-function getOverviewProductFilter(product: OverviewProduct): string {
-  if (product === 'openclaw') return `channel NOT IN (${OPENCLAW_CHANNEL_FILTER}, 'unknown', 'cron')`
-  return `channel = '${product}'`
-}
-
 // ─── Summary / Dashboard ─────────────────────────────────────────────────────
 
 router.get('/summary', (req: Request, res: Response) => {
@@ -90,35 +80,12 @@ router.get('/summary', (req: Request, res: Response) => {
     prevToMs = fromMs
   }
 
-  const currentRow = db.prepare(`
-    SELECT
-      COALESCE(SUM(total_tokens), 0) as totalTokens,
-      COALESCE(SUM(input_tokens), 0) as inputTokens,
-      COALESCE(SUM(output_tokens), 0) as outputTokens,
-      COALESCE(SUM(cache_read_tokens), 0) as cacheReadTokens,
-      COALESCE(SUM(total_cost), 0) as totalCost,
-      COUNT(DISTINCT session_id) as sessions,
-      COUNT(DISTINCT channel) as channels,
-      COUNT(*) as callCount,
-      COUNT(*) as messageCount,
-      COUNT(CASE WHEN stop_reason = 'end_turn' THEN 1 END) as userMessageCount
-    FROM usage_events
-    WHERE timestamp_ms >= ?
-  `).get(fromMs) as Record<string, number>
-
-  const prevRow = db.prepare(`
-    SELECT
-      COALESCE(SUM(total_tokens), 0) as totalTokens,
-      COALESCE(SUM(input_tokens), 0) as inputTokens,
-      COALESCE(SUM(output_tokens), 0) as outputTokens,
-      COALESCE(SUM(cache_read_tokens), 0) as cacheReadTokens,
-      COALESCE(SUM(total_cost), 0) as totalCost,
-      COUNT(*) as callCount,
-      COUNT(*) as messageCount,
-      COUNT(CASE WHEN stop_reason = 'end_turn' THEN 1 END) as userMessageCount
-    FROM usage_events
-    WHERE timestamp_ms >= ? AND timestamp_ms < ?
-  `).get(prevFromMs, prevToMs) as Record<string, number>
+  const { current: currentRow, previous: prevRow } = getDashboardSummaryRows(
+    db,
+    fromMs,
+    prevFromMs,
+    prevToMs,
+  )
 
   const modelDist = db.prepare(`
     SELECT model, provider,
@@ -143,20 +110,9 @@ router.get('/summary', (req: Request, res: Response) => {
     ORDER BY tokens DESC
   `).all(fromMs)
 
-  const topSessions = db.prepare(`
-    SELECT session_id, channel, agent,
-      MAX(session_key) as session_key,
-      SUM(total_tokens) as tokens,
-      SUM(total_cost) as cost,
-      COUNT(*) as calls,
-      MIN(timestamp_ms) as firstAt,
-      MAX(timestamp_ms) as lastAt
-    FROM usage_events
-    WHERE timestamp_ms >= ? AND agent != ''
-    GROUP BY session_id
-    ORDER BY tokens DESC
-    LIMIT 8
-  `).all(fromMs)
+  const botNicknames = loadBotNicknames()
+  const topSessions = getDashboardTopConversations(db, fromMs, botNicknames).slice(0, 8)
+  const topProjects = getDashboardTopProjects(db, fromMs)
 
   // Trend data: for 1d use hourly, for 7d/30d use daily
   let trend: unknown[]
@@ -252,7 +208,8 @@ router.get('/summary', (req: Request, res: Response) => {
     channelDistribution: channelDist,
     topSessions,
     trend7: trend,
-    botNicknames: loadBotNicknames(),
+    botNicknames,
+    topProjects,
     productBreakdown: {
       claudeCode: { today: ccCurrent, cost7d: cc7d.cost, tokens7d: cc7d.tokens },
       openClaw: { today: ocCurrent, cost7d: oc7d.cost, tokens7d: oc7d.tokens },
@@ -261,180 +218,19 @@ router.get('/summary', (req: Request, res: Response) => {
   })
 })
 
+router.get('/platforms/summary', (req: Request, res: Response) => {
+  res.json(getPlatformsSummary(db, req.query.period as string | undefined))
+})
+
 router.get('/platforms/:product/overview', (req: Request, res: Response) => {
-  const rawProduct = req.params.product as OverviewProduct
+  const rawProduct = req.params.product as PlatformProduct
   if (!OVERVIEW_PRODUCTS.includes(rawProduct)) {
     return res.status(404).json({ error: 'unknown product' })
   }
-
-  const { period, fromMs, prevFromMs, prevToMs, bucket } = getPeriodBounds(req.query.period as string | undefined)
-  const productFilter = getOverviewProductFilter(rawProduct)
-  const bucketExpr = bucket === 'hour'
-    ? `strftime('%Y-%m-%d %H:00', timestamp_ms / 1000, 'unixepoch', 'localtime')`
-    : `date(timestamp_ms / 1000, 'unixepoch', 'localtime')`
-
-  const current = db.prepare(`
-    SELECT
-      COALESCE(SUM(total_tokens), 0) as totalTokens,
-      COALESCE(SUM(input_tokens), 0) as inputTokens,
-      COALESCE(SUM(output_tokens), 0) as outputTokens,
-      COALESCE(SUM(cache_read_tokens), 0) as cacheReadTokens,
-      COALESCE(SUM(cache_write_tokens), 0) as cacheWriteTokens,
-      COALESCE(SUM(total_cost), 0) as totalCost,
-      COUNT(*) as callCount,
-      COUNT(DISTINCT session_id) as sessions,
-      COUNT(DISTINCT CASE WHEN agent != '' THEN agent END) as projectCount,
-      COUNT(DISTINCT CASE WHEN channel != '' THEN channel END) as channelCount
-    FROM usage_events
-    WHERE ${productFilter} AND timestamp_ms >= ?
-  `).get(fromMs) as Record<string, number>
-
-  const previous = db.prepare(`
-    SELECT
-      COALESCE(SUM(total_tokens), 0) as totalTokens,
-      COALESCE(SUM(input_tokens), 0) as inputTokens,
-      COALESCE(SUM(output_tokens), 0) as outputTokens,
-      COALESCE(SUM(cache_read_tokens), 0) as cacheReadTokens,
-      COALESCE(SUM(cache_write_tokens), 0) as cacheWriteTokens,
-      COALESCE(SUM(total_cost), 0) as totalCost,
-      COUNT(*) as callCount,
-      COUNT(DISTINCT session_id) as sessions,
-      COUNT(DISTINCT CASE WHEN agent != '' THEN agent END) as projectCount,
-      COUNT(DISTINCT CASE WHEN channel != '' THEN channel END) as channelCount
-    FROM usage_events
-    WHERE ${productFilter} AND timestamp_ms >= ? AND timestamp_ms < ?
-  `).get(prevFromMs, prevToMs) as Record<string, number>
-
-  const trend = db.prepare(`
-    SELECT
-      ${bucketExpr} as bucket,
-      COALESCE(SUM(total_tokens), 0) as totalTokens,
-      COALESCE(SUM(total_cost), 0) as totalCost,
-      COUNT(*) as callCount,
-      COUNT(DISTINCT session_id) as sessions
-    FROM usage_events
-    WHERE ${productFilter} AND timestamp_ms >= ?
-    GROUP BY bucket
-    ORDER BY bucket ASC
-  `).all(fromMs)
-
-  const topModels = db.prepare(`
-    SELECT
-      model as label,
-      COALESCE(SUM(total_tokens), 0) as tokens,
-      COALESCE(SUM(total_cost), 0) as cost,
-      COUNT(*) as calls,
-      COUNT(DISTINCT session_id) as sessions
-    FROM usage_events
-    WHERE ${productFilter} AND timestamp_ms >= ?
-    GROUP BY model
-    ORDER BY cost DESC, tokens DESC
-    LIMIT 8
-  `).all(fromMs)
-
-  const topProjects = db.prepare(`
-    SELECT
-      COALESCE(NULLIF(agent, ''), '未命名') as label,
-      COALESCE(SUM(total_tokens), 0) as tokens,
-      COALESCE(SUM(total_cost), 0) as cost,
-      COUNT(*) as calls,
-      COUNT(DISTINCT session_id) as sessions,
-      MAX(timestamp_ms) as lastAt
-    FROM usage_events
-    WHERE ${productFilter} AND timestamp_ms >= ?
-    GROUP BY COALESCE(NULLIF(agent, ''), '未命名')
-    ORDER BY cost DESC, tokens DESC
-    LIMIT 8
-  `).all(fromMs)
-
-  const topChannels = rawProduct === 'openclaw'
-    ? db.prepare(`
-        SELECT
-          channel as label,
-          COALESCE(SUM(total_tokens), 0) as tokens,
-          COALESCE(SUM(total_cost), 0) as cost,
-          COUNT(*) as calls,
-          COUNT(DISTINCT session_id) as sessions,
-          MAX(timestamp_ms) as lastAt
-        FROM usage_events
-        WHERE ${productFilter} AND timestamp_ms >= ?
-        GROUP BY channel
-        ORDER BY cost DESC, tokens DESC
-        LIMIT 8
-      `).all(fromMs)
-    : []
-
-  const topAgents = rawProduct === 'openclaw'
-    ? db.prepare(`
-        SELECT
-          COALESCE(NULLIF(agent, ''), '未命名') as label,
-          COALESCE(SUM(total_tokens), 0) as tokens,
-          COALESCE(SUM(total_cost), 0) as cost,
-          COUNT(*) as calls,
-          COUNT(DISTINCT session_id) as sessions,
-          MAX(timestamp_ms) as lastAt
-        FROM usage_events
-        WHERE ${productFilter} AND timestamp_ms >= ?
-        GROUP BY COALESCE(NULLIF(agent, ''), '未命名')
-        ORDER BY cost DESC, tokens DESC
-        LIMIT 8
-      `).all(fromMs)
-    : []
-
-  const topChannelAgents = rawProduct === 'openclaw'
-    ? db.prepare(`
-        SELECT
-          channel,
-          COALESCE(NULLIF(agent, ''), '未命名') as agent,
-          COALESCE(SUM(total_tokens), 0) as tokens,
-          COALESCE(SUM(total_cost), 0) as cost,
-          COUNT(*) as calls,
-          COUNT(DISTINCT session_id) as sessions
-        FROM usage_events
-        WHERE ${productFilter} AND timestamp_ms >= ?
-        GROUP BY channel, COALESCE(NULLIF(agent, ''), '未命名')
-        ORDER BY cost DESC, tokens DESC
-        LIMIT 12
-      `).all(fromMs)
-    : []
-
-  const topSessions = db.prepare(`
-    SELECT
-      session_id,
-      MAX(channel) as channel,
-      MAX(agent) as agent,
-      MAX(session_key) as session_key,
-      GROUP_CONCAT(DISTINCT model) as models,
-      COALESCE(SUM(total_tokens), 0) as tokens,
-      COALESCE(SUM(total_cost), 0) as cost,
-      COUNT(*) as calls,
-      MIN(timestamp_ms) as firstAt,
-      MAX(timestamp_ms) as lastAt
-    FROM usage_events
-    WHERE ${productFilter} AND timestamp_ms >= ?
-    GROUP BY session_id
-    ORDER BY cost DESC, tokens DESC
-    LIMIT 12
-  `).all(fromMs)
-
-  const peak = Array.isArray(trend) && trend.length > 0
-    ? [...trend].sort((a, b) => (Number((b as Record<string, number>).totalCost) - Number((a as Record<string, number>).totalCost)))[0]
-    : null
-
+  const botNicknames = loadBotNicknames()
   res.json({
-    product: rawProduct,
-    period,
-    current,
-    previous,
-    trend,
-    peak,
-    topModels,
-    topProjects,
-    topChannels,
-    topAgents,
-    topChannelAgents,
-    topSessions,
-    botNicknames: loadBotNicknames(),
+    ...getPlatformOverviewData(db, rawProduct, req.query.period as string | undefined, botNicknames),
+    botNicknames,
   })
 })
 
@@ -442,51 +238,13 @@ router.get('/platforms/:product/overview', (req: Request, res: Response) => {
 
 router.get('/daily', (req: Request, res: Response) => {
   const days = parseInt(req.query.days as string) || 30
-  const fromMs = daysAgoStart(days - 1)
-
-  const rows = db.prepare(`
-    SELECT
-      date(timestamp_ms / 1000, 'unixepoch', 'localtime') as day,
-      SUM(total_tokens) as tokens,
-      SUM(input_tokens) as inputTokens,
-      SUM(output_tokens) as outputTokens,
-      SUM(cache_read_tokens) as cacheReadTokens,
-      SUM(cache_write_tokens) as cacheWriteTokens,
-      SUM(total_cost) as cost,
-      SUM(input_cost) as inputCost,
-      SUM(output_cost) as outputCost,
-      COUNT(*) as calls,
-      COUNT(DISTINCT session_id) as sessions
-    FROM usage_events
-    WHERE timestamp_ms >= ?
-    GROUP BY day
-    ORDER BY day ASC
-  `).all(fromMs)
-
-  res.json(rows)
+  res.json(getDashboardDailyRows(db, days))
 })
 
 // ─── Models ──────────────────────────────────────────────────────────────────
 
-router.get('/models', (_req: Request, res: Response) => {
-  const rows = db.prepare(`
-    SELECT model, provider,
-      SUM(total_tokens) as totalTokens,
-      SUM(input_tokens) as inputTokens,
-      SUM(output_tokens) as outputTokens,
-      SUM(cache_read_tokens) as cacheReadTokens,
-      SUM(cache_write_tokens) as cacheWriteTokens,
-      SUM(total_cost) as totalCost,
-      COUNT(*) as callCount,
-      COUNT(DISTINCT session_id) as sessionCount,
-      MIN(timestamp_ms) as firstSeen,
-      MAX(timestamp_ms) as lastSeen
-    FROM usage_events
-    GROUP BY model
-    ORDER BY totalTokens DESC
-  `).all()
-
-  res.json(rows)
+router.get('/models', (req: Request, res: Response) => {
+  res.json(getModelsList(db, req.query.period as string | undefined))
 })
 
 router.get('/models/:modelId', (req: Request, res: Response) => {

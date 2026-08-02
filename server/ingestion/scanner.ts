@@ -42,6 +42,32 @@ function parseSessionsIndex(filePath: string): Map<string, { channel: string; se
   return map
 }
 
+/**
+ * Read the first line of a JSONL session file to infer channel.
+ * OpenClaw internal tasks (heartbeat, cron) run from .openclaw/workspace
+ * and don't get registered in sessions.json.
+ */
+function inferChannelFromJsonl(filePath: string): string | null {
+  try {
+    const content = fs.readFileSync(filePath, 'utf8')
+    const firstNewline = content.indexOf('\n')
+    const firstLine = firstNewline > 0 ? content.slice(0, firstNewline) : content
+    const parsed = JSON.parse(firstLine)
+    if (parsed.type !== 'session') return null
+
+    // If it has a channel field, use it
+    if (parsed.channel && typeof parsed.channel === 'string') return parsed.channel
+
+    // If cwd is the openclaw workspace, it's an internal cron/heartbeat task
+    const cwd = parsed.cwd as string | undefined
+    if (cwd && cwd.includes('.openclaw/workspace')) return 'cron'
+
+    return null
+  } catch {
+    return null
+  }
+}
+
 export async function discoverSessionFiles(): Promise<SessionFileInfo[]> {
   const openclawDir = path.join(os.homedir(), '.openclaw', 'agents')
   if (!fs.existsSync(openclawDir)) return []
@@ -67,12 +93,21 @@ export async function discoverSessionFiles(): Promise<SessionFileInfo[]> {
     for (const filePath of jsonlFiles) {
       const sessionId = path.basename(filePath, '.jsonl')
       const meta = sessionMap.get(sessionId)
+      let channel = meta?.channel
+      let sessionKey = meta?.sessionKey
+
+      // Fallback: when sessions.json doesn't have this session,
+      // read the JSONL header line to infer channel from context
+      if (!channel || channel === 'unknown') {
+        channel = inferChannelFromJsonl(filePath) || 'unknown'
+      }
+
       results.push({
         sessionId,
         agent,
         filePath,
-        sessionKey: meta?.sessionKey,
-        channel: meta?.channel || 'unknown',
+        sessionKey,
+        channel,
       })
     }
   }

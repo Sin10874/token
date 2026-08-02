@@ -1,7 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import { DatabaseSync } from 'node:sqlite'
-import { ParseResult, RawUsageEvent } from './parser.js'
+import { ParseResult, RawMessageEvent, RawUsageEvent } from './parser.js'
 
 interface OpencodeFileInfo {
   filePath: string
@@ -21,6 +21,7 @@ export function parseOpencodeFile(fileInfo: OpencodeFileInfo): ParseResult {
 
 function parseOpencodeSqlite(filePath: string): ParseResult {
   const events: RawUsageEvent[] = []
+  const messages: RawMessageEvent[] = []
   const warnings: string[] = []
   let currentModel: string | undefined
   let firstSeenAt: number | undefined
@@ -49,6 +50,21 @@ function parseOpencodeSqlite(filePath: string): ParseResult {
       if (!firstSeenAt || ts < firstSeenAt) firstSeenAt = ts
       if (!lastSeenAt || ts > lastSeenAt) lastSeenAt = ts
 
+      if (row.role === 'user' || row.role === 'assistant') {
+        messages.push({
+          id: `opencode-msg::${String(row.id || messages.length)}`,
+          timestampMs: ts,
+          sessionId: String(row.sessionId || 'unknown'),
+          sessionKey: null,
+          agent: basenameOrUnknown(row.rootPath as string | undefined),
+          provider: String(row.providerID || 'unknown'),
+          model: String(row.modelID || currentModel || 'unknown'),
+          channel: 'opencode',
+          kind: row.role === 'user' ? 'user' : 'assistant',
+          sourcePath: filePath,
+        })
+      }
+
       if (row.role !== 'assistant') continue
       const tokensRaw = row.tokens
       if (!tokensRaw) continue
@@ -74,11 +90,13 @@ function parseOpencodeSqlite(filePath: string): ParseResult {
         channel: 'opencode',
         inputTokens,
         outputTokens,
+        reasoningTokens,
         cacheReadTokens,
         cacheWriteTokens,
         totalTokens,
         inputCost: 0,
         outputCost: 0,
+        reasoningCost: 0,
         cacheReadCost: 0,
         cacheWriteCost: 0,
         totalCost: 0,
@@ -90,11 +108,12 @@ function parseOpencodeSqlite(filePath: string): ParseResult {
     warnings.push(`Failed to parse opencode sqlite: ${String(error)}`)
   }
 
-  return { events, currentModel, firstSeenAt, lastSeenAt, warnings, linesRead: events.length }
+  return { events, messages, currentModel, firstSeenAt, lastSeenAt, warnings, linesRead: Math.max(events.length, messages.length) }
 }
 
 function parseOpencodeJson(filePath: string, sessionId: string): ParseResult {
   const events: RawUsageEvent[] = []
+  const messages: RawMessageEvent[] = []
   const warnings: string[] = []
   let currentModel: string | undefined
   let firstSeenAt: number | undefined
@@ -108,13 +127,28 @@ function parseOpencodeJson(filePath: string, sessionId: string): ParseResult {
       lastSeenAt = ts
     }
 
+    if (data.role === 'user' || data.role === 'assistant') {
+      messages.push({
+        id: `opencode-msg::${String(data.id || path.basename(filePath, '.json'))}`,
+        timestampMs: ts,
+        sessionId,
+        sessionKey: null,
+        agent: basenameOrUnknown((data.path as Record<string, unknown> | undefined)?.root as string | undefined),
+        provider: String(data.providerID || (data.model as Record<string, unknown> | undefined)?.providerID || 'unknown'),
+        model: String(data.modelID || (data.model as Record<string, unknown> | undefined)?.modelID || currentModel || 'unknown'),
+        channel: 'opencode',
+        kind: data.role === 'user' ? 'user' : 'assistant',
+        sourcePath: filePath,
+      })
+    }
+
     if (data.role !== 'assistant') {
-      return { events, currentModel, firstSeenAt, lastSeenAt, warnings, linesRead: 1 }
+      return { events, messages, currentModel, firstSeenAt, lastSeenAt, warnings, linesRead: 1 }
     }
 
     const tokens = data.tokens as Record<string, unknown> | undefined
     if (!tokens) {
-      return { events, currentModel, firstSeenAt, lastSeenAt, warnings, linesRead: 1 }
+      return { events, messages, currentModel, firstSeenAt, lastSeenAt, warnings, linesRead: 1 }
     }
 
     const inputTokens = Number(tokens.input || 0)
@@ -124,7 +158,7 @@ function parseOpencodeJson(filePath: string, sessionId: string): ParseResult {
     const cacheWriteTokens = Number((tokens.cache as Record<string, unknown> | undefined)?.write || 0)
     const totalTokens = inputTokens + outputTokens + reasoningTokens + cacheReadTokens + cacheWriteTokens
     if (totalTokens === 0 || !Number.isFinite(ts)) {
-      return { events, currentModel, firstSeenAt, lastSeenAt, warnings, linesRead: 1 }
+      return { events, messages, currentModel, firstSeenAt, lastSeenAt, warnings, linesRead: 1 }
     }
 
     currentModel = String(data.modelID || 'unknown')
@@ -139,11 +173,13 @@ function parseOpencodeJson(filePath: string, sessionId: string): ParseResult {
       channel: 'opencode',
       inputTokens,
       outputTokens,
+      reasoningTokens,
       cacheReadTokens,
       cacheWriteTokens,
       totalTokens,
       inputCost: 0,
       outputCost: 0,
+      reasoningCost: 0,
       cacheReadCost: 0,
       cacheWriteCost: 0,
       totalCost: 0,
@@ -154,5 +190,5 @@ function parseOpencodeJson(filePath: string, sessionId: string): ParseResult {
     warnings.push(`Cannot read ${filePath}`)
   }
 
-  return { events, currentModel, firstSeenAt, lastSeenAt, warnings, linesRead: 1 }
+  return { events, messages, currentModel, firstSeenAt, lastSeenAt, warnings, linesRead: 1 }
 }

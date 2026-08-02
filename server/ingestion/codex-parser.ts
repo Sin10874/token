@@ -1,7 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
-import { RawUsageEvent, ParseResult } from './parser.js'
+import { MessageKind, ParseResult, RawMessageEvent, RawUsageEvent } from './parser.js'
 
 /**
  * Parse Codex (CLI / App) session JSONL files.
@@ -19,6 +19,7 @@ export function parseCodexFile(
   startLine = 0
 ): ParseResult {
   const events: RawUsageEvent[] = []
+  const messages = new Map<string, RawMessageEvent>()
   const warnings: string[] = []
   let currentModel: string | undefined
   let firstSeenAt: number | undefined
@@ -36,7 +37,7 @@ export function parseCodexFile(
   try {
     content = fs.readFileSync(filePath, 'utf8')
   } catch {
-    return { events, warnings: [`Cannot read ${filePath}`], linesRead: 0 }
+    return { events, messages: [], warnings: [`Cannot read ${filePath}`], linesRead: 0 }
   }
 
   const lines = content.split('\n')
@@ -72,6 +73,73 @@ export function parseCodexFile(
       continue
     }
 
+    if (type === 'response_item') {
+      const payload = parsed.payload as Record<string, unknown> | undefined
+      if (!payload) continue
+
+      if (payload.type === 'message') {
+        const role = payload.role as string | undefined
+        const contentItems = Array.isArray(payload.content) ? payload.content as Array<Record<string, unknown>> : []
+        const text = contentItems
+          .filter((item) => item.type === 'input_text' || item.type === 'output_text')
+          .map((item) => typeof item.text === 'string' ? item.text : '')
+          .join('\n')
+          .trim()
+
+        let kind: MessageKind | null = null
+        if (role === 'user') {
+          if (text && !isCodexEnvironmentContext(text)) kind = 'user'
+        } else if (role === 'assistant') {
+          if (text) kind = 'assistant'
+        }
+
+        if (kind) {
+          const messageId = `codex-msg::${sessionId}::${i}`
+          messages.set(messageId, {
+            id: messageId,
+            timestampMs: ts,
+            sessionId,
+            sessionKey: null,
+            agent: detectedProjectName || '',
+            provider: 'openai',
+            model: currentModel || 'unknown',
+            channel: 'codex',
+            kind,
+            sourcePath: filePath,
+          })
+        }
+      } else if (payload.type === 'function_call') {
+        const callId = typeof payload.call_id === 'string' ? payload.call_id : `call-${i}`
+        messages.set(`codex-tool-call::${sessionId}::${callId}`, {
+          id: `codex-tool-call::${sessionId}::${callId}`,
+          timestampMs: ts,
+          sessionId,
+          sessionKey: null,
+          agent: detectedProjectName || '',
+          provider: 'openai',
+          model: currentModel || 'unknown',
+          channel: 'codex',
+          kind: 'tool_call',
+          sourcePath: filePath,
+        })
+      } else if (payload.type === 'function_call_output') {
+        const callId = typeof payload.call_id === 'string' ? payload.call_id : `call-${i}`
+        messages.set(`codex-tool-result::${sessionId}::${callId}`, {
+          id: `codex-tool-result::${sessionId}::${callId}`,
+          timestampMs: ts,
+          sessionId,
+          sessionKey: null,
+          agent: detectedProjectName || '',
+          provider: 'openai',
+          model: currentModel || 'unknown',
+          channel: 'codex',
+          kind: 'tool_result',
+          sourcePath: filePath,
+        })
+      }
+      continue
+    }
+
     // Extract model from turn_context
     if (type === 'turn_context') {
       const payload = parsed.payload as Record<string, unknown> | undefined
@@ -101,8 +169,9 @@ export function parseCodexFile(
       if (!totalUsage || !lastUsage) continue
 
       const cachedInputTokens = lastUsage.cached_input_tokens || 0
+      const reasoningTokens = lastUsage.reasoning_output_tokens || 0
       const inputTokens = Math.max(0, (lastUsage.input_tokens || 0) - cachedInputTokens)
-      const outputTokens = lastUsage.output_tokens || 0
+      const outputTokens = Math.max(0, (lastUsage.output_tokens || 0) - reasoningTokens)
       const totalTokens = (lastUsage.total_tokens || 0) || (inputTokens + outputTokens + cachedInputTokens)
 
       if (totalUsage.total_tokens === prevTotal.total) continue
@@ -128,11 +197,13 @@ export function parseCodexFile(
         channel: 'codex',
         inputTokens,
         outputTokens,
+        reasoningTokens,
         cacheReadTokens: cachedInputTokens,
         cacheWriteTokens: 0,
         totalTokens,
         inputCost: 0,
         outputCost: 0,
+        reasoningCost: 0,
         cacheReadCost: 0,
         cacheWriteCost: 0,
         totalCost: 0,
@@ -144,6 +215,7 @@ export function parseCodexFile(
 
   return {
     events,
+    messages: Array.from(messages.values()),
     currentModel,
     firstSeenAt,
     lastSeenAt,
@@ -151,6 +223,11 @@ export function parseCodexFile(
     linesRead,
     projectName: detectedProjectName,
   }
+}
+
+function isCodexEnvironmentContext(text: string): boolean {
+  const trimmed = text.trim()
+  return trimmed.startsWith('<environment_context>') && trimmed.endsWith('</environment_context>')
 }
 
 function resolveTimestamp(raw: unknown): number {

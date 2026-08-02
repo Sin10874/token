@@ -18,7 +18,19 @@ WHERE audit.event_id = event.id
   AND audit.migration_id = '202608020001_versioned_model_prices';
 
 DELETE FROM tokend_model_prices
-WHERE model_id IN ('claude-opus-5', 'claude-sonnet-5', 'kimi-k2.7-code', 'kimi-k3');
+WHERE model_id IN (
+  'claude-opus-5',
+  'claude-sonnet-5',
+  'kimi-k2.7-code',
+  'kimi-k3',
+  'deepseek-v4-flash',
+  'deepseek-v4-pro',
+  'mimo-v2.5',
+  'mimo-v2.5-pro',
+  'MiniMax-M2.7-highspeed',
+  'MiniMax-M2.5',
+  'MiniMax-M2.5-highspeed'
+);
 
 DROP FUNCTION IF EXISTS tokend_backfill_versioned_model_costs_batch(INTEGER);
 DROP TABLE IF EXISTS tokend_model_price_versions;

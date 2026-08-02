@@ -30,12 +30,18 @@ WHERE model_id IN (
   'claude-opus-5',
   'claude-sonnet-5',
   'kimi-k2.7-code',
-  'kimi-k3'
+  'kimi-k3',
+  'deepseek-v4-flash',
+  'deepseek-v4-pro',
+  'mimo-v2.5',
+  'mimo-v2.5-pro'
 )
 AND source IN (
   'https://platform.claude.com/docs/en/about-claude/pricing',
   'https://platform.kimi.ai/docs/pricing/chat-k27-code.md',
-  'https://platform.kimi.ai/docs/pricing/chat-k3.md'
+  'https://platform.kimi.ai/docs/pricing/chat-k3.md',
+  'https://api-docs.deepseek.com/quick_start/pricing',
+  'https://mimo.mi.com/docs/zh-CN/price/pay-as-you-go'
 );
 
 DROP TABLE IF EXISTS model_price_versions;

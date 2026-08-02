@@ -190,6 +190,10 @@ const DEFAULT_MODEL_PRICES = [
   ['k2p5', 'moonshot', 0.6, 3, 0.1, 0],
   ['kimi-code/kimi-for-coding', 'moonshot', 0.6, 3, 0.1, 0],
   ['kimi-k2-thinking', 'moonshot', 0.6, 2.5, 0.15, 0],
+  ['deepseek-v4-flash', 'deepseek', 0.14, 0.28, 0.0028, 0],
+  ['deepseek-v4-pro', 'deepseek', 0.435, 0.87, 0.003625, 0],
+  ['mimo-v2.5', 'xiaomi', 0.14, 0.28, 0.0028, 0],
+  ['mimo-v2.5-pro', 'xiaomi', 0.435, 0.87, 0.0036, 0],
   ['grok-code', 'xai', 0.2, 1.5, 0.02, 0],
   ['glm-4.7-free', 'zhipu', 0, 0, 0, 0],
   ['minimax-m2.1-free', 'minimax', 0, 0, 0, 0],
@@ -203,6 +207,9 @@ const DEFAULT_MODEL_PRICES = [
   // MiniMax M3 缓存写未公布，按 M2.7 同款 1.25x input 估算
   ['MiniMax-M3', 'minimax', 0.3, 1.2, 0.06, 0.375],
   ['MiniMax-M2.7', 'minimax', 0.3, 1.2, 0.06, 0.375],
+  ['MiniMax-M2.7-highspeed', 'minimax', 0.6, 2.4, 0.06, 0.375],
+  ['MiniMax-M2.5', 'minimax', 0.3, 1.2, 0.03, 0.375],
+  ['MiniMax-M2.5-highspeed', 'minimax', 0.6, 2.4, 0.03, 0.375],
 ] as const
 
 function upsertDefaultModelPrices() {

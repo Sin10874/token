@@ -40,6 +40,30 @@ INSERT INTO model_price_versions (
   cache_semantics, context_window, source_url, source_checked_at
 ) VALUES
   (
+    'deepseek-v4-flash', 'deepseek', 1776988800000, NULL,
+    0.14, 0.28, 0.0028, NULL,
+    'hit_miss', 1000000,
+    'https://api-docs.deepseek.com/quick_start/pricing', '2026-08-02'
+  ),
+  (
+    'deepseek-v4-pro', 'deepseek', 1776988800000, NULL,
+    0.435, 0.87, 0.003625, NULL,
+    'hit_miss', 1000000,
+    'https://api-docs.deepseek.com/quick_start/pricing', '2026-08-02'
+  ),
+  (
+    'mimo-v2.5', 'xiaomi', 1779811200000, NULL,
+    0.14, 0.28, 0.0028, NULL,
+    'hit_miss', 1000000,
+    'https://mimo.mi.com/docs/zh-CN/price/pay-as-you-go', '2026-08-02'
+  ),
+  (
+    'mimo-v2.5-pro', 'xiaomi', 1779811200000, NULL,
+    0.435, 0.87, 0.0036, NULL,
+    'hit_miss', 1000000,
+    'https://mimo.mi.com/docs/zh-CN/price/pay-as-you-go', '2026-08-02'
+  ),
+  (
     'claude-opus-5', 'anthropic', 1784851200000, NULL,
     5, 25, 0.5, 6.25,
     'anthropic', 1000000,
@@ -114,6 +138,48 @@ INSERT INTO model_prices (
     'USD', 1000000,
     'https://platform.kimi.ai/docs/pricing/chat-k3.md',
     CAST(strftime('%s', 'now') AS INTEGER) * 1000
+  ),
+  (
+    'deepseek-v4-flash', 'deepseek', 0.14, 0.28, 0.0028, 0,
+    'USD', 1000000,
+    'https://api-docs.deepseek.com/quick_start/pricing',
+    CAST(strftime('%s', 'now') AS INTEGER) * 1000
+  ),
+  (
+    'deepseek-v4-pro', 'deepseek', 0.435, 0.87, 0.003625, 0,
+    'USD', 1000000,
+    'https://api-docs.deepseek.com/quick_start/pricing',
+    CAST(strftime('%s', 'now') AS INTEGER) * 1000
+  ),
+  (
+    'mimo-v2.5', 'xiaomi', 0.14, 0.28, 0.0028, 0,
+    'USD', 1000000,
+    'https://mimo.mi.com/docs/zh-CN/price/pay-as-you-go',
+    CAST(strftime('%s', 'now') AS INTEGER) * 1000
+  ),
+  (
+    'mimo-v2.5-pro', 'xiaomi', 0.435, 0.87, 0.0036, 0,
+    'USD', 1000000,
+    'https://mimo.mi.com/docs/zh-CN/price/pay-as-you-go',
+    CAST(strftime('%s', 'now') AS INTEGER) * 1000
+  ),
+  (
+    'MiniMax-M2.7-highspeed', 'minimax', 0.6, 2.4, 0.06, 0.375,
+    'USD', 1000000,
+    'https://platform.minimaxi.com/docs/guides/pricing-paygo',
+    CAST(strftime('%s', 'now') AS INTEGER) * 1000
+  ),
+  (
+    'MiniMax-M2.5', 'minimax', 0.3, 1.2, 0.03, 0.375,
+    'USD', 1000000,
+    'https://platform.minimaxi.com/docs/guides/pricing-paygo',
+    CAST(strftime('%s', 'now') AS INTEGER) * 1000
+  ),
+  (
+    'MiniMax-M2.5-highspeed', 'minimax', 0.6, 2.4, 0.03, 0.375,
+    'USD', 1000000,
+    'https://platform.minimaxi.com/docs/guides/pricing-paygo',
+    CAST(strftime('%s', 'now') AS INTEGER) * 1000
   )
 ON CONFLICT(model_id) DO UPDATE SET
   provider = excluded.provider,
@@ -127,6 +193,42 @@ ON CONFLICT(model_id) DO UPDATE SET
   updated_at = excluded.updated_at
 WHERE model_prices.source != 'manual';
 
+WITH alias_map(raw_model, canonical_model) AS (
+  VALUES
+    ('k2p5', 'kimi-k2.5'),
+    ('kimi-code/kimi-for-coding', 'kimi-k2.5'),
+    ('kimi-for-coding', 'kimi-k2.5'),
+    ('kimi-k2-thinking', 'kimi-k2.5'),
+    ('deepseek-chat', 'deepseek-v4-flash'),
+    ('deepseek-reasoner', 'deepseek-v4-flash'),
+    ('mimo-v2-flash', 'mimo-v2.5'),
+    ('mimo-v2-omni', 'mimo-v2.5'),
+    ('mimo-v2-pro', 'mimo-v2.5-pro'),
+    ('GLM-5.2', 'glm-5.2'),
+    ('GLM-5.1', 'glm-5.1'),
+    ('GLM-5-Turbo', 'glm-5-turbo'),
+    ('GLM-5', 'glm-5'),
+    ('GLM-4.7', 'glm-4.7'),
+    ('GLM-4.5-Air', 'glm-4.5-air'),
+    ('Pro/zai-org/GLM-5', 'glm-5'),
+    ('zhanlu/glm-4.7', 'glm-4.7'),
+    ('Pro/MiniMaxAI/MiniMax-M2.5', 'MiniMax-M2.5'),
+    ('minimax-m2.5', 'MiniMax-M2.5'),
+    ('minimax-m2.5-highspeed', 'MiniMax-M2.5-highspeed'),
+    ('minimax-m2.7', 'MiniMax-M2.7'),
+    ('minimax-m2.7-highspeed', 'MiniMax-M2.7-highspeed'),
+    ('zhanlu/minimax-2.7', 'MiniMax-M2.7'),
+    ('M-3', 'MiniMax-M3'),
+    ('M-2.7', 'MiniMax-M2.7')
+),
+normalized AS (
+  SELECT
+    event.*,
+    COALESCE(alias_map.canonical_model, event.model) AS model_id
+  FROM usage_events AS event
+  LEFT JOIN alias_map
+    ON alias_map.raw_model = event.model
+)
 INSERT OR IGNORE INTO model_price_backfills (
   event_id, migration_id,
   previous_input_cost, previous_output_cost, previous_reasoning_cost,
@@ -138,9 +240,9 @@ SELECT
   event.input_cost, event.output_cost, event.reasoning_cost,
   event.cache_read_cost, event.cache_write_cost, event.total_cost,
   CAST(strftime('%s', 'now') AS INTEGER) * 1000
-FROM usage_events AS event
+FROM normalized AS event
 JOIN model_price_versions AS price
-  ON price.model_id = event.model
+  ON price.model_id = event.model_id
   AND event.timestamp_ms >= price.valid_from_ms
   AND (price.valid_to_ms IS NULL OR event.timestamp_ms < price.valid_to_ms)
 WHERE event.total_cost = 0
@@ -148,9 +250,37 @@ WHERE event.total_cost = 0
   AND NOT (price.cache_semantics = 'hit_miss' AND event.cache_write_tokens <> 0)
   AND NOT EXISTS (
     SELECT 1 FROM model_prices AS manual
-    WHERE manual.model_id = event.model AND manual.source = 'manual'
+    WHERE manual.model_id = event.model_id AND manual.source = 'manual'
   );
 
+WITH alias_map(raw_model, canonical_model) AS (
+  VALUES
+    ('k2p5', 'kimi-k2.5'),
+    ('kimi-code/kimi-for-coding', 'kimi-k2.5'),
+    ('kimi-for-coding', 'kimi-k2.5'),
+    ('kimi-k2-thinking', 'kimi-k2.5'),
+    ('deepseek-chat', 'deepseek-v4-flash'),
+    ('deepseek-reasoner', 'deepseek-v4-flash'),
+    ('mimo-v2-flash', 'mimo-v2.5'),
+    ('mimo-v2-omni', 'mimo-v2.5'),
+    ('mimo-v2-pro', 'mimo-v2.5-pro'),
+    ('GLM-5.2', 'glm-5.2'),
+    ('GLM-5.1', 'glm-5.1'),
+    ('GLM-5-Turbo', 'glm-5-turbo'),
+    ('GLM-5', 'glm-5'),
+    ('GLM-4.7', 'glm-4.7'),
+    ('GLM-4.5-Air', 'glm-4.5-air'),
+    ('Pro/zai-org/GLM-5', 'glm-5'),
+    ('zhanlu/glm-4.7', 'glm-4.7'),
+    ('Pro/MiniMaxAI/MiniMax-M2.5', 'MiniMax-M2.5'),
+    ('minimax-m2.5', 'MiniMax-M2.5'),
+    ('minimax-m2.5-highspeed', 'MiniMax-M2.5-highspeed'),
+    ('minimax-m2.7', 'MiniMax-M2.7'),
+    ('minimax-m2.7-highspeed', 'MiniMax-M2.7-highspeed'),
+    ('zhanlu/minimax-2.7', 'MiniMax-M2.7'),
+    ('M-3', 'MiniMax-M3'),
+    ('M-2.7', 'MiniMax-M2.7')
+)
 UPDATE usage_events AS event
 SET
   input_cost = (event.input_tokens * price.input_price) / price.per_tokens,
@@ -168,7 +298,7 @@ SET
 FROM model_price_versions AS price, model_price_backfills AS backfill
 WHERE backfill.event_id = event.id
   AND backfill.migration_id = '202608020001_model_price_versions'
-  AND price.model_id = event.model
+  AND price.model_id = COALESCE((SELECT canonical_model FROM alias_map WHERE raw_model = event.model), event.model)
   AND event.timestamp_ms >= price.valid_from_ms
   AND (price.valid_to_ms IS NULL OR event.timestamp_ms < price.valid_to_ms)
   AND event.total_cost = backfill.previous_total_cost;

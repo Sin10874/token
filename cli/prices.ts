@@ -68,6 +68,14 @@ export const OFFICIAL_MODEL_CATALOG_EVIDENCE = {
   claudeModels: 'https://platform.claude.com/docs/en/about-claude/models/overview',
   claudePricing: 'https://platform.claude.com/docs/en/about-claude/pricing',
   claudeReleases: 'https://platform.claude.com/docs/en/release-notes/overview',
+  deepseekPricing: 'https://api-docs.deepseek.com/quick_start/pricing',
+  deepseekReleases: 'https://api-docs.deepseek.com/updates/',
+  mimoPricing: 'https://mimo.mi.com/docs/zh-CN/price/pay-as-you-go',
+  mimoReleases: 'https://mimo.mi.com/docs/zh-CN/news/latest/v2.5-price-update',
+  glmPricing: 'https://bigmodel.cn/pricing',
+  glmReleases: 'https://docs.bigmodel.cn/cn/update/new-releases',
+  minimaxPricing: 'https://platform.minimaxi.com/docs/guides/pricing-paygo',
+  minimaxReleases: 'https://minimaxi.com/models/text/m3',
   kimiK3Pricing: 'https://platform.kimi.ai/docs/pricing/chat-k3.md',
   kimiK27CodePricing: 'https://platform.kimi.ai/docs/pricing/chat-k27-code.md',
   kimiChatPricing: 'https://platform.kimi.ai/docs/pricing/chat',
@@ -75,7 +83,63 @@ export const OFFICIAL_MODEL_CATALOG_EVIDENCE = {
   checkedAt: '2026-08-02',
 } as const
 
+export const MODEL_ID_ALIASES: Record<string, string> = {
+  'k2p5': 'kimi-k2.5',
+  'deepseek-chat': 'deepseek-v4-flash',
+  'deepseek-reasoner': 'deepseek-v4-flash',
+  'kimi-code/kimi-for-coding': 'kimi-k2.5',
+  'kimi-for-coding': 'kimi-k2.5',
+  'kimi-k2-thinking': 'kimi-k2.5',
+  'mimo-v2-flash': 'mimo-v2.5',
+  'mimo-v2-omni': 'mimo-v2.5',
+  'mimo-v2-pro': 'mimo-v2.5-pro',
+  'GLM-5.2': 'glm-5.2',
+  'GLM-5.1': 'glm-5.1',
+  'GLM-5-Turbo': 'glm-5-turbo',
+  'GLM-5': 'glm-5',
+  'GLM-4.7': 'glm-4.7',
+  'GLM-4.5-Air': 'glm-4.5-air',
+  'Pro/zai-org/GLM-5': 'glm-5',
+  'zhanlu/glm-4.7': 'glm-4.7',
+  'Pro/MiniMaxAI/MiniMax-M2.5': 'MiniMax-M2.5',
+  'minimax-m2.5': 'MiniMax-M2.5',
+  'minimax-m2.5-highspeed': 'MiniMax-M2.5-highspeed',
+  'minimax-m2.7': 'MiniMax-M2.7',
+  'minimax-m2.7-highspeed': 'MiniMax-M2.7-highspeed',
+  'zhanlu/minimax-2.7': 'MiniMax-M2.7',
+  'M-3': 'MiniMax-M3',
+  'M-2.7': 'MiniMax-M2.7',
+}
+
 export const OFFICIAL_MODEL_PRICE_VERSIONS: OfficialModelPriceVersion[] = [
+  {
+    modelId: 'deepseek-v4-flash', provider: 'deepseek',
+    validFromMs: Date.parse('2026-04-24T00:00:00.000Z'), validToMs: null,
+    inputPrice: 0.14, outputPrice: 0.28, cacheReadPrice: 0.0028, cacheWritePrice: null,
+    perTokens: 1_000_000, cacheSemantics: 'hit_miss', contextWindow: 1_000_000,
+    sourceUrl: 'https://api-docs.deepseek.com/quick_start/pricing', sourceCheckedAt: '2026-08-02',
+  },
+  {
+    modelId: 'deepseek-v4-pro', provider: 'deepseek',
+    validFromMs: Date.parse('2026-04-24T00:00:00.000Z'), validToMs: null,
+    inputPrice: 0.435, outputPrice: 0.87, cacheReadPrice: 0.003625, cacheWritePrice: null,
+    perTokens: 1_000_000, cacheSemantics: 'hit_miss', contextWindow: 1_000_000,
+    sourceUrl: 'https://api-docs.deepseek.com/quick_start/pricing', sourceCheckedAt: '2026-08-02',
+  },
+  {
+    modelId: 'mimo-v2.5', provider: 'xiaomi',
+    validFromMs: Date.parse('2026-05-27T00:00:00+08:00'), validToMs: null,
+    inputPrice: 0.14, outputPrice: 0.28, cacheReadPrice: 0.0028, cacheWritePrice: null,
+    perTokens: 1_000_000, cacheSemantics: 'hit_miss', contextWindow: 1_000_000,
+    sourceUrl: 'https://mimo.mi.com/docs/zh-CN/price/pay-as-you-go', sourceCheckedAt: '2026-08-02',
+  },
+  {
+    modelId: 'mimo-v2.5-pro', provider: 'xiaomi',
+    validFromMs: Date.parse('2026-05-27T00:00:00+08:00'), validToMs: null,
+    inputPrice: 0.435, outputPrice: 0.87, cacheReadPrice: 0.0036, cacheWritePrice: null,
+    perTokens: 1_000_000, cacheSemantics: 'hit_miss', contextWindow: 1_000_000,
+    sourceUrl: 'https://mimo.mi.com/docs/zh-CN/price/pay-as-you-go', sourceCheckedAt: '2026-08-02',
+  },
   {
     modelId: 'claude-opus-5', provider: 'anthropic',
     validFromMs: Date.parse('2026-07-24T00:00:00.000Z'), validToMs: null,
@@ -142,6 +206,13 @@ const DEFAULT_MODEL_PRICES: Array<[string, string, number, number, number, numbe
   ['kimi-k2.6', 'moonshot', 0.95, 4, 0.16, 0],
   ['kimi-k2.5', 'moonshot', 0.6, 3, 0.1, 0],
   ['kimi-k2-thinking', 'moonshot', 0.6, 2.5, 0.15, 0],
+  ['deepseek-v4-flash', 'deepseek', 0.14, 0.28, 0.0028, 0],
+  ['deepseek-v4-pro', 'deepseek', 0.435, 0.87, 0.003625, 0],
+  ['mimo-v2.5', 'xiaomi', 0.14, 0.28, 0.0028, 0],
+  ['mimo-v2.5-pro', 'xiaomi', 0.435, 0.87, 0.0036, 0],
+  ['MiniMax-M2.5', 'minimax', 0.3, 1.2, 0.03, 0.375],
+  ['MiniMax-M2.5-highspeed', 'minimax', 0.6, 2.4, 0.03, 0.375],
+  ['MiniMax-M2.7-highspeed', 'minimax', 0.6, 2.4, 0.06, 0.375],
   ['glm-5.2', 'zhipu', 1.4, 4.4, 0.26, 0],
   ['glm-5.1', 'zhipu', 1.4, 4.4, 0.26, 0],
   ['glm-5', 'zhipu', 1, 3.2, 0.2, 0],
@@ -158,16 +229,6 @@ const DEFAULT_MODEL_PRICES: Array<[string, string, number, number, number, numbe
 ]
 
 // 注意：alias 优先于精确匹配——有专属价格行的模型不要放进来
-const MODEL_PRICE_ALIASES: Record<string, string> = {
-  'k2p7': 'kimi-k2.7',
-  'k2p6': 'kimi-k2.6',
-  'k2p5': 'kimi-k2.5',
-  'kimi-for-coding': 'kimi-k2.5',
-  'kimi-code/kimi-for-coding': 'kimi-k2.5',
-  'M-3': 'MiniMax-M3',
-  'M-2.7': 'MiniMax-M2.7',
-}
-
 const priceMap = new Map<string, ModelPrice>()
 for (const [modelId, provider, inp, out, cr, cw] of DEFAULT_MODEL_PRICES) {
   priceMap.set(modelId, {
@@ -195,7 +256,7 @@ function resolveBundledPrice(model: string, timestampMs: number): ModelPrice | n
     )) || null
   }
 
-  const canonical = MODEL_PRICE_ALIASES[model] || model
+  const canonical = MODEL_ID_ALIASES[model] || model
   let p = priceMap.get(canonical)
   if (p) return p
   const stripped = canonical.replace(/-\d{8,}$/, '')

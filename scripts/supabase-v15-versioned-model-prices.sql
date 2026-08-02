@@ -110,7 +110,14 @@ VALUES
     1000000
   ),
   ('kimi-k2.7-code', 'moonshot', 0.95, 4, 0.19, 0, 1000000),
-  ('kimi-k3', 'moonshot', 3, 15, 0.3, 0, 1000000)
+  ('kimi-k3', 'moonshot', 3, 15, 0.3, 0, 1000000),
+  ('deepseek-v4-flash', 'deepseek', 0.14, 0.28, 0.0028, 0, 1000000),
+  ('deepseek-v4-pro', 'deepseek', 0.435, 0.87, 0.003625, 0, 1000000),
+  ('mimo-v2.5', 'xiaomi', 0.14, 0.28, 0.0028, 0, 1000000),
+  ('mimo-v2.5-pro', 'xiaomi', 0.435, 0.87, 0.0036, 0, 1000000),
+  ('MiniMax-M2.7-highspeed', 'minimax', 0.6, 2.4, 0.06, 0.375, 1000000),
+  ('MiniMax-M2.5', 'minimax', 0.3, 1.2, 0.03, 0.375, 1000000),
+  ('MiniMax-M2.5-highspeed', 'minimax', 0.6, 2.4, 0.03, 0.375, 1000000)
 ON CONFLICT (model_id) DO UPDATE SET
   provider = EXCLUDED.provider,
   input_price = EXCLUDED.input_price,
@@ -142,27 +149,60 @@ BEGIN
     RETURN json_build_object('ok', false, 'error', 'invalid_token');
   END IF;
 
-  WITH deduped AS (
+  WITH alias_map(raw_model, canonical_model) AS (
+    VALUES
+      ('k2p5', 'kimi-k2.5'),
+      ('kimi-code/kimi-for-coding', 'kimi-k2.5'),
+      ('kimi-for-coding', 'kimi-k2.5'),
+      ('kimi-k2-thinking', 'kimi-k2.5'),
+      ('deepseek-chat', 'deepseek-v4-flash'),
+      ('deepseek-reasoner', 'deepseek-v4-flash'),
+      ('mimo-v2-flash', 'mimo-v2.5'),
+      ('mimo-v2-omni', 'mimo-v2.5'),
+      ('mimo-v2-pro', 'mimo-v2.5-pro'),
+      ('GLM-5.2', 'glm-5.2'),
+      ('GLM-5.1', 'glm-5.1'),
+      ('GLM-5-Turbo', 'glm-5-turbo'),
+      ('GLM-5', 'glm-5'),
+      ('GLM-4.7', 'glm-4.7'),
+      ('GLM-4.5-Air', 'glm-4.5-air'),
+      ('Pro/zai-org/GLM-5', 'glm-5'),
+      ('zhanlu/glm-4.7', 'glm-4.7'),
+      ('Pro/MiniMaxAI/MiniMax-M2.5', 'MiniMax-M2.5'),
+      ('minimax-m2.5', 'MiniMax-M2.5'),
+      ('minimax-m2.5-highspeed', 'MiniMax-M2.5-highspeed'),
+      ('minimax-m2.7', 'MiniMax-M2.7'),
+      ('minimax-m2.7-highspeed', 'MiniMax-M2.7-highspeed'),
+      ('zhanlu/minimax-2.7', 'MiniMax-M2.7'),
+      ('M-3', 'MiniMax-M3'),
+      ('M-2.7', 'MiniMax-M2.7')
+  ),
+  deduped AS (
     SELECT DISTINCT ON (x->>'id') x
     FROM jsonb_array_elements(p_events) AS x
     ORDER BY x->>'id'
   ),
+  normalized AS (
+    SELECT d.x, COALESCE(alias_map.canonical_model, d.x->>'model') AS model_id
+    FROM deduped d
+    LEFT JOIN alias_map ON alias_map.raw_model = d.x->>'model'
+  ),
   enriched AS (
-    SELECT d.x,
-      (COALESCE((d.x->>'totalCost')::REAL, 0) = 0
-        AND COALESCE((d.x->>'totalTokens')::INTEGER, 0) > 0
+    SELECT n.x, n.model_id,
+      (COALESCE((n.x->>'totalCost')::REAL, 0) = 0
+        AND COALESCE((n.x->>'totalTokens')::INTEGER, 0) > 0
         AND price.model_id IS NOT NULL
         AND NOT (
           price.cache_semantics = 'hit_miss'
-          AND COALESCE((d.x->>'cacheWriteTokens')::INTEGER, 0) <> 0
+          AND COALESCE((n.x->>'cacheWriteTokens')::INTEGER, 0) <> 0
         )
         AND NOT (
           price.cache_write_price IS NULL
-          AND COALESCE((d.x->>'cacheWriteTokens')::INTEGER, 0) <> 0
+          AND COALESCE((n.x->>'cacheWriteTokens')::INTEGER, 0) <> 0
         )) AS reprice,
       price.input_price, price.output_price, price.cache_read_price,
       price.cache_write_price, price.per_tokens
-    FROM deduped d
+    FROM normalized n
     LEFT JOIN LATERAL (
       SELECT resolved.*
       FROM (
@@ -171,10 +211,10 @@ BEGIN
           version.cache_read_price, version.cache_write_price,
           version.per_tokens, version.cache_semantics, 0 AS priority
         FROM tokend_model_price_versions AS version
-        WHERE version.model_id = d.x->>'model'
-          AND COALESCE((d.x->>'timestampMs')::BIGINT, 0) >= version.valid_from_ms
+        WHERE version.model_id = n.model_id
+          AND COALESCE((n.x->>'timestampMs')::BIGINT, 0) >= version.valid_from_ms
           AND (version.valid_to_ms IS NULL
-            OR COALESCE((d.x->>'timestampMs')::BIGINT, 0) < version.valid_to_ms)
+            OR COALESCE((n.x->>'timestampMs')::BIGINT, 0) < version.valid_to_ms)
 
         UNION ALL
 
@@ -187,16 +227,16 @@ BEGIN
         FROM tokend_model_prices AS flat
         WHERE NOT EXISTS (
             SELECT 1 FROM tokend_model_price_versions AS known
-            WHERE known.model_id = d.x->>'model'
+            WHERE known.model_id = n.model_id
           )
           AND (
-            flat.model_id = d.x->>'model'
+            flat.model_id = n.model_id
             OR (
-              d.x->>'model' ~ '-\d{8,}$'
-              AND flat.model_id = regexp_replace(d.x->>'model', '-\d{8,}$', '')
+              n.model_id ~ '-\d{8,}$'
+              AND flat.model_id = regexp_replace(n.model_id, '-\d{8,}$', '')
               AND NOT EXISTS (
                 SELECT 1 FROM tokend_model_price_versions AS canonical
-                WHERE canonical.model_id = regexp_replace(d.x->>'model', '-\d{8,}$', '')
+                WHERE canonical.model_id = regexp_replace(n.model_id, '-\d{8,}$', '')
               )
             )
           )
@@ -223,7 +263,7 @@ BEGIN
       LEFT(d.x->>'sessionKey', 512),
       LEFT(d.x->>'agent', 512),
       LEFT(d.x->>'provider', 512),
-      LEFT(d.x->>'model', 512),
+      LEFT(d.model_id, 512),
       LEFT(COALESCE(d.x->>'channel', 'unknown'), 512),
       COALESCE((d.x->>'inputTokens')::INTEGER, 0),
       COALESCE((d.x->>'outputTokens')::INTEGER, 0),
@@ -298,7 +338,35 @@ AS $$
 DECLARE
   v_repriced INTEGER;
 BEGIN
-  WITH candidates AS (
+  WITH alias_map(raw_model, canonical_model) AS (
+    VALUES
+      ('k2p5', 'kimi-k2.5'),
+      ('kimi-code/kimi-for-coding', 'kimi-k2.5'),
+      ('kimi-for-coding', 'kimi-k2.5'),
+      ('kimi-k2-thinking', 'kimi-k2.5'),
+      ('deepseek-chat', 'deepseek-v4-flash'),
+      ('deepseek-reasoner', 'deepseek-v4-flash'),
+      ('mimo-v2-flash', 'mimo-v2.5'),
+      ('mimo-v2-omni', 'mimo-v2.5'),
+      ('mimo-v2-pro', 'mimo-v2.5-pro'),
+      ('GLM-5.2', 'glm-5.2'),
+      ('GLM-5.1', 'glm-5.1'),
+      ('GLM-5-Turbo', 'glm-5-turbo'),
+      ('GLM-5', 'glm-5'),
+      ('GLM-4.7', 'glm-4.7'),
+      ('GLM-4.5-Air', 'glm-4.5-air'),
+      ('Pro/zai-org/GLM-5', 'glm-5'),
+      ('zhanlu/glm-4.7', 'glm-4.7'),
+      ('Pro/MiniMaxAI/MiniMax-M2.5', 'MiniMax-M2.5'),
+      ('minimax-m2.5', 'MiniMax-M2.5'),
+      ('minimax-m2.5-highspeed', 'MiniMax-M2.5-highspeed'),
+      ('minimax-m2.7', 'MiniMax-M2.7'),
+      ('minimax-m2.7-highspeed', 'MiniMax-M2.7-highspeed'),
+      ('zhanlu/minimax-2.7', 'MiniMax-M2.7'),
+      ('M-3', 'MiniMax-M3'),
+      ('M-2.7', 'MiniMax-M2.7')
+  ),
+  candidates AS (
     SELECT
       event.id,
       event.member_code,
@@ -314,8 +382,9 @@ BEGIN
       event.cache_read_tokens * price.cache_read_price / price.per_tokens AS next_cache_read_cost,
       event.cache_write_tokens * COALESCE(price.cache_write_price, 0) / price.per_tokens AS next_cache_write_cost
     FROM tokend_usage_events AS event
+    LEFT JOIN alias_map ON alias_map.raw_model = event.model
     JOIN tokend_model_price_versions AS price
-      ON price.model_id = event.model
+      ON price.model_id = COALESCE(alias_map.canonical_model, event.model)
       AND event.timestamp_ms >= price.valid_from_ms
       AND (price.valid_to_ms IS NULL OR event.timestamp_ms < price.valid_to_ms)
     WHERE event.total_cost = 0

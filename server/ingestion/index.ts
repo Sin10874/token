@@ -14,6 +14,7 @@ import { parseOpencodeFile } from './opencode-parser.js'
 import { rebuildSessionsFromUsage, upsertSessionSnapshot } from './session-upsert.js'
 import {
   buildModelPriceResolver,
+  MODEL_ID_ALIASES,
   priceUsageEvent,
   type FlatModelPriceRow,
   type PriceableUsageEvent,
@@ -44,14 +45,7 @@ export function resolveStartLine(
 
 // 兼容 2.4.0 基线测试中的既有渠道别名。
 export function resolvePricedModelId(model: string): string {
-  const aliases: Record<string, string> = {
-    k2p5: 'kimi-k2.5',
-    'kimi-code/kimi-for-coding': 'kimi-k2.5',
-    'kimi-for-coding': 'kimi-k2.5',
-    'kimi-k2-thinking': 'kimi-k2.5',
-    'M-2.7': 'MiniMax-M2.7',
-  }
-  return aliases[model] || model
+  return MODEL_ID_ALIASES[model] || model
 }
 
 export function resetDerivedUsageData(targetDb: { exec(sql: string): void; prepare(sql: string): { get(...params: unknown[]): unknown } }) {

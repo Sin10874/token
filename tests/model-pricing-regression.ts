@@ -58,6 +58,14 @@ assert.deepEqual(OFFICIAL_MODEL_CATALOG_EVIDENCE, {
   claudeModels: 'https://platform.claude.com/docs/en/about-claude/models/overview',
   claudePricing: 'https://platform.claude.com/docs/en/about-claude/pricing',
   claudeReleases: 'https://platform.claude.com/docs/en/release-notes/overview',
+  deepseekPricing: 'https://api-docs.deepseek.com/quick_start/pricing',
+  deepseekReleases: 'https://api-docs.deepseek.com/updates/',
+  mimoPricing: 'https://mimo.mi.com/docs/zh-CN/price/pay-as-you-go',
+  mimoReleases: 'https://mimo.mi.com/docs/zh-CN/news/latest/v2.5-price-update',
+  glmPricing: 'https://bigmodel.cn/pricing',
+  glmReleases: 'https://docs.bigmodel.cn/cn/update/new-releases',
+  minimaxPricing: 'https://platform.minimaxi.com/docs/guides/pricing-paygo',
+  minimaxReleases: 'https://minimaxi.com/models/text/m3',
   kimiK3Pricing: 'https://platform.kimi.ai/docs/pricing/chat-k3.md',
   kimiK27CodePricing: 'https://platform.kimi.ai/docs/pricing/chat-k27-code.md',
   kimiChatPricing: 'https://platform.kimi.ai/docs/pricing/chat',
@@ -80,6 +88,10 @@ assert.deepEqual(
     row.sourceCheckedAt,
   ]),
   [
+    ['deepseek-v4-flash', 1776988800000, null, 0.14, 0.28, 0.0028, null, 'hit_miss', 1_000_000, 'https://api-docs.deepseek.com/quick_start/pricing', '2026-08-02'],
+    ['deepseek-v4-pro', 1776988800000, null, 0.435, 0.87, 0.003625, null, 'hit_miss', 1_000_000, 'https://api-docs.deepseek.com/quick_start/pricing', '2026-08-02'],
+    ['mimo-v2.5', 1779811200000, null, 0.14, 0.28, 0.0028, null, 'hit_miss', 1_000_000, 'https://mimo.mi.com/docs/zh-CN/price/pay-as-you-go', '2026-08-02'],
+    ['mimo-v2.5-pro', 1779811200000, null, 0.435, 0.87, 0.0036, null, 'hit_miss', 1_000_000, 'https://mimo.mi.com/docs/zh-CN/price/pay-as-you-go', '2026-08-02'],
     ['claude-opus-5', 1784851200000, null, 5, 25, 0.5, 6.25, 'anthropic', 1_000_000, 'https://platform.claude.com/docs/en/about-claude/pricing', '2026-08-02'],
     ['claude-sonnet-5', 1782777600000, 1788220800000, 2, 10, 0.2, 2.5, 'anthropic', 1_000_000, 'https://platform.claude.com/docs/en/about-claude/pricing', '2026-08-02'],
     ['claude-sonnet-5', 1788220800000, null, 3, 15, 0.3, 3.75, 'anthropic', 1_000_000, 'https://platform.claude.com/docs/en/about-claude/pricing', '2026-08-02'],
@@ -129,9 +141,50 @@ for (const [model, expected] of [
   )
 }
 
+for (const [model, expected] of [
+  ['deepseek-v4-flash', [0.14, 0.28, 0.28, 0.0028, 0, 0.7028]],
+  ['deepseek-v4-pro', [0.435, 0.87, 0.87, 0.003625, 0, 2.178625]],
+  ['mimo-v2.5', [0.14, 0.28, 0.28, 0.0028, 0, 0.7028]],
+  ['mimo-v2.5-pro', [0.435, 0.87, 0.87, 0.0036, 0, 2.1786]],
+] as const) {
+  const priced = event({ provider: model.startsWith('deepseek') ? 'deepseek' : 'xiaomi', model, cacheWriteTokens: 0, totalTokens: 4_000_000 })
+  assert.equal(applyEstimatedCosts(priced), 'priced')
+  assertCosts(
+    [priced.inputCost, priced.outputCost, priced.reasoningCost, priced.cacheReadCost, priced.cacheWriteCost, priced.totalCost],
+    expected,
+  )
+
+  const ambiguous = event({
+    provider: model.startsWith('deepseek') ? 'deepseek' : 'xiaomi',
+    model,
+    cacheWriteTokens: 1,
+    totalTokens: 4_000_001,
+  })
+  assert.equal(applyEstimatedCosts(ambiguous), 'unpriced')
+  assert.deepEqual(
+    [ambiguous.inputCost, ambiguous.outputCost, ambiguous.reasoningCost, ambiguous.cacheReadCost, ambiguous.cacheWriteCost, ambiguous.totalCost],
+    [0, 0, 0, 0, 0, 0],
+  )
+}
+
+for (const [alias, canonical] of [
+  ['GLM-5.2', 'glm-5.2'],
+  ['Pro/zai-org/GLM-5', 'glm-5'],
+  ['zhanlu/glm-4.7', 'glm-4.7'],
+  ['minimax-m2.5', 'MiniMax-M2.5'],
+  ['minimax-m2.7-highspeed', 'MiniMax-M2.7-highspeed'],
+] as const) {
+  const aliased = event({ provider: alias.includes('GLM') ? 'zhipu' : 'minimax', model: alias, cacheWriteTokens: 0, totalTokens: 4_000_000 })
+  const resolved = event({ provider: alias.includes('GLM') ? 'zhipu' : 'minimax', model: canonical, cacheWriteTokens: 0, totalTokens: 4_000_000 })
+  assert.equal(applyEstimatedCosts(aliased), 'priced', alias)
+  assert.equal(applyEstimatedCosts(resolved), 'priced', canonical)
+  assert.equal(aliased.totalCost, resolved.totalCost)
+}
+
 for (const model of [
   'anthropic/claude-opus-5',
   'vendor-claude-opus-5',
+  'deepseek/deepseek-v4-flash',
   'moonshot/kimi-k3',
   'kimi-k3-highspeed',
   'kimi-k2.7-code-highspeed',
@@ -259,7 +312,19 @@ assert.deepEqual(
 db.close()
 
 const supabaseMigration = fs.readFileSync(supabaseMigrationPath, 'utf8')
-for (const modelId of ['claude-opus-5', 'claude-sonnet-5', 'kimi-k2.7-code', 'kimi-k3']) {
+for (const modelId of [
+  'claude-opus-5',
+  'claude-sonnet-5',
+  'kimi-k2.7-code',
+  'kimi-k3',
+  'deepseek-v4-flash',
+  'deepseek-v4-pro',
+  'mimo-v2.5',
+  'mimo-v2.5-pro',
+  'MiniMax-M2.7-highspeed',
+  'MiniMax-M2.5',
+  'MiniMax-M2.5-highspeed',
+]) {
   assert.match(supabaseMigration, new RegExp(`'${modelId.replace('.', '\\.')}'`))
 }
 assert.match(supabaseMigration, /timestamp_ms\s*>?=\s*price\.valid_from_ms/i)
@@ -268,10 +333,13 @@ assert.match(supabaseMigration, /cache_semantics\s*=\s*'hit_miss'/i)
 assert.match(supabaseMigration, /cache_write_tokens\s*<>\s*0/i)
 assert.match(supabaseMigration, /totalCost'\)::REAL, 0\) = 0/i)
 assert.match(supabaseMigration, /LEFT\(d\.x->>'project', 256\)/)
+assert.match(supabaseMigration, /COALESCE\(alias_map\.canonical_model, d\.x->>'model'\) AS model_id/i)
+assert.match(supabaseMigration, /LEFT\(d\.model_id, 512\)/)
 assert.match(supabaseMigration, /ON CONFLICT \(id, member_code\) DO UPDATE/i)
 assert.match(supabaseMigration, /reasoningTokens'\)::INTEGER, 0\) \* d\.output_price/i)
-assert.match(supabaseMigration, /known\.model_id = d\.x->>'model'/i)
-assert.match(supabaseMigration, /version\.model_id = d\.x->>'model'/i)
+assert.match(supabaseMigration, /known\.model_id = n\.model_id/i)
+assert.match(supabaseMigration, /version\.model_id = n\.model_id/i)
+assert.match(supabaseMigration, /price\.model_id = COALESCE\(alias_map\.canonical_model, event\.model\)/i)
 
 const cliSync = fs.readFileSync(cliSyncPath, 'utf8')
 assert.ok(cliSync.indexOf('applyEstimatedCosts(event)') < cliSync.indexOf('allEvents.push(stripEvent(event, project))'))

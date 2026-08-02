@@ -1,9 +1,7 @@
 {
-  "version": "2.3.0",
+  "version": "2.4.0",
   "coreFeatures": [
-    "价格表全面更新：新增 Claude Fable 5 / Opus 4.8 / 4.7、GPT-5.5 / Codex 系列、Gemini 3 Pro、Kimi K2.6、GLM-5 / 5.1、MiniMax M3 等",
-    "云端兜底计价：旧版本 CLI 上传的零成本数据由服务端自动按价格表补算",
-    "历史零成本数据一次性回填修复（服务端执行，用户无需操作）",
-    "修复 OpenCode / Gemini CLI / Copilot CLI 渠道成本缺失问题"
+    "后台同步 daemon 自升级：全局安装 wrapper 每日更新，兼容 macOS launchd、Linux cron、nvm 与自定义 npm prefix。",
+    "摘要性能修复：summary_v4 减少重复扫描并使用临时物化，降低 7 天与 30 天汇总查询超时风险。"
   ]
 }

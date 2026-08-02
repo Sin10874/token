@@ -37,16 +37,17 @@
 <body>
 <main>
   <h1>Tokend 新模型窄回迁</h1>
-  <p class="lede">从最新 <code>origin/main</code> 单独分支，只迁回生产需要的模型、事件时间定价与可逆 SQLite 迁移。未合并旧定价链，未写生产、未部署。</p>
+  <p class="lede">从 GitHub <code>origin/main@b046f384</code> 单独分支，只迁回模型、事件时间定价与可逆 SQLite 迁移。后续核验发现真实本地运行线为 <code>main@9607a595</code>，比远端领先 11 commits；因此本 PR 仅保留为远端旧基线参考，禁止作为发布候选。未合并、未写生产、未部署。</p>
 
   <section class="status">
     <div><small>分支</small><code>codex/tokend-model-main-20260802</code></div>
     <div><small>base / merge-base</small><code>b046f384319f</code></div>
     <div><small>旧链隔离</small><span class="ok">main 后 53 commits 未带入</span></div>
-    <div><small>发布状态</small><span class="warn">PR 待审 · 未 merge / deploy</span></div>
+    <div><small>发布状态</small><span class="bad">旧基线参考 · 禁止 merge / deploy</span></div>
   </section>
 
   <h2>结论</h2>
+  <div class="callout"><strong>发布门已停止。</strong>本报告中的实现与验证只证明 GitHub 旧 main 上的设计参考，不证明其可直接进入真实本地运行线。真实发布候选必须从 <code>9607a595</code> 新建分支重新适配并验证。</div>
   <p>Main 的 <code>model_prices</code> 以 <code>model_id</code> 为单主键，只能保存一个现价，无法安全表达 Sonnet 5 的两段价格。此次保留旧表作为 UI 与手动 fallback，新增 <code>model_price_versions</code>，按事件毫秒时间选择 <code>[valid_from, valid_to)</code> 区间。API、服务启动与 <code>npm run ingest</code> 共用同一 <code>runIngestion</code> 与 resolver。</p>
 
   <div class="flow">
@@ -140,13 +141,23 @@
       <tr><td>专项 + ingestion</td><td class="ok">GREEN</td><td>定价 27 cases；ingestion 7 cases，共 34。</td></tr>
       <tr><td>TypeScript</td><td class="ok">GREEN</td><td><code>npx tsc --noEmit</code>。</td></tr>
       <tr><td>生产 build</td><td class="ok">GREEN</td><td>2386 modules；保留 main 已有的 chunk-size warning。</td></tr>
-      <tr><td>npm pack dry-run</td><td class="ok">GREEN</td><td>58 files；74,967 bytes。使用隔离临时 cache，未修改用户 npm cache。</td></tr>
+      <tr><td>npm pack dry-run</td><td class="ok">GREEN</td><td>58 files。使用隔离临时 cache，未修改用户 npm cache。</td></tr>
       <tr><td>真实 schema 副本</td><td class="ok">GREEN</td><td>迁移两次得到 5 version / 4 flat；回滚后新增表 0。原库未写。</td></tr>
-      <tr><td>npm audit</td><td class="warn">基线阻断未扩大</td><td>main 原有 15：1 critical / 7 high / 6 moderate / 1 low；本 PR 未改依赖。</td></tr>
+      <tr><td>npm audit fix</td><td class="ok">非 force 完成</td><td>仅 <code>package-lock.json</code>：34 个传递依赖在既有 semver 范围内更新；根依赖声明与业务代码未变。<code>shell-quote 1.8.3 → 1.10.0</code>，critical 清零；Vite 保持 5.4.21，React Router 保持 6.30.4。</td></tr>
+      <tr><td>npm audit</td><td class="warn">4 项残余</td><td>0 critical / 1 high / 3 moderate / 0 low。<code>--omit=dev</code> 为 2 moderate，均属 React Router 生产依赖；未误报为 0。</td></tr>
     </tbody>
   </table>
 
-  <h2>安全上线顺序</h2>
+  <h2>依赖安全结论</h2>
+  <table>
+    <thead><tr><th>依赖</th><th>环境 / 可达面</th><th>处置</th></tr></thead>
+    <tbody>
+      <tr><td><code>vite@5.4.21</code><br><code>esbuild@0.21.5 / 0.27.4</code></td><td>仅 dev / build。Vite 开发服务固定监听 <code>127.0.0.1</code>；Windows 路径类问题不在当前 macOS 运行面，但开发机若对外暴露 dev server 仍有风险。</td><td class="warn">完整修复要求 Vite 8.2.0 大版本；本 follow-up 禁止大版本，保留 1 high + 1 moderate。</td></tr>
+      <tr><td><code>react-router-dom@6.30.4</code><br><code>react-router@6.30.4</code></td><td>prod 客户端依赖。项目使用 <code>BrowserRouter</code>、<code>Link</code>、<code>useNavigate</code>，但当前目标均为静态内部路径或带固定内部前缀的编码 ID；未发现把不可信完整 URL 直接传入导航。项目没有 SSR hydration，<code>deserializeErrors()</code> 路径不可达。</td><td class="warn">完整修复要求 React Router ≥7.18.0 大版本；保留 2 moderate，需独立升级与路由回归。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>原设计上线顺序（当前不得执行）</h2>
   <ol>
     <li>再次确认 PR base 为最新 main；停止写入并用 SQLite <code>.backup</code> 生成可恢复备份。</li>
     <li>部署后端代码；启动时自动执行幂等 schema / catalog / backfill。</li>
@@ -157,10 +168,11 @@
 
   <h2>残余风险</h2>
   <ul>
+    <li>真实本地 <code>main@9607a595</code> 比 GitHub <code>origin/main@b046f384</code> 领先 11 commits；本 PR 的 schema、CLI 与部署假设已过期，禁止 merge / deploy。</li>
     <li>Main 没有 Supabase schema；本 PR 仅适用于仓库实际的本地 SQLite 生产路径，不声称完成云数据库发布。</li>
     <li>OpenCode parser 的 reasoning token 语义在 main 中未进入成本字段；本 PR 不扩展该旧链，相关事件保持原行为。</li>
     <li>生产只读库当前没有四个 canonical 新模型事件；真实事件到达后的端到端运行证据仍是发布后 smoke gate。</li>
-    <li>依赖审计 15 项为 main 既有发布门，需独立依赖升级 PR；本窄回迁不使用 <code>--force</code>。</li>
+    <li>非 force 更新后仍有 4 项：Vite / esbuild 为 dev-build 面，React Router 为 prod 客户端面；均需大版本升级才能完整清除，本窄 follow-up 未越界。</li>
   </ul>
 
   <p class="meta">生成于 2026-08-02。报告不含 secret、token、PII、原始日志或生产 payload。</p>

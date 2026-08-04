@@ -1,7 +1,7 @@
 {
-  "version": "2.4.0",
+  "version": "2.4.1",
   "coreFeatures": [
-    "后台同步 daemon 自升级：全局安装 wrapper 每日更新，兼容 macOS launchd、Linux cron、nvm 与自定义 npm prefix。",
-    "摘要性能修复：summary_v4 减少重复扫描并使用临时物化，降低 7 天与 30 天汇总查询超时风险。"
+    "云端同步超时恢复：事件上传默认使用 500 条小批次，遇到 PostgreSQL statement timeout 时只拆分当前批次并安全重试。",
+    "同步状态一致性：仅在最后一个成功子批次提交同步游标，其他权限、网络和应用错误保持立即失败。"
   ]
 }

@@ -21,7 +21,8 @@ import { parseQwenCodeFile } from '../server/ingestion/qwen-code-parser.js'
 import { discoverHermesSource } from '../server/ingestion/hermes-scanner.js'
 import { HermesImportedTotals, parseHermesSession } from '../server/ingestion/hermes-parser.js'
 
-const BATCH_SIZE = 2000
+const EVENT_BATCH_SIZE = 500
+const MESSAGE_BATCH_SIZE = 2000
 
 const PARSER_VERSIONS: Record<string, number> = {
   openclaw: 1, claudeCode: 1, codex: 2,
@@ -40,6 +41,53 @@ interface SyncState {
   sourcePathHash: string
   lastProcessedLines: number
   parserVersion: number
+}
+
+interface UploadError {
+  code?: string
+  message: string
+}
+
+interface UploadResult {
+  data: { inserted?: number } | null
+  error: UploadError | null
+}
+
+type UploadEvents = (
+  events: Record<string, unknown>[],
+  syncStates: SyncState[],
+) => Promise<UploadResult>
+
+function isStatementTimeout(error: UploadError): boolean {
+  return error.message.toLowerCase().includes('canceling statement due to statement timeout')
+}
+
+export async function uploadEventBatches(
+  events: Record<string, unknown>[],
+  syncStates: SyncState[],
+  upload: UploadEvents,
+): Promise<number> {
+  async function uploadBatch(batch: Record<string, unknown>[], finalSyncStates: SyncState[]): Promise<number> {
+    const { data, error } = await upload(batch, finalSyncStates)
+    if (!error) return data?.inserted || 0
+
+    if (isStatementTimeout(error) && batch.length > 1) {
+      const midpoint = Math.ceil(batch.length / 2)
+      const leftInserted = await uploadBatch(batch.slice(0, midpoint), [])
+      const rightInserted = await uploadBatch(batch.slice(midpoint), finalSyncStates)
+      return leftInserted + rightInserted
+    }
+
+    throw new Error(`Upload failed: ${error.message}`)
+  }
+
+  let inserted = 0
+  for (let i = 0; i < events.length; i += EVENT_BATCH_SIZE) {
+    const batch = events.slice(i, i + EVENT_BATCH_SIZE)
+    const isLast = i + EVENT_BATCH_SIZE >= events.length
+    inserted += await uploadBatch(batch, isLast ? syncStates : [])
+  }
+  return inserted
 }
 
 interface HermesRemoteTotalsRow extends HermesImportedTotals {
@@ -270,17 +318,14 @@ export async function runCloudSync(token: string): Promise<SyncStats> {
 
   // 3. Upload in batches
   if (allEvents.length > 0) {
-    for (let i = 0; i < allEvents.length; i += BATCH_SIZE) {
-      const batch = allEvents.slice(i, i + BATCH_SIZE)
-      const isLast = i + BATCH_SIZE >= allEvents.length
+    stats.eventsInserted += await uploadEventBatches(allEvents, allSyncStates, async (events, syncStates) => {
       const { data, error } = await supabase.rpc('tokend_upload_events', {
         p_token: token,
-        p_events: batch,
-        p_sync_states: isLast ? allSyncStates : [],
+        p_events: events,
+        p_sync_states: syncStates,
       })
-      if (error) throw new Error(`Upload failed: ${error.message}`)
-      stats.eventsInserted += data?.inserted || 0
-    }
+      return { data, error }
+    })
   } else if (allSyncStates.length > 0) {
     // No new events but still update sync states
     await supabase.rpc('tokend_upload_events', {
@@ -292,8 +337,8 @@ export async function runCloudSync(token: string): Promise<SyncStats> {
 
   // 3b. Upload message events in batches
   if (allMessages.length > 0) {
-    for (let i = 0; i < allMessages.length; i += BATCH_SIZE) {
-      const batch = allMessages.slice(i, i + BATCH_SIZE)
+    for (let i = 0; i < allMessages.length; i += MESSAGE_BATCH_SIZE) {
+      const batch = allMessages.slice(i, i + MESSAGE_BATCH_SIZE)
       try {
         await supabase.rpc('tokend_upload_messages', {
           p_token: token,

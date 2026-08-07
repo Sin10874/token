@@ -1,12 +1,13 @@
 #!/usr/bin/env npx tsx
 
 import { createInterface } from 'node:readline'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { supabase } from './supabase-client.js'
 import { runCloudSync } from './sync.js'
 import { installDaemon, uninstallDaemon, daemonStatus, shouldAutoInstallDaemon } from './daemon.js'
+import { resolveSessionToken, type TokenIdentity } from './auth.js'
 
 const CONFIG_DIR = join(homedir(), '.tokend')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
@@ -27,6 +28,14 @@ function saveConfig(token: string) {
   writeFileSync(CONFIG_FILE, JSON.stringify({ token, activatedAt: new Date().toISOString() }, null, 2))
 }
 
+function clearConfig() {
+  try {
+    rmSync(CONFIG_FILE)
+  } catch {
+    // 不存在或不可删都按未绑定处理
+  }
+}
+
 function prompt(question: string): Promise<string> {
   const rl = createInterface({ input: process.stdin, output: process.stdout })
   return new Promise((resolve) => {
@@ -37,9 +46,16 @@ function prompt(question: string): Promise<string> {
   })
 }
 
+async function validateToken(token: string): Promise<TokenIdentity> {
+  const { data, error } = await supabase.rpc('tokend_validate_token', { p_token: token })
+  if (error) throw new Error(error.message)
+  return data as TokenIdentity
+}
+
 async function main() {
   const cmd = process.argv[2]
   const quiet = cmd === '--quiet' || process.argv.includes('--quiet')
+  const reauth = cmd === '--reauth' || process.argv.includes('--reauth')
 
   // Daemon subcommand
   if (cmd === 'daemon') {
@@ -50,36 +66,28 @@ async function main() {
     return
   }
 
-  // Read or prompt for token
-  let config = readConfig()
-
-  if (!config?.token) {
-    console.log('\n  Tokend — AI 编程成本监控\n')
-    console.log('  请先在 https://ai798lab.com/tokend 获取 Token\n')
-    const token = await prompt('  请输入激活 Token: ')
-
-    if (!token || !token.startsWith('tkd_')) {
-      console.error('\n  Token 无效。Token 应以 "tkd_" 开头。\n')
-      process.exit(1)
-    }
-
-    // Validate against Supabase
-    const { data } = await supabase.rpc('tokend_validate_token', { p_token: token })
-    if (!data?.ok) {
-      console.error('\n  Token 无效，请检查后重试。\n')
-      process.exit(1)
-    }
-
-    saveConfig(token)
-    console.log(`\n  ✓ 验证成功 (${data.member_code})\n`)
-    config = { token }
-  }
+  // 激活/身份解析：--reauth 换绑；已有 token 每次校验并打印绑定身份；
+  // token 失效时交互环境自动重新激活，--quiet（daemon）给换绑指引退出
+  const session = await resolveSessionToken(
+    { reauth, quiet },
+    {
+      readConfig,
+      saveConfig,
+      clearConfig,
+      validate: validateToken,
+      prompt,
+      isInteractive: Boolean(process.stdin.isTTY),
+      log: (msg) => console.log(msg),
+      error: (msg) => console.error(msg),
+    },
+  )
+  if (session.kind === 'exit') process.exit(session.code)
 
   // Run sync
   if (!quiet) console.log('  正在同步数据...\n')
 
   try {
-    const stats = await runCloudSync(config.token!)
+    const stats = await runCloudSync(session.token)
 
     if (!quiet) {
       console.log(`  ✓ 同步完成`)

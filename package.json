@@ -1,6 +1,6 @@
 {
   "name": "tokend-cli",
-  "version": "2.4.1",
+  "version": "2.4.2",
   "description": "AI 编程成本监控 — 扫描本地日志，同步至云端面板",
   "bin": {
     "tokend-cli": "cli/bin.js"
@@ -21,8 +21,9 @@
     "test:model-pricing": "node --import tsx tests/model-pricing-regression.ts",
     "test:ingestion": "node --import tsx tests/ingestion-regression.ts",
     "test:cloud-sync-upload": "node --import tsx tests/cloud-sync-upload-regression.ts",
+    "test:cli-auth-flow": "node --import tsx tests/cli-auth-flow-regression.ts",
     "test:postgres-v15": "bash scripts/test-v15-postgres-contract.sh",
-    "test": "npm run test:ingestion && npm run test:model-pricing && npm run test:cloud-sync-upload",
+    "test": "npm run test:ingestion && npm run test:model-pricing && npm run test:cloud-sync-upload && npm run test:cli-auth-flow",
     "setup-hooks": "git config core.hooksPath .githooks",
     "update-version-record": "node scripts/update-version-record.mjs"
   },
